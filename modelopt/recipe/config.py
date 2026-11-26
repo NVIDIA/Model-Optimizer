@@ -15,17 +15,21 @@
 
 """ModelOpt's pydantic BaseModel for recipes."""
 
-from __future__ import annotations
-
 import warnings
-from enum import Enum
-from typing import Any, ClassVar, Literal
+from enum import StrEnum
+from typing import Any, ClassVar, Literal, Self
 
 from pydantic import Field, field_validator, model_validator
 
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
-from modelopt.torch.quantization.config import QuantizeConfig  # noqa: TC001
-from modelopt.torch.speculative.config import DFlashConfig, EagleConfig, MedusaConfig
+from modelopt.torch.quantization.config import QuantizeAlgoCfgType, QuantizeConfig
+from modelopt.torch.quantization.mode import CalibrateModeRegistry, get_modelike_from_algo_cfg
+from modelopt.torch.speculative.config import (
+    DFlashConfig,
+    EagleConfig,
+    ExternalDraftConfig,
+    MedusaConfig,
+)
 from modelopt.torch.speculative.plugins.hf_training_args import DataArguments as SpecDataArgs
 from modelopt.torch.speculative.plugins.hf_training_args import ModelArguments as SpecModelArgs
 from modelopt.torch.speculative.plugins.hf_training_args import (
@@ -50,7 +54,7 @@ __all__ = [
 ]
 
 
-class RecipeType(str, Enum):
+class RecipeType(StrEnum):
     """List of recipe types. See ``RECIPE_TYPE_TO_CLASS`` at the bottom for the schema mapping."""
 
     PTQ = "ptq"
@@ -58,6 +62,7 @@ class RecipeType(str, Enum):
     SPECULATIVE_EAGLE = "speculative_eagle"
     SPECULATIVE_DFLASH = "speculative_dflash"
     SPECULATIVE_MEDUSA = "speculative_medusa"
+    SPECULATIVE_EXTERNAL = "speculative_external"
     # QAT = "qat" # Not implemented yet, will be added in the future.
 
 
@@ -318,6 +323,29 @@ class AutoQuantizeConfig(ModeloptBaseConfig):
         description="QuantizeConfig applied as a uniform post-step; falls back to "
         "the --kv_cache_qformat CLI flag when omitted.",
     )
+    finalize_algorithm: QuantizeAlgoCfgType = ModeloptField(
+        default=None,
+        title="Calibration of the frozen assignment (optional)",
+        description="If set, the search only scores and saves its checkpoint; a run that finds "
+        "the scores in the checkpoint re-solves for the constraints and quantizes the source "
+        "weights with the selected per-layer formats and this algorithm. Use it for layerwise "
+        "algorithms such as sequential GPTQ, whose result for a layer depends on the formats "
+        "chosen for earlier layers; candidates are searched with their own (e.g. local) "
+        "algorithms.",
+    )
+
+    @field_validator("finalize_algorithm")
+    @classmethod
+    def _validate_finalize_algorithm(cls, v):
+        # Each calibration's own schema, so a typo fails at load rather than after the search.
+        for mode, options in get_modelike_from_algo_cfg(v) if v is not None else []:
+            algorithm = CalibrateModeRegistry[mode].config_class.model_validate(options)
+            if getattr(getattr(algorithm, "layerwise", None), "export_dir", None) is not None:
+                raise ValueError(
+                    "finalize_algorithm cannot set layerwise.export_dir: the AutoQuantize "
+                    "recipe exports after finalizing."
+                )
+        return v
 
     @property
     def uses_predicted_damage_target(self) -> bool:
@@ -341,6 +369,14 @@ class AutoQuantizeConfig(ModeloptBaseConfig):
             raise ValueError(
                 "A damage-bound AutoQuantize recipe must omit constraints.effective_bits; "
                 "max_predicted_damage supplies the search target."
+            )
+        if self.finalize_algorithm is not None and (
+            self.uses_predicted_damage_target or self.constraints.cost_model == "kv_cache"
+        ):
+            # Finalizing re-solves the weight formats for constraints.effective_bits.
+            raise ValueError(
+                "finalize_algorithm needs a weight search for constraints.effective_bits, not a "
+                "max_predicted_damage or KV-cache search."
             )
         if not self.candidate_formats and not self.module_search_spaces:
             raise ValueError(
@@ -368,9 +404,15 @@ class AutoQuantizeConfig(ModeloptBaseConfig):
                     "KV-cache AutoQuant does not support cost_excluded_layers; use "
                     "disabled_layers to exclude non-KV-cache modules from the search."
                 )
-        if self.method_options and self.auto_quantize_method != "aumann_shapley":
+        if self.method_options and self.auto_quantize_method not in ("aumann_shapley", "kl_div"):
             raise ValueError(
                 f"auto_quantize_method={self.auto_quantize_method!r} accepts no method_options."
+            )
+        if self.auto_quantize_method == "kl_div" and set(self.method_options or {}) - {
+            "context_quant_level"
+        }:
+            raise ValueError(
+                "auto_quantize_method='kl_div' accepts only the 'context_quant_level' method_option."
             )
         return self
 
@@ -484,12 +526,12 @@ class ModelOptEagleRecipe(ModelOptSpeculativeRecipeBase):
     )
 
     @model_validator(mode="after")
-    def _derive_eagle_offline(self) -> ModelOptEagleRecipe:
+    def _derive_eagle_offline(self) -> Self:
         self.eagle.eagle_offline = self.data.mode != "online"
         return self
 
     @model_validator(mode="after")
-    def _warn_rope_vs_training_seq_len(self) -> ModelOptEagleRecipe:
+    def _warn_rope_vs_training_seq_len(self) -> Self:
         orig_max_pos = self.eagle.eagle_export_rope_scaling.get("original_max_position_embeddings")
         if orig_max_pos is not None and orig_max_pos != self.training.training_seq_len:
             warnings.warn(
@@ -515,13 +557,38 @@ class ModelOptDFlashRecipe(ModelOptSpeculativeRecipeBase):
     )
 
     @model_validator(mode="after")
-    def _derive_dflash_offline(self) -> ModelOptDFlashRecipe:
+    def _derive_dflash_offline(self) -> Self:
         # offline (dumped .pt) and streaming (hidden states via NIXL RDMA from a vLLM
         # serve) both feed pre-computed base hidden states to the DFlash module, so
         # both set dflash_offline. Only fully-online training runs the base model.
         # Mirrors ModelOptEagleRecipe._derive_eagle_offline.
         self.dflash.dflash_offline = self.data.mode != "online"
         return self
+
+
+class ModelOptExternalDraftRecipe(ModelOptSpeculativeRecipeBase):
+    """Our config class for external (standalone) draft speculative decoding recipes."""
+
+    RECIPE_TYPE: ClassVar[RecipeType] = RecipeType.SPECULATIVE_EXTERNAL
+
+    metadata: RecipeMetadataConfig = _metadata_field()
+
+    external: ExternalDraftConfig = ModeloptField(
+        default=ExternalDraftConfig(),
+        title="External draft config",
+        description="External (standalone) draft model configuration.",
+        validate_default=True,
+    )
+
+    draft_model_name_or_path: str | None = ModeloptField(
+        default=None,
+        title="Draft model",
+        description=(
+            "Path or HF id of the pretrained draft model to train. Unlike the head-based "
+            "recipes, ``model.model_name_or_path`` refers to the *base* model, which is "
+            "used only for its lm_head and vocabulary."
+        ),
+    )
 
 
 class ModelOptMedusaRecipe(ModelOptSpeculativeRecipeBase):
@@ -547,4 +614,5 @@ RECIPE_TYPE_TO_CLASS: dict[RecipeType, type[ModelOptRecipeBase]] = {
     RecipeType.SPECULATIVE_EAGLE: ModelOptEagleRecipe,
     RecipeType.SPECULATIVE_DFLASH: ModelOptDFlashRecipe,
     RecipeType.SPECULATIVE_MEDUSA: ModelOptMedusaRecipe,
+    RecipeType.SPECULATIVE_EXTERNAL: ModelOptExternalDraftRecipe,
 }

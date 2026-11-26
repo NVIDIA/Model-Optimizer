@@ -15,8 +15,6 @@
 
 """Small tensor helpers shared across the fastgen subpackage."""
 
-from __future__ import annotations
-
 import torch
 
 __all__ = ["classifier_free_guidance", "expand_like"]

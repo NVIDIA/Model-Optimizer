@@ -26,8 +26,6 @@ ever sees ``per_layer_config``. It is invoked from
 convertor or layer-patching runs.
 """
 
-from __future__ import annotations
-
 from typing import Any
 
 from vllm.logger import init_logger

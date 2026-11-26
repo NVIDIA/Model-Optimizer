@@ -72,3 +72,31 @@ def test_flatten_tree(data, expected_keys):
     # try re-building to see if we get same structure
     tree_rebuilt = unflatten_tree(copy.deepcopy(values), tree_spec)
     assert data == tree_rebuilt
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"a": {"b": 1}, "a.b": 2},
+        {"a": [1], "a.0": 2},
+        {"a.b": 1, "a": {"b": 2}},
+    ],
+)
+def test_flatten_tree_key_collision(data):
+    """Colliding flattened keys must raise instead of silently dropping values."""
+    with pytest.raises(ValueError, match=r"'a\.(b|0)'"):
+        flatten_tree(data)
+
+
+@pytest.mark.parametrize(
+    ("data", "expected_keys"),
+    [
+        ({"a": {"b": 1}, "ab": 2}, ["a.b", "ab"]),
+        ({"a": {"b": 1}, "a_b": 2}, ["a.b", "a_b"]),
+    ],
+)
+def test_flatten_tree_near_collision(data, expected_keys):
+    """Distinct flattened keys that merely look similar must still round-trip."""
+    values, tree_spec = flatten_tree(data)
+    assert expected_keys == tree_spec.names
+    assert data == unflatten_tree(copy.deepcopy(values), tree_spec)

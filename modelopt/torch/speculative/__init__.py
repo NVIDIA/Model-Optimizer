@@ -15,6 +15,8 @@
 
 """Speculative Decoding Optimizations."""
 
-from . import eagle, medusa, mode, plugins
+from . import eagle, external, medusa, mode, plugins
 from .config import *
+from .losses import *
+from .mtp import *
 from .speculative_decoding import *

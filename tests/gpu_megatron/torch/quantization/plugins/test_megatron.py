@@ -15,6 +15,7 @@
 
 import copy
 import math
+import re
 import sys
 import types
 from contextlib import ExitStack, nullcontext
@@ -67,13 +68,15 @@ from megatron.core.transformer.moe.router import TopKRouter
 import modelopt
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
+from modelopt.recipe import load_recipe
 from modelopt.torch.opt.dynamic import DynamicModule
 from modelopt.torch.opt.plugins.mcore_dist_checkpointing import (
     restore_sharded_modelopt_state,
     save_sharded_modelopt_state,
 )
 from modelopt.torch.quantization.algorithms import QuantRecipe, _AutoQuantizeBaseSearcher
-from modelopt.torch.quantization.nn import QuantModuleRegistry, SequentialQuantizer
+from modelopt.torch.quantization.ggml.common import PINNED_IMPORTANCE_PREFIX, PINNED_PAYLOAD_PREFIX
+from modelopt.torch.quantization.nn import QuantModuleRegistry, SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.nn.modules.quant_linear import RealQuantLinear
 from modelopt.torch.quantization.plugins.megatron import (
     _initialize_grouped_weight_quantizer_state,
@@ -92,12 +95,11 @@ from modelopt.torch.quantization.plugins.megatron_indexer import (
     _QuantMegatronIndexer,
     rotate_activation,
 )
-from modelopt.torch.quantization.plugins.transformer_engine import (
-    _COMPILE_TEGROUPED_WEIGHT_LOOP_ENV,
-)
 from modelopt.torch.quantization.qtensor import QTensorWrapper
 from modelopt.torch.quantization.utils import is_quantized_linear
+from modelopt.torch.quantization.utils.calib_utils import GPTQHelper
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
+from modelopt.torch.utils.plugins.megatron_generate import megatron_prefill
 
 try:
     from megatron.core.extensions.transformer_engine import TERowParallelLinear
@@ -114,15 +116,6 @@ except ImportError:
     HAS_HADAMARD = False
 
 SEED = 1234
-
-# TODO: re-enable the marked tests once fixed. Blackwell (sm_120, e.g. RTX PRO 6000) with the
-# nemo:26.06 / TE 2.16 / CUDA 13 stack hits a flaky, intermittent CUDA "illegal memory access" in
-# several tests: When fails, it poisons the process CUDA context and cascades hang across subsequent tests.
-# Passes locally on different GPUs. Likely an upstream TE/CUDA-13 kernel bug, not modelopt logic.
-skip_flaky_on_blackwell = pytest.mark.skipif(
-    torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 12,
-    reason="Flaky CUDA illegal memory access on Blackwell (nemo:26.06 / TE 2.16 / CUDA 13)",
-)
 
 
 def test_convert_megatron_parallel_linear(distributed_setup_size_1):
@@ -349,6 +342,8 @@ def _gpt_model_provider(
                 use_cpu_initialization=meta_device,
                 num_moe_experts=num_moe_experts,
                 moe_grouped_gemm=moe_grouped_gemm,
+                # MoE with TP requires sequence parallelism
+                sequence_parallel=tp_size > 1 and num_moe_experts is not None,
             )
 
     if not meta_device:
@@ -418,6 +413,12 @@ def _test_sharded_state_dict(
     for module in model_ref.modules():
         if hasattr(module, "_amax_for_smoothing"):
             delattr(module, "_amax_for_smoothing")
+
+    if not meta_device:
+        # Megatron-Bridge restores the modelopt_state into a model whose weights are not loaded yet.
+        for name, param in model_test.named_parameters():
+            if re.search(r"\.linear_\w+\.weight\d*$", name):
+                param.data.fill_(float("nan"))
 
     sharded_state_dict_test_helper(
         tmp_path,
@@ -493,7 +494,6 @@ FP8_GEMM_KV_CFG["quant_cfg"].extend(mtq.FP8_KV_CFG["quant_cfg"])
 )
 @pytest.mark.parametrize("meta_device", [False, True])
 @pytest.mark.parametrize("transformer_impl", ["local", "modelopt"])
-@skip_flaky_on_blackwell
 def test_homogeneous_sharded_state_dict(
     dist_workers, tmp_path, config, meta_device, transformer_impl
 ):
@@ -519,9 +519,6 @@ def test_homogeneous_sharded_state_dict(
 @pytest.mark.parametrize("transformer_impl", ["local", "modelopt"])
 @pytest.mark.timeout(240)
 # Compressed state dict takes longer due to real quant conversion & saving/loading
-# Its real mtq.compress() path exercises the same TE/CUDA-13 kernels that trip the flaky
-# Blackwell (sm_120) illegal-memory-access; #1901 skipped the fake-quant sibling but missed this one.
-@skip_flaky_on_blackwell
 def test_homogeneous_compressed_sharded_state_dict(
     dist_workers, tmp_path, config, meta_device, transformer_impl
 ):
@@ -603,20 +600,13 @@ def test_homogeneous_sharded_state_dict_hybrid(dist_workers, tmp_path, config):
         mixed_block_size_config,
     ],
 )
-@skip_flaky_on_blackwell
 def test_heterogenous_sharded_state_dict(dist_workers, tmp_path, config):
     dist_workers.run(
         partial(_test_sharded_state_dict, tmp_path, config, 256, None, False, False, {}),
     )
 
 
-@pytest.mark.parametrize(
-    "hidden_size",
-    [
-        256,
-        pytest.param(320, marks=skip_flaky_on_blackwell),
-    ],
-)
+@pytest.mark.parametrize("hidden_size", [256, 320])
 def test_regular_state_dict(distributed_setup_size_1, hidden_size):
     initialize_for_megatron(tensor_model_parallel_size=1, pipeline_model_parallel_size=1, seed=SEED)
 
@@ -834,9 +824,9 @@ def test_te_grouped_compiled_weight_quantizer_loop(
         return compiled
 
     if compile_enabled:
-        monkeypatch.setenv(_COMPILE_TEGROUPED_WEIGHT_LOOP_ENV, "1")
+        monkeypatch.setenv("MODELOPT_TEGROUPED_COMPILE_WEIGHT_LOOP", "1")
     else:
-        monkeypatch.delenv(_COMPILE_TEGROUPED_WEIGHT_LOOP_ENV, raising=False)
+        monkeypatch.delenv("MODELOPT_TEGROUPED_COMPILE_WEIGHT_LOOP", raising=False)
     monkeypatch.setattr(torch, "compile", fake_compile)
     initialize_for_megatron(seed=SEED)
     model = _gpt_model_provider(
@@ -916,10 +906,10 @@ def test_te_grouped_real_compile_weight_quantizer_loop(distributed_setup_size_1,
     # One cached input batch, shared across both models for an apples-to-apples compare.
     forward = get_forward(model_eager)
 
-    monkeypatch.delenv(_COMPILE_TEGROUPED_WEIGHT_LOOP_ENV, raising=False)
+    monkeypatch.delenv("MODELOPT_TEGROUPED_COMPILE_WEIGHT_LOOP", raising=False)
     mtq.quantize(model_eager, copy.deepcopy(mtq.INT8_DEFAULT_CFG), forward)
 
-    monkeypatch.setenv(_COMPILE_TEGROUPED_WEIGHT_LOOP_ENV, "1")
+    monkeypatch.setenv("MODELOPT_TEGROUPED_COMPILE_WEIGHT_LOOP", "1")
     mtq.quantize(model_compiled, copy.deepcopy(mtq.INT8_DEFAULT_CFG), forward)
 
     grouped_eager = [
@@ -1524,6 +1514,61 @@ def _test_gptq_mamba_hybrid(rank, size):
     assert torch.isfinite(forward(model)).all()
 
 
+@pytest.mark.parametrize("recipe", [None, "general/ptq/nvfp4_default-kv_none-gptq"])
+def test_gptq_hessian_sync_across_dp(dist_workers_size_2, recipe):
+    """GPTQ at DP2 must use the Hessian of both ranks' calibration data and agree across ranks.
+
+    The shipped layerwise GPTQ recipe must run at DP2 as well, not only in a single process.
+    """
+    dist_workers_size_2.run(partial(_test_gptq_hessian_sync_across_dp, recipe))
+
+
+def _test_gptq_hessian_sync_across_dp(recipe, rank, size):
+    initialize_for_megatron(tensor_model_parallel_size=1, seed=SEED)
+    model = get_mcore_gpt_model(tensor_model_parallel_size=1, num_layers=1).cuda()
+    ref_model = get_mcore_gpt_model(tensor_model_parallel_size=1, num_layers=1).cuda()
+    ref_model.load_state_dict(model.state_dict())
+
+    torch.manual_seed(SEED + rank)
+    batch = get_batch(model, batch_size=2)
+    all_input_ids = [torch.empty_like(batch[0]) for _ in range(size)]
+    torch.distributed.all_gather(all_input_ids, batch[0])
+
+    def forward(model, input_ids_list):
+        for input_ids in input_ids_list:
+            model(input_ids, *batch[2:4], labels=batch[1], loss_mask=batch[4])
+
+    hessians = {}
+    update_weights = GPTQHelper.update_weights
+
+    def capture_hessian(self, *args, **kwargs):
+        hessians[self.name] = self.hessian.clone()
+        return update_weights(self, *args, **kwargs)
+
+    if recipe is None:
+        quant_cfg = copy.deepcopy(mtq.NVFP4_DEFAULT_CFG)
+        quant_cfg["algorithm"] = {"method": "gptq"}
+    else:
+        quant_cfg = load_recipe(recipe).quantize.model_dump()
+        assert quant_cfg["algorithm"]["layerwise"]["enable"]
+    with patch.object(GPTQHelper, "update_weights", capture_hessian):
+        mtq.quantize(model, quant_cfg, partial(forward, input_ids_list=[batch[0]]))
+        dp_hessians = dict(hessians)
+        # Every rank calibrates on the union of the data, so its Hessian is the full-data one.
+        mtq.quantize(ref_model, quant_cfg, partial(forward, input_ids_list=all_input_ids))
+
+    assert dp_hessians
+    for name, hessian in dp_hessians.items():
+        # TF32 matmuls in the Hessian update leave ~1e-4 relative noise between the two runs.
+        assert (hessian - hessians[name]).norm() < 1e-3 * hessians[name].norm(), name
+
+    for name, m in model.named_modules():
+        if is_quantized_linear(m) and m.weight_quantizer.is_enabled:
+            weights = [torch.empty_like(m.weight) for _ in range(size)]
+            torch.distributed.all_gather(weights, m.weight.contiguous())
+            assert all(torch.equal(w, weights[0]) for w in weights), f"{name} differs across ranks"
+
+
 def _auto_quantize_mamba_hybrid_cost_helper(rank, size, expert_model_parallel_size, result_path):
     initialize_for_megatron(
         tensor_model_parallel_size=1,
@@ -1638,6 +1683,171 @@ def _test_mcore_layerwise_calibration_layers_do_not_mutate_decoder(rank, size):
 
 def test_mcore_layerwise_calibration_layers_do_not_mutate_decoder(dist_workers_size_1):
     dist_workers_size_1.run(_test_mcore_layerwise_calibration_layers_do_not_mutate_decoder)
+
+
+class _VLMWrapper(MegatronModule):
+    """A VLM root that, like Megatron-Bridge's GLM-5.3-Flash model, has no ``decoder`` of its own."""
+
+    def __init__(self, language_model):
+        super().__init__(config=language_model.config)
+        self.language_model = language_model
+
+    def forward(self, *args, **kwargs):
+        # Post-processes the language model's output, as real wrappers do.
+        return self.language_model(*args, **kwargs).float()
+
+
+def _test_layerwise_calibrate_vlm_text_forward_loop(drive_wrapper, rank, size):
+    initialize_for_megatron(tensor_model_parallel_size=1, seed=SEED)
+    language_model = _gpt_model_provider(tp_size=1, hidden_size=64)
+    model = _VLMWrapper(language_model)
+    tokens = torch.randint(0, language_model.vocab_size, (2, 16), device="cuda")
+
+    # Text calibration in examples/megatron_bridge/quantize.py drives the inner language model; image-text
+    # calibration drives the wrapper, so both patched forwards are on the stack when the stop is raised.
+    def forward_loop(_model):
+        megatron_prefill(
+            model if drive_wrapper else language_model, tokens, skip_return_logits=True
+        )
+
+    config = copy.deepcopy(mtq.FP8_DEFAULT_CFG)
+    config["algorithm"] = {"method": "max", "layerwise": {"enable": True}}
+    mtq.quantize(model, config, forward_loop)
+
+    calibrated = [m for m in language_model.decoder.modules() if is_quantized_linear(m)]
+    assert calibrated
+    assert all(m.input_quantizer.amax is not None for m in calibrated)
+
+
+@pytest.mark.parametrize("drive_wrapper", [False, True])
+def test_layerwise_calibrate_vlm_text_forward_loop(dist_workers_size_1, drive_wrapper):
+    dist_workers_size_1.run(partial(_test_layerwise_calibrate_vlm_text_forward_loop, drive_wrapper))
+
+
+def _test_ggml_payload_sharded_state_dict(tmp_path, preparation, grouped, rank, size):
+    initialize_for_megatron(
+        tensor_model_parallel_size=size,
+        expert_tensor_parallel_size=size if grouped else None,
+        seed=SEED,
+    )
+
+    def create_model(tp_size=size):
+        return _gpt_model_provider(
+            tp_size=tp_size,
+            hidden_size=512,
+            num_moe_experts=2 if grouped else None,
+            moe_grouped_gemm=grouped,
+            etp_size=tp_size if grouped else None,
+            transformer_impl="transformer_engine" if grouped else "local",
+        )
+
+    model_ref = create_model()
+    config = load_recipe("general/ptq/iq2_xs").quantize.model_dump()
+    if preparation == "gptq":
+        gptq = next(algo for algo in config["algorithm"] if algo["method"] == "gptq")
+        config["algorithm"] = {**gptq, "layerwise": {"enable": False}}
+    else:
+        config["algorithm"] = "max"
+    if grouped:
+        for module in model_ref.modules():
+            if isinstance(module, TopKRouter):
+                module.topk = module.num_experts
+    mtq.quantize(model_ref, config, get_forward(model_ref))
+    if preparation == "ptq":
+        mtq.initialize_qdq_weights(model_ref)
+    original_keys = set(model_ref.sharded_state_dict())
+    original_pins = {
+        k: v.detach().clone()
+        for k, v in model_ref.state_dict().items()
+        if PINNED_PAYLOAD_PREFIX in k or PINNED_IMPORTANCE_PREFIX in k
+    }
+    for phase in ("initial", "rank_local_update") if preparation == "ptq" else ("initial",):
+        if phase == "rank_local_update":
+            # Updating one TP shard must keep its scale pins and checkpoint keys intact.
+            for module in model_ref.modules():
+                if not hasattr(module, "iter_weights_for_calibration"):
+                    continue
+                changed = False
+                for weight, quantizer in module.iter_weights_for_calibration():
+                    if any(
+                        n.startswith(PINNED_PAYLOAD_PREFIX) for n, _ in quantizer.named_buffers()
+                    ):
+                        if rank == 0:
+                            with torch.no_grad():
+                                weight.add_(0.125)
+                        quantizer(weight)
+                        changed = True
+                        break
+                if changed:
+                    break
+        pinned = {
+            k: v.detach().clone()
+            for k, v in model_ref.state_dict().items()
+            if PINNED_PAYLOAD_PREFIX in k or PINNED_IMPORTANCE_PREFIX in k
+        }
+        sharded = model_ref.sharded_state_dict()
+        checks = [bool(pinned), set(sharded) == original_keys, all(k in sharded for k in pinned)]
+        checks.append(pinned.keys() == original_pins.keys())
+        checks.append(all(torch.equal(v, original_pins[k]) for k, v in pinned.items()))
+        if preparation == "ptq":
+            checks.append(not any(PINNED_IMPORTANCE_PREFIX in k for k in pinned))
+            if grouped:
+                checks.append(any("weight_quantizer.0." in k for k in pinned))
+        else:
+            checks.append(any(PINNED_IMPORTANCE_PREFIX in k for k in pinned))
+        matches = torch.tensor(all(checks), device="cuda")
+        torch.distributed.all_reduce(matches, op=torch.distributed.ReduceOp.MIN)
+        assert matches.item(), "GGML scale pins or checkpoint keys changed"
+
+        checkpoint = tmp_path / phase
+        checkpoint.mkdir(exist_ok=True)
+        save_distributed_checkpoint(checkpoint, model_ref)
+        save_sharded_modelopt_state([model_ref], checkpoint)
+        model_test = create_model()
+        reset = TensorQuantizer._reset_pytorch_state_from_metadata
+
+        def poison_placeholders(quantizer, metadata):
+            reset(quantizer, metadata)
+            for name, buffer in quantizer.named_buffers(recurse=False):
+                if name.startswith(PINNED_PAYLOAD_PREFIX):
+                    buffer.zero_()
+
+        with patch.object(
+            TensorQuantizer, "_reset_pytorch_state_from_metadata", poison_placeholders
+        ):
+            restore_sharded_modelopt_state([model_test], checkpoint)
+        model_test = load_distributed_checkpoint(checkpoint, model_test)
+        restored = model_test.state_dict()
+        matches = torch.tensor(
+            all(k in restored and torch.equal(v, restored[k]) for k, v in pinned.items()),
+            device="cuda",
+        )
+        torch.distributed.all_reduce(matches, op=torch.distributed.ReduceOp.MIN)
+        assert matches.item(), "GGML payloads did not survive the checkpoint"
+        same_effective_weights = True
+        for source, target in zip(model_ref.modules(), model_test.modules()):
+            if not hasattr(source, "iter_weights_for_calibration"):
+                continue
+            for (weight, quantizer), (restored_weight, restored_quantizer) in zip(
+                source.iter_weights_for_calibration(), target.iter_weights_for_calibration()
+            ):
+                same_effective_weights &= torch.equal(
+                    restored_quantizer(restored_weight), quantizer(weight)
+                )
+        matches = torch.tensor(same_effective_weights, device="cuda")
+        torch.distributed.all_reduce(matches, op=torch.distributed.ReduceOp.MIN)
+        assert matches.item(), "GGML effective weights changed after native resume"
+        del model_test
+
+
+@pytest.mark.parametrize(
+    ("preparation", "grouped"), [("gptq", False), ("ptq", False), ("ptq", True)]
+)
+def test_ggml_payload_sharded_state_dict(dist_workers_size_2, tmp_path, preparation, grouped):
+    """Dense/grouped scale pins and effective weights survive rank-local updates and reload."""
+    dist_workers_size_2.run(
+        partial(_test_ggml_payload_sharded_state_dict, tmp_path, preparation, grouped)
+    )
 
 
 @pytest.mark.parametrize("ep_size", [1, 2])
@@ -2525,3 +2735,154 @@ class TestKeepGptOutputLayerExtraState:
     )
     def test_extra_state_has_data(self, entry, expected):
         assert _output_layer_extra_state_has_data(entry) is expected
+
+
+@pytest.mark.parametrize(
+    "quant_cfg", ["FP8_DEFAULT_CFG", "NVFP4_DEFAULT_CFG", "NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG"]
+)
+def test_mla_fused_down_projections_share_ranges(distributed_setup_size_1, quant_cfg):
+    """vLLM and TRT-LLM fuse MLA's q_down and kv_down into one GEMM with one scale per tensor."""
+    initialize_for_megatron(tensor_model_parallel_size=1, seed=SEED)
+    try:
+        model = get_mcore_gpt_model(
+            hidden_size=128,
+            num_attention_heads=2,
+            vocab_size=128,
+            max_sequence_length=32,
+            transformer_impl="transformer_engine",
+            multi_latent_attention=True,
+        ).cuda()
+        attentions = [layer.self_attention for layer in model.decoder.layers]
+        with torch.no_grad():  # give the two weights different ranges
+            for attention in attentions:
+                attention.linear_kv_down_proj.weight.mul_(4)
+
+        model = mtq.quantize(model, copy.deepcopy(getattr(mtq, quant_cfg)), get_forward(model))
+
+        for attention in attentions:
+            q_down, kv_down = attention.linear_q_down_proj, attention.linear_kv_down_proj
+            assert torch.equal(q_down.input_quantizer.amax, kv_down.input_quantizer.amax)
+            if q_down.weight_quantizer.is_nvfp4_static:
+                assert torch.equal(
+                    q_down.weight_quantizer.global_amax, kv_down.weight_quantizer.global_amax
+                )
+            else:
+                assert torch.equal(q_down.weight_quantizer.amax, kv_down.weight_quantizer.amax)
+    finally:
+        destroy_model_parallel()  # not a spawned process
+
+
+# Kimi K3's MLA and KDA projections that deployments fuse: those static NVFP4 also shares, then the gates.
+_KIMI_K3_FUSED_PROJECTIONS = {
+    "mla": (("q_a_proj", "kv_a_proj_with_mqa"), ("g_proj",)),
+    "kda": (("q_proj", "k_proj", "v_proj"), ("g_proj", "f_a_proj", "b_proj")),
+}
+
+
+class _HFNamedFusedProjections(MegatronModule):
+    """Projections deployments fuse, under the HF names Kimi K3's Megatron MLA or KDA keeps."""
+
+    def __init__(self, config, names):
+        from megatron.core.extensions.transformer_engine import TEColumnParallelLinear, TELinear
+
+        super().__init__(config)
+        kwargs = {"config": config, "init_method": torch.nn.init.normal_, "bias": False}
+        kwargs |= {"skip_bias_add": False, "skip_weight_param_allocation": False}
+        self.names = names
+        for name in names:
+            if name in ("q_a_proj", "kv_a_proj_with_mqa", "f_a_proj"):
+                linear = TELinear(64, 64, parallel_mode="duplicated", **kwargs)
+            else:
+                linear = TEColumnParallelLinear(
+                    64, 64, gather_output=False, is_expert=False, **kwargs
+                )
+            setattr(self, name, linear)
+
+    def forward(self, x):
+        return [getattr(self, name)(x)[0] for name in self.names]
+
+
+@pytest.mark.parametrize("attention", ["mla", "kda"])
+@pytest.mark.parametrize(
+    "quant_cfg", ["FP8_DEFAULT_CFG", "NVFP4_DEFAULT_CFG", "NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG"]
+)
+def test_hf_named_fused_projections_share_ranges(distributed_setup_size_1, quant_cfg, attention):
+    """Megatron-Core modules with HF names get the ranges deployments fuse, as Megatron-Core MLA does."""
+    initialize_for_megatron(tensor_model_parallel_size=1, seed=SEED)
+    try:
+        core, gates = _KIMI_K3_FUSED_PROJECTIONS[attention]
+        config = TransformerConfig(num_layers=1, hidden_size=64, num_attention_heads=4)
+        model = _HFNamedFusedProjections(config, core + gates).cuda()
+        with torch.no_grad():  # give the weights in each group different ranges
+            getattr(model, core[-1]).weight.mul_(4)
+            getattr(model, gates[-1]).weight.mul_(8)
+        x = torch.randn(8, 2, 64, device="cuda")
+
+        mtq.quantize(model, copy.deepcopy(getattr(mtq, quant_cfg)), lambda m: m(x))
+
+        first = getattr(model, core[0])
+        for name in core[1:] + gates:
+            other = getattr(model, name)
+            assert torch.equal(first.input_quantizer.amax, other.input_quantizer.amax)
+            if not first.weight_quantizer.is_nvfp4_static:
+                assert torch.equal(first.weight_quantizer.amax, other.weight_quantizer.amax)
+            else:
+                assert torch.equal(
+                    first.weight_quantizer.global_amax, other.weight_quantizer.global_amax
+                )
+    finally:
+        destroy_model_parallel()  # not a spawned process
+
+
+def _test_te_linear_range_sync_helper(tensor_model_parallel_size, rank, size):
+    from megatron.core.extensions.transformer_engine import TELinear
+
+    pipeline_model_parallel_size = size // tensor_model_parallel_size
+    initialize_for_megatron(
+        tensor_model_parallel_size=tensor_model_parallel_size,
+        pipeline_model_parallel_size=pipeline_model_parallel_size,
+        seed=SEED,
+    )
+    config = TransformerConfig(
+        num_layers=pipeline_model_parallel_size,
+        hidden_size=64,
+        num_attention_heads=4,
+        use_cpu_initialization=True,
+    )
+    # A duplicated TELinear, like MLA's down-projections, on every rank; each rank's weight and
+    # input (e.g. a sequence-parallel shard) has its own range.
+    model = torch.nn.ModuleDict(
+        {
+            "linear": TELinear(
+                64,
+                64,
+                parallel_mode="duplicated",
+                config=config,
+                init_method=torch.nn.init.normal_,
+                bias=False,
+                skip_bias_add=False,
+                skip_weight_param_allocation=False,
+            )
+        }
+    ).cuda()
+    with torch.no_grad():
+        model["linear"].weight.mul_(rank + 1)
+    x = torch.randn(8, 2, 64, device="cuda") * (rank + 1)
+    expected = torch.stack([x.abs().amax(), model["linear"].weight.abs().amax()]).float()
+
+    mtq.quantize(model, copy.deepcopy(mtq.FP8_DEFAULT_CFG), lambda m: m["linear"](x))
+
+    # Replicas share their ranges over tensor parallelism; pipeline stages keep their own.
+    if tensor_model_parallel_size > 1:
+        torch.distributed.all_reduce(expected, op=torch.distributed.ReduceOp.MAX)
+    linear = model["linear"]
+    assert torch.equal(linear.input_quantizer.amax.float(), expected[0])
+    assert torch.equal(linear.weight_quantizer.amax.float(), expected[1])
+
+
+@pytest.mark.parametrize("tensor_model_parallel_size", [1, 2])
+def test_te_linear_ranges_sync_within_pipeline_stage(
+    dist_workers_size_2, tensor_model_parallel_size
+):
+    """Megatron-Core TELinear syncs ranges over its TP / DP replicas, not across pipeline stages."""
+    dist_workers_size_2.run(partial(_test_te_linear_range_sync_helper, tensor_model_parallel_size))

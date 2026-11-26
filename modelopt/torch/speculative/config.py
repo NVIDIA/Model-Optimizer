@@ -16,7 +16,7 @@
 """Configurations for speculative decoding modes."""
 
 from copy import deepcopy
-from typing import Literal
+from typing import Literal, Self
 
 from pydantic import model_validator
 
@@ -30,6 +30,8 @@ __all__ = [
     "EAGLE_MTP_DEFAULT_CFG",
     "DFlashConfig",
     "EagleConfig",
+    "ExternalDraftConfig",
+    "MTPConfig",
     "MedusaConfig",
     "eagle3_default_config",
     "eagle_mtp_default_config",
@@ -145,8 +147,20 @@ class DFlashConfig(ModeloptBaseConfig):
     )
 
     dflash_use_torch_compile: bool = ModeloptField(
-        default=True,
-        description="Whether to use torch.compile on DFlash forward/loss methods.",
+        default=False,
+        description=(
+            "Whether to torch.compile the draft decoder stack and the DSpark TVD chunk in "
+            "training. Compiles once, on the first step, and needs a working Inductor "
+            "toolchain."
+        ),
+    )
+
+    dflash_use_flex_attention: bool = ModeloptField(
+        default=False,
+        description=(
+            "Compute the draft's attention with FlexAttention over a block-sparse BlockMask "
+            "instead of SDPA with a dense [B, 1, Q, KV] mask, skipping fully-masked tiles."
+        ),
     )
 
     dflash_swa_window_size: int | None = ModeloptField(
@@ -327,7 +341,7 @@ class DFlashConfig(ModeloptBaseConfig):
             "absolute — there is no outer multiplier scaling the three terms as a group — so "
             "each is the coefficient with which its term enters the total, and "
             "`loss == origin_loss + lilicorr_loss` holds exactly. Both halves and all three "
-            "weights are reported in the `lilicorr_metrics` dict the model attaches to its "
+            "weights are reported in the `draft_metrics` dict the model attaches to its "
             "forward output, so a consumer of those metrics can check the identity per step "
             "and read which composition produced a checkpoint. The three weights are validated "
             "all-or-nothing (a negative value means unset): a config that sets some but not "
@@ -438,7 +452,7 @@ class DFlashConfig(ModeloptBaseConfig):
     )
 
     @model_validator(mode="after")
-    def _check_dpace_alpha(self) -> "DFlashConfig":
+    def _check_dpace_alpha(self) -> Self:
         # Validate at construction regardless of the active objective, so a bad alpha
         # is rejected even if it only becomes active after a later objective override.
         if not 0.0 < self.dflash_dpace_alpha <= 1.0:
@@ -465,6 +479,147 @@ class MedusaConfig(ModeloptBaseConfig):
     medusa_num_layers: int = ModeloptField(
         default=1,
         description=("The number of ResBlocks used in medusa head."),
+    )
+
+
+class MTPConfig(ModeloptBaseConfig):
+    """Offline training settings for a checkpoint-native MTP module."""
+
+    mtp_adapter: str = ModeloptField(
+        default="auto",
+        min_length=1,
+        description=(
+            "Native MTP checkpoint adapter. Use 'auto' to select from checkpoint metadata."
+        ),
+    )
+
+    mtp_loss_type: Literal["lk_lambda", "soft_target_ce"] = ModeloptField(
+        default="lk_lambda",
+        description=("Token distillation objective. Available options: lk_lambda, soft_target_ce."),
+    )
+
+    mtp_lk_eta: float = ModeloptField(
+        default=3.0,
+        ge=0,
+        allow_inf_nan=False,
+        description=("Decay rate for the LK-lambda blend. Zero selects pure KL."),
+    )
+
+    mtp_loss_decay_factor: float = ModeloptField(
+        default=1.0,
+        gt=0,
+        le=1,
+        allow_inf_nan=False,
+        description=("The per-round loss decay factor for native MTP training."),
+    )
+
+    mtp_use_torch_compile: bool = ModeloptField(
+        default=True,
+        description=("Whether to torch.compile the MTP loss. The native decoder stays eager."),
+    )
+
+    mtp_ttt_steps: int = ModeloptField(
+        default=1,
+        strict=True,
+        ge=1,
+        description=("The number of training-time-test steps for native MTP boosting."),
+    )
+
+    mtp_mix_hidden_states: bool = ModeloptField(
+        default=False,
+        description=("Whether to mix hidden states across rounds. Requires mtp_ttt_steps >= 2."),
+    )
+
+    mtp_mix_hidden_states_mode: Literal["uniform_layer_sample"] = ModeloptField(
+        default="uniform_layer_sample",
+        description=(
+            "Hidden state mixing variant used when mtp_mix_hidden_states=True. "
+            "Available options: uniform_layer_sample."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _check_mix_hidden_states_steps(self) -> Self:
+        if self.mtp_mix_hidden_states and self.mtp_ttt_steps < 2:
+            raise ValueError("mtp_mix_hidden_states requires mtp_ttt_steps >= 2")
+        return self
+
+
+class ExternalDraftConfig(ModeloptBaseConfig):
+    """External (standalone) draft model config.
+
+    The converted module is a pretrained causal LM used directly as the draft. It
+    keeps its own embeddings and lm_head; the base model contributes only cached
+    hidden states, projected by the base lm_head to obtain teacher logits.
+    """
+
+    external_loss: Literal["soft_ce", "tvd", "tvd_deploy", "tvd_ce"] = ModeloptField(
+        default="tvd",
+        description=(
+            "Training objective. ``soft_ce`` matches the Eagle offline objective. "
+            "``tvd`` is total-variation distance between the two untruncated "
+            "distributions. ``tvd_deploy`` puts both through the serving filter first "
+            "(``external_top_k`` then ``external_top_p``), making it the acceptance the "
+            "deployed pair will see: ``alpha = 1 - TVD``. ``tvd_ce`` adds a cross-entropy "
+            "term. Sparse data requires one of the TVD objectives, since the dump is "
+            "already a truncated policy and ``soft_ce`` needs full base logits."
+        ),
+    )
+
+    external_vocab_swap: bool = ModeloptField(
+        default=False,
+        description=(
+            "Re-index the draft onto the base model's vocabulary when the two tokenizers "
+            "differ, instead of raising. Rebuilds the draft's embeddings, carrying over "
+            "rows for tokens both tokenizers spell identically. The replacement matrix is "
+            "``base_vocab_size * hidden_size`` parameters, so this is a large change to a "
+            "small draft; validate with an acceptance measurement, not a loss curve."
+        ),
+    )
+
+    external_tvd_alpha: float = ModeloptField(
+        default=0.9,
+        ge=0.0,
+        description=(
+            "Weight on the TVD term when ``external_loss='tvd_ce'``. The two weights "
+            "are not normalised: they scale the loss as given, so 0.9/0.1 is a "
+            "convention rather than a constraint, and setting only one of them moves "
+            "the overall gradient magnitude as well as the ratio."
+        ),
+    )
+
+    external_ce_alpha: float = ModeloptField(
+        default=0.1,
+        ge=0.0,
+        description=(
+            "Weight on the cross-entropy term when ``external_loss='tvd_ce'``. CE is "
+            "added because TVD is bounded and so discriminates weakly between tokens "
+            "inside the base's support."
+        ),
+    )
+
+    external_top_k: int = ModeloptField(
+        default=20,
+        ge=0,
+        description=(
+            "Top-k of the serving filter, applied to *both* the base and the "
+            "draft by ``external_loss='tvd_deploy'``. 0 disables the top-k stage."
+        ),
+    )
+
+    external_top_p: float = ModeloptField(
+        default=0.95,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Top-p of the serving filter, applied to *both* the base and the "
+            "draft by ``external_loss='tvd_deploy'``. 0 or 1.0 disables the nucleus stage."
+        ),
+    )
+
+    external_report_acc: bool = ModeloptField(
+        default=True,
+        description=("Whether to report top-1 agreement with the base model during training."),
     )
 
 
@@ -504,6 +659,24 @@ class EagleConfig(ModeloptBaseConfig):
         default=0.9, description=("The decay factor for multiple eagle_loss.")
     )
 
+    eagle_loss_type: Literal["soft_target_ce", "lk_lambda"] = ModeloptField(
+        default="soft_target_ce",
+        description=(
+            "Token distillation objective. Available options: soft_target_ce, lk_lambda. "
+            "LK lambda requires the Hugging Face backend and the full target vocabulary."
+        ),
+    )
+
+    eagle_lk_eta: float = ModeloptField(
+        default=3.0,
+        ge=0,
+        allow_inf_nan=False,
+        description=(
+            "Decay rate for the LK-lambda blend when eagle_loss_type='lk_lambda'. "
+            "Zero selects pure KL."
+        ),
+    )
+
     eagle_architecture_config: dict = ModeloptField(
         default={}, description=("The config for eagle module architecture.")
     )
@@ -521,6 +694,14 @@ class EagleConfig(ModeloptBaseConfig):
         default=False,
         description=(
             "Whether to mix hidden states of multiple TTT steps. It is a technique to reduce training cost."
+        ),
+    )
+
+    eagle_mix_hidden_states_mode: Literal["sparse_replace", "uniform_layer_sample"] = ModeloptField(
+        default="sparse_replace",
+        description=(
+            "Hidden state mixing variant used when eagle_mix_hidden_states=True. "
+            "Available options: sparse_replace, uniform_layer_sample."
         ),
     )
 
@@ -596,7 +777,8 @@ class EagleConfig(ModeloptBaseConfig):
     eagle_base_lora_logits_detach_prob: float = ModeloptField(
         default=0.5,
         description=(
-            "After warmup, probability of detaching base_output_softmax_logits each step. "
+            "After warmup, probability of detaching the teacher distribution from the EAGLE loss "
+            "each step. "
             "Acts as dropout regularization on the eagle-loss-to-LoRA gradient path through "
             "logits, preventing LoRA from degenerating to maximize EAGLE accuracy at the cost "
             "of base model quality. 1.0 = always detach (no logits gradient), 0.0 = never detach."
@@ -604,7 +786,16 @@ class EagleConfig(ModeloptBaseConfig):
     )
 
     @model_validator(mode="after")
-    def _check_rope_scaling_consistency(self) -> "EagleConfig":
+    def _check_lk_lambda_base_lora(self) -> Self:
+        if self.eagle_loss_type == "lk_lambda" and self.eagle_base_lora:
+            raise ValueError(
+                "eagle_loss_type='lk_lambda' requires a frozen teacher and is incompatible "
+                "with eagle_base_lora=True. Use eagle_loss_type='soft_target_ce' for base-LoRA."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _check_rope_scaling_consistency(self) -> Self:
         if not self.eagle_export_rope_scaling:
             return self
         rope_cfg = self.eagle_architecture_config.get("rope_scaling", {}) or {}

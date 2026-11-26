@@ -28,6 +28,10 @@ MAX_TOKENS=${MAX_TOKENS:-4096}
 MODEL_NAME=${MODEL_NAME:-model}
 STARTUP_TIMEOUT_SECONDS=${STARTUP_TIMEOUT_SECONDS:-600}
 GPU_COUNT=${GPU_COUNT:-$(nvidia-smi -L 2>/dev/null | wc -l)}
+# Prepend the caller's path. Replacing PYTHONPATH would drop a base image path.
+if [ -n "${CONTAINER_PYTHONPATH:-}" ]; then
+    export PYTHONPATH="${CONTAINER_PYTHONPATH}${PYTHONPATH:+:$PYTHONPATH}"
+fi
 
 if [ "$BACKEND" != "vllm" ] && [ "$BACKEND" != "sglang" ]; then
     echo "ERROR: backend must be vllm or sglang, got: $BACKEND" >&2
@@ -189,6 +193,9 @@ if [ "$mpi_rank" -eq 0 ]; then
             )
             if [ -n "$SYSTEM_PROMPT" ]; then
                 cmd+=(--system_prompt "$SYSTEM_PROMPT")
+            fi
+            if [ -n "${ASSISTANT_PREFIX:-}" ]; then
+                cmd+=(--assistant_prefix "$ASSISTANT_PREFIX")
             fi
             if [ "${FAIL_ON_ERROR:-0}" = "1" ]; then
                 cmd+=(--fail_on_error)

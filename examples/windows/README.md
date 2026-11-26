@@ -70,7 +70,7 @@ For more details, or to use different [ONNX Runtime Execution Providers](https:/
 
 ### Quantization
 
-Quantization is an effective model optimization technique for large models. Quantization with ModelOpt-Windows can compress model size by 2x-4x, speeding up inference while preserving model quality. ModelOpt-Window enables highly performant quantization formats including INT4, FP8, INT8, etc. and supports advanced algorithms such as AWQ and SmoothQuant\* focusing on post-training quantization (PTQ) for ONNX and PyTorch\* models with DirectML, CUDA and TensorRT\* inference backends.
+Quantization is an effective model optimization technique for large models. Quantization with ModelOpt-Windows can compress model size by 2x-4x, speeding up inference while preserving model quality. ModelOpt-Windows enables highly performant quantization formats including INT4, FP8, INT8, etc. and supports advanced algorithms such as AWQ and SmoothQuant\* focusing on post-training quantization (PTQ) for ONNX and PyTorch\* models with DirectML, CUDA and TensorRT\* inference backends.
 
 For more details, please refer to the [detailed quantization guide](https://nvidia.github.io/Model-Optimizer/guides/windows_guides/_ONNX_PTQ_guide.html).
 

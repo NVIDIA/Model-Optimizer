@@ -23,17 +23,12 @@ Math ported from ``FastGen/fastgen/methods/common_loss.py`` (lines 12-136) and
 ``FastGen/fastgen/methods/distribution_matching/dmd2.py`` lines 287-317 (R1).
 """
 
-from __future__ import annotations
-
-from typing import TYPE_CHECKING
+from collections.abc import Callable
 
 import torch
 import torch.nn.functional as F
 
 from .utils import expand_like
-
-if TYPE_CHECKING:
-    from collections.abc import Callable
 
 __all__ = [
     "dsm_loss",

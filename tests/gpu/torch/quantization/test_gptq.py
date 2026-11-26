@@ -14,27 +14,407 @@
 # limitations under the License.
 
 import copy
+import threading
 import time
 
 import pytest
 import torch
+from _test_utils.torch.quantization.models import ToyFusedExperts, ToyMoE
 from _test_utils.torch.transformers_models import get_tiny_llama
 from conftest import requires_triton
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.unified_export_hf import _export_quantized_weight
+from modelopt.torch.quantization.extensions import get_cuda_ext_ggml
+from modelopt.torch.quantization.ggml.common import pinned_packed_weight
+from modelopt.torch.quantization.ggml.gptq import GGMLGPTQHelper
 from modelopt.torch.quantization.model_calib import gptq
+from modelopt.torch.quantization.nn import QuantModuleRegistry
 from modelopt.torch.quantization.qtensor.nvfp4_tensor import NVFP4QTensor
+from modelopt.torch.quantization.utils import calib_utils
 from modelopt.torch.quantization.utils.calib_utils import (
+    GPTQHelper,
     compute_hessian_inverse,
     gptq_blockwise_update,
     gptq_blockwise_update_fused_scalar,
     update_hessian,
 )
+from modelopt.torch.utils import get_available_gpu_memory
 from modelopt.torch.utils.dataset_utils import create_forward_loop, get_dataset_dataloader
 
 RAND_SEED = 42
 torch.manual_seed(RAND_SEED)
+
+
+def _report_available(monkeypatch, available):
+    """Make each GPU report ``available[gpu]`` bytes for a new allocation, with no forward measured."""
+    monkeypatch.setattr(calib_utils, "get_available_gpu_memory", lambda gpu: available[gpu])
+    monkeypatch.setattr(calib_utils, "_calib_forward_peak", {})
+
+
+def test_hessian_of_a_full_gpu_goes_to_an_idle_gpu(need_2_gpus, monkeypatch):
+    """A Hessian whose GPU is full lands on an idle GPU rather than the CPU, with the same values."""
+    total = torch.cuda.get_device_properties(0).total_memory
+    _report_available(monkeypatch, {0: total // 10, 1: total * 9 // 10})
+    linear = torch.nn.Linear(64, 8, bias=False, device="cuda:0")
+    shard = torch.zeros(1, device="cuda:1")  # the model also lives on cuda:1
+    helper = GPTQHelper(linear, "linear", offload_to_cpu=True)
+    assert helper.hessian.device == shard.device
+
+    inputs = torch.randn(32, 64, device="cuda:0")
+    helper.accumulate(inputs)
+    reference, _ = update_hessian(inputs, torch.zeros(64, 64, device="cuda:0"), 0)
+    torch.testing.assert_close(helper.hessian.to("cuda:0"), reference)
+
+
+@pytest.mark.parametrize("inference_mode", [False, True])
+def test_expert_updates_on_another_gpu_match_one_gpu(need_2_gpus, monkeypatch, inference_mode):
+    """GGML expert updates spread over two GPUs give the one-GPU weights and codes, pinned at home,
+    also on inference tensors under the caller's inference mode, which worker threads do not inherit.
+    """
+    pytest.importorskip("transformers")  # the fused-experts quant wrapper is the HF plugin's
+    get_cuda_ext_ggml(raise_if_failed=True)  # updates move only with the CUDA encoders
+    # Two GGML groups per expert input, so the Hessian carries the first group's error to the next.
+    width = 512
+    shard = torch.zeros(1, device="cuda:1")  # noqa: F841  # the model also lives on cuda:1
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {
+                "quantizer_name": "*weight_quantizer",
+                "cfg": {"num_bits": "iq2_xxs", "block_sizes": {-1: 256}, "backend": "ggml"},
+            },
+        ],
+        "algorithm": {"method": "gptq", "block_size": 256, "perc_damp": 0.3},
+    }
+    devices = []
+    update_weights = GGMLGPTQHelper.update_weights
+
+    def recording_update_weights(self, *args, device=None, **kwargs):
+        devices.append(device)
+        return update_weights(self, *args, device=device, **kwargs)
+
+    monkeypatch.setattr(GGMLGPTQHelper, "update_weights", recording_update_weights)
+    experts = []
+    try:
+        with torch.inference_mode(inference_mode):
+            inputs = torch.randn(96, width, device="cuda")
+            for gpus in ([0], [0, 1]):
+                monkeypatch.setattr(calib_utils, "get_process_gpus", lambda gpus=gpus: gpus)
+                torch.manual_seed(RAND_SEED)
+                model = ToyMoE(width, width).cuda()
+                mtq.quantize(model, config, forward_loop=lambda m: m(inputs))
+                experts.append(model.mlp.experts)
+    finally:
+        QuantModuleRegistry.unregister(ToyFusedExperts)
+
+    assert torch.device("cuda", 1) in devices
+    one_gpu, two_gpus = experts
+    for name in ("gate_up_proj", "down_proj"):
+        assert torch.equal(getattr(one_gpu, name), getattr(two_gpus, name))
+        for q1, q2 in zip(
+            getattr(one_gpu, f"{name}_weight_quantizers"),
+            getattr(two_gpus, f"{name}_weight_quantizers"),
+        ):
+            assert pinned_packed_weight(q2, "iq2_xxs").device == getattr(two_gpus, name).device
+            assert torch.equal(
+                pinned_packed_weight(q1, "iq2_xxs"), pinned_packed_weight(q2, "iq2_xxs")
+            )
+
+
+@pytest.mark.parametrize("inference_mode", [False, True])
+def test_linear_updates_on_another_gpu_match_one_gpu(need_2_gpus, monkeypatch, inference_mode):
+    """GGML updates of plain linears, a sequential MoE's experts among them, spread over two GPUs
+    as fused experts' do, and give the one-GPU weights and codes, pinned at home; linears whose
+    weights share a storage, tied or overlapping views, keep their order, the later updating the
+    earlier's result."""
+    get_cuda_ext_ggml(raise_if_failed=True)  # updates move only with the CUDA encoders
+    width = 512  # two GGML groups per input, so the Hessian carries the first group's error
+    shard = torch.zeros(1, device="cuda:1")  # noqa: F841  # the model also lives on cuda:1
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {
+                "quantizer_name": "*weight_quantizer",
+                "cfg": {"num_bits": "iq2_xxs", "block_sizes": {-1: 256}, "backend": "ggml"},
+            },
+        ],
+        "algorithm": {"method": "gptq", "block_size": 256, "perc_damp": 0.3},
+    }
+    devices = []
+    update_weights = GGMLGPTQHelper.update_weights
+    prepare_hessian_inverse = GGMLGPTQHelper._prepare_hessian_inverse
+    # The GPUs' first moved updates both read their weights before either writes one back, so
+    # updates that could race do, also when first-use setup would delay one of them.
+    both_read = threading.Barrier(2, timeout=60)
+    moved = threading.local()
+
+    def recording_update_weights(self, *args, device=None, **kwargs):
+        devices.append(device)
+        moved.first = device is not None and sum(d is not None for d in devices) <= 2
+        return update_weights(self, *args, device=device, **kwargs)
+
+    def prepare_once_both_read(self, *args):
+        if moved.first:
+            both_read.wait()
+        return prepare_hessian_inverse(self, *args)
+
+    monkeypatch.setattr(GGMLGPTQHelper, "update_weights", recording_update_weights)
+    monkeypatch.setattr(GGMLGPTQHelper, "_prepare_hessian_inverse", prepare_once_both_read)
+    models = []
+    with torch.inference_mode(inference_mode):
+        inputs = torch.randn(96, width, device="cuda")
+        for gpus in ([0], [0, 1]):
+            monkeypatch.setattr(calib_utils, "get_process_gpus", lambda gpus=gpus: gpus)
+            torch.manual_seed(RAND_SEED)
+            model = torch.nn.Sequential(
+                *(torch.nn.Linear(width, width, bias=False) for _ in range(8))
+            ).cuda()
+            # After the first, which updates alone: tied linears, then views overlapping in all but
+            # a row; the first of these pairs to be spread holds the GPUs' first updates.
+            model[2].weight = model[1].weight
+            rows = torch.randn(width + 1, width, device="cuda")
+            model[3].weight = torch.nn.Parameter(rows[:-1])
+            model[4].weight = torch.nn.Parameter(rows[1:])
+            mtq.quantize(model, config, forward_loop=lambda m: m(inputs))
+            models.append(model)
+
+    assert torch.device("cuda", 1) in devices
+    for one_gpu, two_gpus in zip(*models):
+        assert torch.equal(one_gpu.weight, two_gpus.weight)
+        codes = pinned_packed_weight(two_gpus.weight_quantizer, "iq2_xxs")
+        assert codes.device == two_gpus.weight.device
+        assert torch.equal(pinned_packed_weight(one_gpu.weight_quantizer, "iq2_xxs"), codes)
+
+
+@pytest.mark.parametrize(
+    ("num_bits", "shape", "dtype", "cuda_extension"),
+    [
+        ("iq2_xxs", (16384, 2048), torch.bfloat16, True),  # a projection 8x wider than its input
+        ("iq2_xxs", (65536, 256), torch.bfloat16, True),  # one GPTQ block spans the input
+        # Logging holds the original weight, here twice the size of a float32 copy.
+        ("iq2_xxs", (65536, 512), torch.float64, True),
+        ("iq1_s", (1024, 512), torch.bfloat16, True),
+        # The PyTorch encoder's scratch grows with block_chunk_size, past the room check.
+        ("iq1_s", (1024, 512), torch.bfloat16, False),
+    ],
+)
+@pytest.mark.parametrize("log_mse", [False, True])
+@pytest.mark.parametrize("local_hessian_scales", [False, True])
+def test_an_update_that_may_move_fits_its_room(
+    need_2_gpus, monkeypatch, num_bits, shape, dtype, cuda_extension, log_mse, local_hessian_scales
+):
+    """An update that may run on another GPU, logging its error or not and searching the local
+    scales or not, peaks there within the room it is admitted with."""
+    if cuda_extension:
+        get_cuda_ext_ggml(raise_if_failed=True)  # without it, no update may move to check
+    else:
+        monkeypatch.setattr(get_cuda_ext_ggml, "extension", None, raising=False)
+    out_features, in_features = shape
+    torch.manual_seed(RAND_SEED)
+    linear = torch.nn.Linear(in_features, out_features, bias=False, dtype=dtype, device="cuda:0")
+    inputs = torch.randn(512, in_features, dtype=dtype, device="cuda:0")
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {
+                "quantizer_name": "*weight_quantizer",
+                "cfg": {"num_bits": num_bits, "block_sizes": {-1: 256}, "backend": "ggml"},
+            },
+        ],
+        "algorithm": "max",
+    }
+    mtq.quantize(linear, config, forward_loop=lambda m: m(inputs))
+    helper = GGMLGPTQHelper(
+        linear, "linear", log_mse=log_mse, local_hessian_scales=local_hessian_scales
+    )
+    helper.accumulate(inputs)
+    block_size = 256
+    worker = torch.device("cuda", 1)
+    torch.cuda.synchronize(worker)
+    torch.cuda.reset_peak_memory_stats(worker)
+    allocated = torch.cuda.memory_allocated(worker)
+    with torch.cuda.device(worker):
+        helper.update_weights(block_size, 0.3, linear.weight, device=worker)
+    peak = torch.cuda.max_memory_allocated(worker) - allocated
+
+    if helper.updates_on_any_device():
+        assert peak <= calib_utils._update_room(helper, linear.weight, block_size)
+
+
+def _iq2_xxs_linear(in_features, out_features, dtype=torch.float32):
+    """A ``cuda:0`` linear with an IQ2_XXS weight quantizer, and its calibration inputs."""
+    linear = torch.nn.Linear(in_features, out_features, bias=False, dtype=dtype, device="cuda:0")
+    inputs = torch.randn(512, in_features, dtype=dtype, device="cuda:0")
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {
+                "quantizer_name": "*weight_quantizer",
+                "cfg": {"num_bits": "iq2_xxs", "block_sizes": {-1: 256}, "backend": "ggml"},
+            },
+        ],
+        "algorithm": "max",
+    }
+    mtq.quantize(linear, config, forward_loop=lambda m: m(inputs))
+    return linear, inputs
+
+
+def test_a_moved_update_has_landed_when_it_returns(need_2_gpus, monkeypatch):
+    """An update run on another GPU has finished writing the weight's GPU when it returns, so the
+    caller may free the module and empty the cache without releasing memory its copies still write.
+    """
+    get_cuda_ext_ggml(raise_if_failed=True)  # updates move only with the CUDA encoders
+    # Over 10 MiB, so the weight has a segment of its own that empty_cache() can release.
+    linear, inputs = _iq2_xxs_linear(2048, 4096, torch.bfloat16)
+    helper = GGMLGPTQHelper(linear, "linear", log_mse=False)
+    helper.accumulate(inputs)
+    blockwise_update = GGMLGPTQHelper._blockwise_update
+
+    def blockwise_update_then_stall(self, block_size):
+        blockwise_update(self, block_size)
+        torch.cuda._sleep(10**8)  # holds the copies back to the weight's GPU for tens of ms
+
+    monkeypatch.setattr(GGMLGPTQHelper, "_blockwise_update", blockwise_update_then_stall)
+    worker = torch.device("cuda", 1)
+    with torch.cuda.device(worker):
+        helper.update_weights(256, 0.3, linear.weight, device=worker)
+    assert torch.cuda.current_stream(worker).query()  # the copies back have finished
+    del helper, linear
+    torch.cuda.empty_cache()
+    torch.cuda.synchronize(worker)  # raises if a copy wrote released memory
+
+
+def test_a_gpu_weight_may_be_updated_on_the_cpu():
+    linear, inputs = _iq2_xxs_linear(512, 16)
+    original = linear.weight.detach().clone()
+    helper = GGMLGPTQHelper(linear, "linear", log_mse=False)
+    helper.accumulate(inputs)
+
+    helper.update_weights(256, 0.3, linear.weight, device="cpu")
+
+    assert linear.weight.is_cuda
+    assert not torch.equal(linear.weight, original)
+    assert pinned_packed_weight(linear.weight_quantizer, "iq2_xxs").is_cuda
+
+
+@pytest.mark.parametrize("blocker", ["idle_gpu_full", "idle_gpu_too_small", "multi_rank"])
+def test_hessian_of_a_full_gpu_falls_back_to_the_cpu(need_2_gpus, monkeypatch, blocker):
+    """With no other GPU that can take it, or on any rank of a multi-rank run, it goes to the CPU."""
+    total = torch.cuda.get_device_properties(0).total_memory
+    reserve = int(calib_utils._HESSIAN_UNMEASURED_RESERVE * total)
+    idle = {
+        "idle_gpu_full": reserve // 2,
+        "idle_gpu_too_small": reserve + 64 * 64 * 4 - 1,  # one byte short of reserve + Hessian
+        "multi_rank": total,
+    }[blocker]
+    _report_available(monkeypatch, {0: total // 10, 1: idle})
+    if blocker == "multi_rank":
+        monkeypatch.setattr(calib_utils.dist, "is_initialized", lambda: True)
+        monkeypatch.setattr(calib_utils.dist, "get_world_size", lambda group=None: 2)
+    linear = torch.nn.Linear(64, 8, bias=False, device="cuda:0")
+    shard = torch.zeros(1, device="cuda:1")  # noqa: F841  # the model also lives on cuda:1
+    helper = GPTQHelper(linear, "linear", offload_to_cpu=True)
+    assert helper.hessian.device == torch.device("cpu")
+
+
+def test_bf16_hessian_input_gives_the_float32_hessian():
+    """``input_dtype=torch.bfloat16`` gives the float32 Hessian, on the inputs' GPU or the CPU,
+    and with float32-output GEMMs makes no float32 copy of the inputs."""
+    torch.manual_seed(0)
+    batches = [torch.randn(4096, 1024, device="cuda", dtype=torch.bfloat16) for _ in range(3)]
+    inputs = torch.cat(batches).double()
+    expected = 2 * inputs.t() @ inputs / inputs.shape[0]
+    fast = calib_utils._has_float32_out_gemm(batches[0].device)
+
+    for device in ("cuda", "cpu"):
+        hessian, n_samples = torch.zeros(1024, 1024, device=device), 0
+        for batch in batches:
+            torch.cuda.synchronize()
+            torch.cuda.reset_peak_memory_stats()
+            base = torch.cuda.memory_allocated()
+            hessian, n_samples = update_hessian(batch, hessian, n_samples, torch.bfloat16)
+            growth = torch.cuda.max_memory_allocated() - base
+        # Tensor cores round float32 sums their own way: ~1e-5 of the diagonal (2), not BF16's 1e-2.
+        torch.testing.assert_close(hessian.cuda().double(), expected, rtol=0, atol=1e-4)
+        if device == "cuda" and fast:
+            assert growth < batch.numel() * 4
+
+
+def test_gptq_hessian_input_dtype_reaches_the_hessian(monkeypatch):
+    """A recipe's ``hessian_input_dtype: bfloat16`` drops the float32 copy of each batch that the
+    default float32 Hessian GEMM makes."""
+    if not calib_utils._has_float32_out_gemm(torch.device("cuda", torch.cuda.current_device())):
+        pytest.skip("needs CUDA GEMMs that take out_dtype")
+    inputs = torch.randn(4, 1024, 2048, device="cuda", dtype=torch.bfloat16)
+    peaks = {}
+    for hessian_input_dtype in ("float32", "bfloat16"):
+        monkeypatch.setattr(calib_utils, "_calib_forward_peak", {})
+        model = torch.nn.Linear(2048, 16, bias=False, device="cuda", dtype=torch.bfloat16)
+        quant_cfg = {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+            ],
+            "algorithm": {"method": "gptq", "hessian_input_dtype": hessian_input_dtype},
+        }
+        mtq.quantize(model, quant_cfg, forward_loop=lambda m: m(inputs))
+        peaks[hessian_input_dtype] = calib_utils._calib_forward_peak[torch.cuda.current_device()]
+    # The float32 GEMM reads a float32 copy of the batch: 4 bytes per element.
+    assert peaks["float32"] - peaks["bfloat16"] >= inputs.numel() * 2
+
+
+@pytest.mark.parametrize(
+    ("measured_fraction", "stays"),
+    [(None, False), (0.05, True), (0.25, False)],
+    ids=["unmeasured", "small_forward", "large_forward"],
+)
+def test_a_measured_calibration_forward_sets_the_hessian_reserve(
+    monkeypatch, measured_fraction, stays
+):
+    """At 30% available, a GPU keeps a Hessian only once a measured forward leaves it room."""
+    total = torch.cuda.get_device_properties(0).total_memory
+    _report_available(monkeypatch, {0: total * 3 // 10})
+    monkeypatch.setattr(calib_utils, "get_process_gpus", lambda: [0])
+    if measured_fraction is not None:
+        calib_utils._calib_forward_peak[0] = int(measured_fraction * total)
+    linear = torch.nn.Linear(64, 8, bias=False, device="cuda:0")
+    helper = GPTQHelper(linear, "linear", offload_to_cpu=True)
+    assert helper.hessian.device == (torch.device("cuda", 0) if stays else torch.device("cpu"))
+
+
+def test_available_gpu_memory_is_what_one_allocation_can_get(monkeypatch):
+    """Free pieces of partly used cached blocks do not count: one allocation of all the memory
+    reported beyond the driver's free memory comes from the cache."""
+    torch.cuda.empty_cache()
+    whole = torch.empty(64 * 2**20, dtype=torch.uint8, device="cuda")
+    pieces = [torch.empty(3 * 2**20, dtype=torch.uint8, device="cuda") for _ in range(24)]
+    del whole, pieces[::2]  # a whole free block, and free pieces of partly used ones
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device=None: (0, 2**40))
+    available = get_available_gpu_memory(torch.cuda.current_device())
+    reserved = torch.cuda.memory_reserved()
+    block = torch.empty(available, dtype=torch.uint8, device="cuda")  # noqa: F841
+    assert torch.cuda.memory_reserved() == reserved
+
+
+def test_gptq_records_its_calibration_forward_memory(monkeypatch):
+    """The next layer's Hessian reserve covers what this layer's calibration forward added, and
+    not an earlier peak such as the previous layer's Hessians."""
+    monkeypatch.setattr(calib_utils, "_calib_forward_peak", {})
+    model = torch.nn.Linear(256, 256, device="cuda")
+    inputs = torch.randn(2, 16, 256, device="cuda")
+    mtq.quantize(model, mtq.NVFP4_DEFAULT_CFG, forward_loop=lambda m: m(inputs))
+    transient = 64 * 2**20
+
+    def forward_loop(m):
+        scratch = torch.empty(transient, dtype=torch.uint8, device="cuda")
+        m(inputs)
+        del scratch
+
+    earlier = 16 * transient
+    torch.empty(earlier, dtype=torch.uint8, device="cuda")  # freed at once; only the peak stays
+    gptq(model, forward_loop=forward_loop, perc_damp=0.1, block_size=16)
+    assert transient <= calib_utils._calib_forward_peak[torch.cuda.current_device()] < earlier // 2
 
 
 @pytest.mark.parametrize(
@@ -71,6 +451,13 @@ def test_gptq_updates(block_size, dim, model_weight, expect_weight_change):
         assert not torch.allclose(model.weight.data, q_dq_weight), "Weight should not be equal"
     else:
         assert torch.allclose(model.weight.data, q_dq_weight), "Weight should be equal"
+
+
+def test_a_hessian_that_is_not_positive_definite_gets_the_identity_inverse():
+    # On the GPU the factorizations report failure rather than raise it.
+    weight = torch.randn(8, 64, device="cuda")
+    h_inv = compute_hessian_inverse(torch.zeros(64, 64, device="cuda"), weight, perc_damp=0.01)
+    assert torch.equal(h_inv, torch.eye(64, device="cuda"))
 
 
 def test_gptq_export_roundtrip():
@@ -130,14 +517,14 @@ def test_gptq_export_roundtrip():
 @pytest.mark.parametrize(
     "quant_cfg", [mtq.NVFP4_DEFAULT_CFG, mtq.FP8_DEFAULT_CFG, mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG]
 )
-def test_gptq_e2e_flow(quant_cfg, tiny_tokenizer):
+def test_gptq_e2e_flow(quant_cfg, tiny_tokenizer, calib_jsonl):
     model = get_tiny_llama(vocab_size=tiny_tokenizer.vocab_size).to("cuda")
     model.eval()
 
     quant_cfg = copy.deepcopy(quant_cfg)
     quant_cfg["algorithm"] = {"method": "gptq", "layerwise": {"enable": True}}
     calib_dataloader = get_dataset_dataloader(
-        dataset_name="cnn_dailymail",
+        dataset_name=calib_jsonl,
         tokenizer=tiny_tokenizer,
         batch_size=2,
         num_samples=8,
@@ -155,7 +542,7 @@ def test_gptq_e2e_flow(quant_cfg, tiny_tokenizer):
 
 
 def _make_nvfp4_test_data(quant_block_size, out_features, dim):
-    """Create weight, weight_quantizer, block_amax, global_scale, and h_inv for NVFP4 GPTQ tests."""
+    """Create weight, weight_quantizer, block_scale, and h_inv for NVFP4 GPTQ tests."""
     # Build a quantized Linear with NVFP4 static config at the desired block size
     model = torch.nn.Linear(dim, out_features, bias=False, device="cuda")
     weight = model.weight.data.clone()
@@ -178,8 +565,9 @@ def _make_nvfp4_test_data(quant_block_size, out_features, dim):
     model.weight.data = weight.clone()
 
     weight_quantizer = model.weight_quantizer
-    block_amax = weight_quantizer.amax.reshape(out_features, -1).float()
-    global_scale = weight_quantizer.global_amax.float().item() / (6.0 * 448.0)
+    block_scale = calib_utils.triton_kernel.compute_fp4_scales(
+        weight_quantizer.amax, weight_quantizer.global_amax
+    ).reshape(out_features, -1)
 
     # Compute Hessian
     hessian = torch.zeros(dim, dim, dtype=torch.float32)
@@ -187,7 +575,7 @@ def _make_nvfp4_test_data(quant_block_size, out_features, dim):
     hessian = hessian.to("cuda")
     h_inv = compute_hessian_inverse(hessian, weight, perc_damp=0.01)
 
-    return weight, weight_quantizer, block_amax, global_scale, h_inv
+    return weight, weight_quantizer, block_scale, h_inv
 
 
 def _run_unfused_gptq_nvfp4(weight, weight_quantizer, h_inv, gptq_block_size):
@@ -197,15 +585,62 @@ def _run_unfused_gptq_nvfp4(weight, weight_quantizer, h_inv, gptq_block_size):
     return w
 
 
-def _run_fused_gptq_nvfp4(
-    weight, block_amax, global_scale, h_inv, gptq_block_size, quant_block_size
-):
+def _run_fused_gptq_nvfp4(weight, block_scale, h_inv, gptq_block_size, quant_block_size):
     """Fused Triton GPTQ for NVFP4 using the production fused update."""
     w = weight.float().clone()
-    gptq_blockwise_update_fused_scalar(
-        w, block_amax, global_scale, h_inv, gptq_block_size, quant_block_size
-    )
+    gptq_blockwise_update_fused_scalar(w, block_scale, h_inv, gptq_block_size, quant_block_size)
     return w
+
+
+@requires_triton
+def test_fused_nvfp4_gptq_runs_on_the_weights_gpu(need_2_gpus, monkeypatch):
+    """A layer device_map placed on another GPU is updated there, not from the current GPU."""
+    torch.manual_seed(42)
+    weight, _, block_scale, h_inv = _make_nvfp4_test_data(16, 64, 256)
+    expected = _run_fused_gptq_nvfp4(weight, block_scale, h_inv, 128, 16)
+
+    weight, block_scale, h_inv = (t.to("cuda:1") for t in (weight, block_scale, h_inv))
+    got = _run_fused_gptq_nvfp4(weight, block_scale, h_inv, 128, 16)
+
+    assert torch.cuda.current_device() == 0
+    torch.testing.assert_close(got.cpu(), expected.cpu(), rtol=0, atol=0)
+
+    # Through GPTQ, whose block scales come from an FP8 extension that launches on the current
+    # GPU. With peer access a launch from the wrong GPU can still compute the right values, so
+    # check which GPU is current as well as the result.
+    if torch.cuda.get_device_capability(1) < (8, 9):
+        pytest.skip("fused GPTQ needs SM89+")
+    scale_devices = []
+    compute_scales = calib_utils.triton_kernel.compute_fp4_scales
+    monkeypatch.setattr(
+        calib_utils.triton_kernel,
+        "compute_fp4_scales",
+        lambda *args: scale_devices.append(torch.cuda.current_device()) or compute_scales(*args),
+    )
+    model = torch.nn.Linear(256, 64, bias=False)
+    inputs = torch.randn(4, 16, 256)
+    quant_cfg = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {
+                "quantizer_name": "*weight_quantizer",
+                "cfg": {
+                    "num_bits": (2, 1),
+                    "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
+                },
+            },
+        ],
+        "algorithm": {"method": "gptq", "block_size": 128},
+    }
+    weights = []
+    for device in ("cuda:0", "cuda:1"):
+        qmodel = mtq.quantize(
+            copy.deepcopy(model).to(device), quant_cfg, forward_loop=lambda m: m(inputs.to(device))
+        )
+        weights.append(qmodel.weight.data.cpu())
+    assert torch.cuda.current_device() == 0
+    assert scale_devices == [0, 1]
+    torch.testing.assert_close(weights[1], weights[0], rtol=0, atol=0)
 
 
 _NVFP4_QUANT_BLOCK_SIZES = [16, 128]
@@ -221,7 +656,7 @@ def test_fused_vs_unfused_nvfp4(quant_block_size, gptq_block_size):
     dim = max(256, quant_block_size * 4)
     out_features = 64
 
-    weight, weight_quantizer, block_amax, global_scale, h_inv = _make_nvfp4_test_data(
+    weight, weight_quantizer, block_scale, h_inv = _make_nvfp4_test_data(
         quant_block_size,
         out_features,
         dim,
@@ -229,8 +664,7 @@ def test_fused_vs_unfused_nvfp4(quant_block_size, gptq_block_size):
 
     weight_fused = _run_fused_gptq_nvfp4(
         weight,
-        block_amax,
-        global_scale,
+        block_scale,
         h_inv,
         gptq_block_size,
         quant_block_size,
@@ -257,6 +691,96 @@ def test_fused_vs_unfused_nvfp4(quant_block_size, gptq_block_size):
     )
 
     torch.testing.assert_close(weight_fused, weight_unfused, atol=1e-4, rtol=1e-4)
+
+
+@requires_triton
+@pytest.mark.parametrize(
+    ("in_features", "block_size", "cfg_update", "takes_fused"),
+    [
+        (96, 48, {}, True),  # non-power-of-two GPTQ block
+        (208, 128, {}, True),  # non-power-of-two final block
+        (70, 128, {}, True),  # width the NVFP4 group size does not divide
+        (96, 40, {}, True),  # GPTQ block not a multiple of the group size
+        # The quantizer forward does more than a per-row static QDQ, so GPTQ stays unfused.
+        (64, 128, {"block_sizes": {"four_over_six": True}}, False),
+        (64, 128, {"block_sizes": {-2: 16}}, False),
+        (64, 128, {"rotate": {"enable": True, "mode": "rotate_back"}}, False),
+    ],
+)
+def test_gptq_fused_matches_unfused(in_features, block_size, cfg_update, takes_fused, monkeypatch):
+    if torch.cuda.get_device_capability() < (8, 9):
+        pytest.skip("fused GPTQ needs SM89+")
+    if "rotate" in cfg_update:
+        pytest.importorskip("fast_hadamard_transform")
+    fused_calls = []
+    fused_update = calib_utils.gptq_blockwise_update_fused_scalar
+    monkeypatch.setattr(
+        calib_utils,
+        "gptq_blockwise_update_fused_scalar",
+        lambda *args: fused_calls.append(1) or fused_update(*args),
+    )
+    torch.manual_seed(0)
+    model = torch.nn.Linear(in_features, 32, bias=False, device="cuda")
+    inp = torch.randn(4, 16, in_features, device="cuda")
+    block_sizes = {-1: 16, "type": "static", "scale_bits": (4, 3)}
+    weight_cfg = {
+        "num_bits": (2, 1),
+        **cfg_update,
+        "block_sizes": {**block_sizes, **cfg_update.get("block_sizes", {})},
+    }
+    weights = []
+    for fused in (True, False):
+        quant_cfg = {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {"quantizer_name": "*weight_quantizer", "cfg": weight_cfg},
+            ],
+            "algorithm": {"method": "gptq", "block_size": block_size, "fused": fused},
+        }
+        qmodel = mtq.quantize(copy.deepcopy(model), quant_cfg, forward_loop=lambda m: m(inp))
+        weights.append(qmodel.weight.data)
+    assert len(fused_calls) == int(takes_fused)
+    torch.testing.assert_close(weights[0], weights[1], atol=1e-4, rtol=1e-4)
+
+
+@requires_triton
+def test_gptq_on_a_model_requantized_from_nvfp4_to_int4_takes_the_int4_update(monkeypatch):
+    # A quantizer once promoted to static NVFP4 keeps its promotion marker when a later config
+    # makes it INT4; the fused NVFP4 update must not stand in for the INT4 quantizer then.
+    fused_calls = []
+    fused_update = calib_utils.gptq_blockwise_update_fused_scalar
+    monkeypatch.setattr(
+        calib_utils,
+        "gptq_blockwise_update_fused_scalar",
+        lambda *args: fused_calls.append(1) or fused_update(*args),
+    )
+    torch.manual_seed(0)
+    inp = torch.randn(4, 16, 64, device="cuda")
+
+    def config(weight_cfg, algorithm):
+        return {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {"quantizer_name": "*weight_quantizer", "cfg": weight_cfg},
+            ],
+            "algorithm": algorithm,
+        }
+
+    nvfp4 = {"num_bits": (2, 1), "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)}}
+    model = torch.nn.Linear(64, 32, bias=False, device="cuda")
+    mtq.quantize(model, config(nvfp4, "max"), forward_loop=lambda m: m(inp))
+    assert model.weight_quantizer._is_nvfp4_static_quantizer
+    # The INT4 groups calibrate an amax of their own shape; the promotion marker stays.
+    model.weight_quantizer.reset_amax()
+
+    int4 = {"num_bits": 4, "block_sizes": {-1: 16, "type": "static"}}
+    weights = []
+    for fused in (True, False):
+        gptq_cfg = config(int4, {"method": "gptq", "block_size": 64, "fused": fused})
+        qmodel = mtq.quantize(copy.deepcopy(model), gptq_cfg, forward_loop=lambda m: m(inp))
+        weights.append(qmodel.weight.data)
+    assert not fused_calls
+    torch.testing.assert_close(weights[0], weights[1], rtol=0, atol=0)
 
 
 _NVFP4_BENCH_CONFIGS = [
@@ -290,13 +814,13 @@ def bench_fused_nvfp4():
 
     for quant_block_size, gptq_block_size, out_features, dim in _NVFP4_BENCH_CONFIGS:
         torch.manual_seed(42)
-        weight, weight_quantizer, block_amax, global_scale, h_inv = _make_nvfp4_test_data(
+        weight, weight_quantizer, block_scale, h_inv = _make_nvfp4_test_data(
             quant_block_size, out_features, dim
         )
 
         def run_fused():
             return _run_fused_gptq_nvfp4(
-                weight, block_amax, global_scale, h_inv, gptq_block_size, quant_block_size
+                weight, block_scale, h_inv, gptq_block_size, quant_block_size
             )
 
         def run_unfused():

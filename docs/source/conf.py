@@ -74,6 +74,7 @@ extensions = [
     "sphinx_copybutton",  # line numbers getting copied so cannot use `:linenos:`
     "sphinx_inline_tabs",
     "sphinx_togglebutton",
+    "sphinxext.rediraffe",  # redirect pages for moved docs, see rediraffe_redirects
     "sphinxcontrib.autodoc_pydantic",
     "modelopt_autodoc_pydantic",
 ]
@@ -215,6 +216,23 @@ class PatchedHTMLTranslator(HTML5Translator):
 
         if node.get("secnumber"):
             self.body.append(("%s" + self.secnumber_suffix) % ".".join(map(str, node["secnumber"])))
+
+
+# Pages that moved, as {old docname: new docname}; sphinxext-rediraffe writes a redirect page at
+# each old path. Announcements gained a <yyyymmdd>- prefix so the source tree sorts by date.
+rediraffe_redirects = {
+    f"announcements/{slug}": f"announcements/{date}-{slug}"
+    for date, slug in [
+        ("20260713", "dspark-vs-domino"),
+        ("20260813", "github-pages-announcements"),
+        ("20260824", "autoquantize"),
+        ("20260909", "local-hessian"),
+        ("20260916", "qwen36-w4a4-qad"),
+        ("20260916", "scale-learning"),
+        ("20260928", "single-gpu-ptq"),
+        ("20261008", "autoquant-kv"),
+    ]
+}
 
 
 def setup(app: sphinx.application.Sphinx) -> None:

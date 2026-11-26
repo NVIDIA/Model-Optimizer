@@ -176,8 +176,7 @@ def get_parser() -> argparse.ArgumentParser:
         help=(
             "TensorRT-RTX implementation used with --calibration_eps NvTensorRtRtx. "
             "The legacy backend uses TensorRT-RTX libraries on PATH; "
-            "the ABI backend uses the installed standalone EP plugin. "
-            "The ABI backend requires Python 3.11 or later."
+            "the ABI backend uses the installed standalone EP plugin."
         ),
     )
     argparser.add_argument(
@@ -481,6 +480,17 @@ def get_parser() -> argparse.ArgumentParser:
             "set. Example: '--fp16 --workspace=4096'"
         ),
     )
+    autotune_group.add_argument(
+        "--autotune_remote_model_path",
+        type=str,
+        default=None,
+        help=(
+            "Path for the engine on the remote device. By default, a unique filename is created "
+            "in the remote user's working directory. Custom paths are overwritten and removed "
+            "after each benchmark; concurrent runs must use distinct paths. Only letters, digits, "
+            "'.', '_', '/', and '-' are accepted; '~' is not expanded."
+        ),
+    )
     return argparser
 
 
@@ -588,6 +598,7 @@ def main():
         autotune_warmup_runs=args.autotune_warmup_runs,
         autotune_timing_runs=args.autotune_timing_runs,
         autotune_trtexec_args=args.autotune_trtexec_args,
+        autotune_remote_model_path=args.autotune_remote_model_path,
         input_shapes_profile=args.input_shapes_profile,
         model_id=args.model_id,
         trust_remote_code=args.trust_remote_code,

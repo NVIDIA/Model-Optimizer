@@ -87,8 +87,6 @@ relative to shard I/O):
             --output_ckpt /path/to/DeepSeek-V4-Pro-nvfp4-experts
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import re

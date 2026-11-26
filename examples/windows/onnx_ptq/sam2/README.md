@@ -1,6 +1,6 @@
 # Scripts for ONNX SAM2 model
 
-This repository contains an example to demontrate 8-bit quantization of SAM2 ONNX model.
+This repository contains an example to demonstrate 8-bit quantization of SAM2 ONNX model.
 
 ## Table of Contents
 

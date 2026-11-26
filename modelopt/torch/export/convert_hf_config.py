@@ -17,6 +17,7 @@
 
 import warnings
 from collections import defaultdict
+from collections.abc import Collection
 from typing import Any
 
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
@@ -43,8 +44,24 @@ def _quant_algo_to_group_config(quant_algo: str, group_size: int | None = None) 
         }
     elif quant_algo == "FP8_PER_CHANNEL_PER_TOKEN":
         return {
-            "input_activations": {"dynamic": False, "num_bits": 8, "type": "float"},
+            "input_activations": {
+                "dynamic": True,
+                "num_bits": 8,
+                "type": "float",
+                "strategy": "token",
+            },
             "weights": {"dynamic": False, "num_bits": 8, "type": "float", "strategy": "channel"},
+        }
+    elif quant_algo == "FP8_PB_WO":
+        block_size = group_size or 128
+        return {
+            "weights": {
+                "dynamic": False,
+                "num_bits": 8,
+                "type": "float",
+                "strategy": "block",
+                "block_structure": [block_size, block_size],
+            },
         }
     elif quant_algo == "NVFP4":
         gs = group_size or 16
@@ -95,6 +112,13 @@ def _quant_algo_to_group_config(quant_algo: str, group_size: int | None = None) 
         return {
             "weights": {"dynamic": False, "num_bits": 8, "type": "int"},
         }
+    elif quant_algo == "INT8_PB_WO":
+        # INT8 weight-only with one scale per group of input columns.
+        if group_size is None:
+            raise ValueError("INT8_PB_WO requires a group size.")
+        return {
+            "weights": {"dynamic": False, "num_bits": 8, "type": "int", "group_size": group_size},
+        }
     elif quant_algo == "W8A8_SQ_PER_CHANNEL":
         return {
             "input_activations": {"dynamic": False, "num_bits": 8, "type": "int"},
@@ -115,13 +139,40 @@ def _quant_algo_to_group_config(quant_algo: str, group_size: int | None = None) 
         gs = group_size or 32
         return {
             "input_activations": {
+                "dynamic": True,
+                "num_bits": 8,
+                "type": "float",
+                "group_size": gs,
+                "strategy": "group",
+            },
+            "weights": {
                 "dynamic": False,
                 "num_bits": 8,
                 "type": "float",
                 "group_size": gs,
+                "strategy": "group",
             },
-            "weights": {"dynamic": False, "num_bits": 8, "type": "float", "group_size": gs},
         }
+    elif quant_algo in ("MXFP4", "W4A16_MXFP4"):
+        gs = group_size or 32
+        config = {
+            "weights": {
+                "dynamic": False,
+                "num_bits": 4,
+                "type": "float",
+                "group_size": gs,
+                "strategy": "group",
+            },
+        }
+        if quant_algo == "MXFP4":
+            config["input_activations"] = {
+                "dynamic": True,
+                "num_bits": 4,
+                "type": "float",
+                "group_size": gs,
+                "strategy": "group",
+            }
+        return config
     elif quant_algo.lower() in GGML_FORMATS:
         ggml_format = GGML_FORMAT_REGISTRY[quant_algo.lower()]
         block_size, payload_bytes = ggml_format.block_size, ggml_format.block_bytes
@@ -147,11 +198,17 @@ def _quant_algo_to_group_config(quant_algo: str, group_size: int | None = None) 
         return {"quant_algo": quant_algo}
 
 
-def convert_hf_quant_config_format(input_config: dict[str, Any]) -> dict[str, Any]:
+def convert_hf_quant_config_format(
+    input_config: dict[str, Any],
+    *,
+    target_types: Collection[str] | None = None,
+) -> dict[str, Any]:
     """Converts modelopt quantization config dictionary to align with llm-compressor config format.
 
     Args:
         input_config: The original quantization config dictionary.
+        target_types: Optional stable PyTorch module type names for homogeneous
+            config groups. ``None`` retains the historical Linear-only target.
 
     Note:
         The "targets" field specifies which PyTorch module types to quantize. Compressed-tensors
@@ -218,7 +275,7 @@ def convert_hf_quant_config_format(input_config: dict[str, Any]) -> dict[str, An
                 "group_size": group_size,
             },
             "weights": {"dynamic": False, "num_bits": 4, "type": "float", "group_size": group_size},
-            "targets": ["Linear"],
+            "targets": sorted(set(target_types)) if target_types else ["Linear"],
         }
         new_config["config_groups"] = {"group_0": config_group_details}
     elif quant_algo_value == "W4A16_NVFP4":
@@ -260,6 +317,20 @@ def convert_hf_quant_config_format(input_config: dict[str, Any]) -> dict[str, An
         if lora_rank is not None:
             config_group_details["lora_rank"] = lora_rank
         new_config["config_groups"] = {"group_0": config_group_details}
+    elif quant_algo_value in {
+        "FP8_PER_CHANNEL_PER_TOKEN",
+        "FP8_PB_WO",
+        "INT8_PB_WO",
+        "MXFP4",
+        "W4A16_MXFP4",
+        "MXFP8",
+        "W4A8_MXFP4_FP8",
+        "W4A8_NVFP4_FP8",
+    }:
+        group_size = original_quantization_details.get("group_size")
+        config_group_details = _quant_algo_to_group_config(quant_algo_value, group_size)
+        config_group_details["targets"] = ["Linear"]
+        new_config["config_groups"] = {"group_0": config_group_details}
     elif quant_algo_value == "MIXED_PRECISION":
         quantized_layers = original_quantization_details.get("quantized_layers", {})
 
@@ -291,6 +362,11 @@ def convert_hf_quant_config_format(input_config: dict[str, Any]) -> dict[str, An
 
     if quant_algo_value:
         new_config["quant_algo"] = quant_algo_value
+
+    group_size = original_quantization_details.get("group_size")
+    if group_size is not None:
+        # ModelOpt consumers use this top-level value to size block scales.
+        new_config["group_size"] = group_size
 
     kv_cache_quant_algo = original_quantization_details.get("kv_cache_quant_algo")
     if kv_cache_quant_algo:

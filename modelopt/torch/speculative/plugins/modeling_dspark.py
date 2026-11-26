@@ -62,8 +62,8 @@ teacher-forced forward and the loss. Three head variants are supported:
 The head uses its OWN embedding table (``markov_w1``), not the base model's, so
 the bias computation is fully self-contained on this module. Submodule names
 (``markov_w1`` / ``markov_w2`` / ``gate_proj`` / ``joint_proj`` /
-``confidence_proj``) match the upstream DeepSpec checkpoint layout so exported
-checkpoints stay portable.
+``confidence_proj``) match the upstream DeepSpec layout; ``DSparkExporter`` adapts
+the serving checkpoint format.
 """
 
 import logging
@@ -89,10 +89,6 @@ class DSparkModule(DFlashModule):
         self.projector_type = getattr(config, "projector_type", "dspark")
         self.markov_rank = int(config.markov_rank)
         self.markov_head_type = str(getattr(config, "markov_head_type", "vanilla")).lower()
-        # DSpark treats the anchor as the first prediction position (next-token
-        # alignment), matching Domino's shift_label path; kept as an attribute so
-        # the wrapper and exporter can read it uniformly.
-        self.shift_label = True
         if self.markov_rank <= 0:
             raise ValueError(f"DSpark requires markov_rank > 0, got {self.markov_rank}.")
         if self.markov_head_type not in ("vanilla", "gated", "rnn"):

@@ -57,7 +57,7 @@ FROM nvcr.io/nvidia/pytorch:26.07-py3@sha256:2140e699b3beaf7f96a0081fd9c9406bc38
 COPY . /opt/Model-Optimizer
 RUN env -u PIP_CONSTRAINT PIP_CONFIG_FILE=/dev/null python -m pip install --no-cache-dir \
         "/opt/Model-Optimizer[onnx]" \
-        "onnxruntime-gpu[cuda,cudnn]~=1.24.2" && \
+        "onnxruntime-gpu[cuda,cudnn]~=1.30.0" && \
     python -c "import modelopt, tensorrt as trt; assert trt.__version__ == '11.1.0.106'"
 
 WORKDIR /workspace

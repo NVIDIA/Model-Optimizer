@@ -20,5 +20,6 @@ from _test_utils.examples.run_command import run_hf_ptq_command
 
 @pytest.mark.timeout(420)  # PTQ + TRT-LLM multimodal deploy in one test; fp8 takes 190-270s in CI
 @pytest.mark.parametrize("quant", ["fp8", "nvfp4"])
+@pytest.mark.usefixtures("exclusive_gpu")  # the deploy takes 60% of free GPU memory for KV cache
 def test_qwen_vl(quant):
     run_hf_ptq_command(model=QWEN_VL_PATH, quant=quant, vlm=True)

@@ -60,11 +60,15 @@ class INT8QTensor(BaseQuantizedTensor):
             else:
                 reduce_axis = convert_quantization_axis_to_reduce_axis(input, axis)
                 amax = reduce_amax(input, axis=reduce_axis)
-            scales = amax / 127.0
+            # Keep the scales in FP32: amax / 127 of a small FP16 channel lands in the FP16
+            # subnormal range, where it loses precision or rounds to zero.
+            scales = amax.float() / 127.0
 
         # Calculate the scale shape and make sure it aligns with input and block_sizes
         expected_shape = list(input.shape)
-        expanded_scales = scales.clone()
+        # A zero scale means an all-zero channel or block; divide it by one so it stays zero
+        # instead of becoming NaN.
+        expanded_scales = torch.where(scales == 0, 1.0, scales)
         if block_sizes:
             for dim, block_size in block_sizes.items():
                 dim = dim if dim >= 0 else len(input.shape) + dim  # Convert negative index
@@ -84,8 +88,10 @@ class INT8QTensor(BaseQuantizedTensor):
             for dim, block_size in block_sizes.items():
                 expanded_scales = expanded_scales.repeat_interleave(block_size, dim=dim)
 
-        # Quantization
-        quantized_data = (input / expanded_scales).round().clamp(-128, 127).to(torch.int8)
+        # Quantize in FP32. `input / expanded_scales` alone would run in the input dtype when the
+        # scale is 0-dim (per-tensor), rounding the quotient before round().
+        quantized_data = input.to(torch.float32, copy=True).div_(expanded_scales)
+        quantized_data = quantized_data.round_().clamp_(-128, 127).to(torch.int8)
 
         return cls(original_input.shape, original_input.dtype, quantized_data), scales
 
@@ -121,4 +127,8 @@ class INT8QTensor(BaseQuantizedTensor):
         slices = tuple(slice(0, dim) for dim in self.metadata["shape"])
         scales = scales.to(self._quantized_data.device)
 
-        return (self._quantized_data.view(torch.int8).to(dtype) * scales.to(dtype))[slices]
+        # Multiply in FP32 and cast once: casting a small scale to FP16 first underflows it.
+        # Writing into a `dtype` output casts each product as it is stored, with no FP32 copy.
+        dequantized = torch.empty(shape, dtype=dtype, device=self._quantized_data.device)
+        torch.mul(self._quantized_data.view(torch.int8), scales.float(), out=dequantized)
+        return dequantized[slices]

@@ -30,11 +30,12 @@ from modelopt.onnx.export import (
     NVFP4QuantExporter,
 )
 from modelopt.onnx.export.nvfp4_exporter import _cast_fp4
-from modelopt.onnx.quantization.gs_patching import _export_value_info_proto
+from modelopt.onnx.quantization.gs_patching import _export_value_info_proto, patch_gs_modules
 from modelopt.onnx.quantization.qdq_utils import (
     _cast_fp8,
     apply_column_major_transformation,
     fp4qdq_to_2dq,
+    insert_dq_nodes,
     insert_transpose_nodes_for_column_major,
     qdq_to_dq,
     quantize_weights_to_int4,
@@ -844,7 +845,12 @@ class TestColumnMajorTransformation:
         input_data = np.random.randn(4, 32).astype(np.float16)
 
         # Run original model
-        original_session = ort.InferenceSession(original_model.SerializeToString())
+        # Compare the graph rewrites without version-dependent ORT quantization fusions.
+        options = ort.SessionOptions()
+        options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
+        original_session = ort.InferenceSession(
+            original_model.SerializeToString(), sess_options=options
+        )
         original_output = original_session.run(None, {"input": input_data})[0]
 
         # Create transformed model
@@ -908,7 +914,9 @@ class TestColumnMajorTransformation:
         transformed_model.ir_version = 10  # ORT only supports IR version up to 10
 
         # Run transformed model
-        transformed_session = ort.InferenceSession(transformed_model.SerializeToString())
+        transformed_session = ort.InferenceSession(
+            transformed_model.SerializeToString(), sess_options=options
+        )
         transformed_output = transformed_session.run(None, {"input": input_data})[0]
 
         # Print output values for visibility
@@ -985,7 +993,12 @@ class TestColumnMajorTransformation:
 
         # Run original model
         input_data = np.random.randn(4, 32).astype(np.float16)
-        original_session = ort.InferenceSession(original_model.SerializeToString())
+        # Compare the graph rewrites without version-dependent ORT quantization fusions.
+        options = ort.SessionOptions()
+        options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
+        original_session = ort.InferenceSession(
+            original_model.SerializeToString(), sess_options=options
+        )
         original_output = original_session.run(None, {"input": input_data})[0]
 
         # Apply column-major transformation using the actual functions
@@ -1058,7 +1071,9 @@ class TestColumnMajorTransformation:
         )
 
         # Run transformed model and verify output equivalence
-        transformed_session = ort.InferenceSession(transformed_model.SerializeToString())
+        transformed_session = ort.InferenceSession(
+            transformed_model.SerializeToString(), sess_options=options
+        )
         transformed_output = transformed_session.run(None, {"input": input_data})[0]
 
         print(f"Original model output shape: {original_output.shape}")
@@ -1231,6 +1246,33 @@ def create_test_model_with_dq_transpose_matmul(
     return model
 
 
+def create_test_model_with_matmul_qdq(zero_point: np.ndarray, scale: np.ndarray, weight):
+    """Create weight -> Q -> DQ -> MatMul, per-channel on the weight's output axis."""
+    graph = helper.make_graph(
+        nodes=[
+            helper.make_node(
+                "QuantizeLinear", ["weight", "w_scale", "w_zp"], ["w_q"], name="w_q", axis=1
+            ),
+            helper.make_node(
+                "DequantizeLinear", ["w_q", "w_scale", "w_zp"], ["w_dq"], name="w_dq", axis=1
+            ),
+            helper.make_node("MatMul", ["input", "w_dq"], ["output"], name="matmul"),
+        ],
+        name="matmul_qdq",
+        inputs=[helper.make_tensor_value_info("input", TensorProto.FLOAT, [4, weight.shape[0]])],
+        outputs=[helper.make_tensor_value_info("output", TensorProto.FLOAT, [4, weight.shape[1]])],
+        initializer=[
+            numpy_helper.from_array(weight, "weight"),
+            numpy_helper.from_array(scale, "w_scale"),
+            numpy_helper.from_array(zero_point, "w_zp"),
+        ],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 21)])
+    model.ir_version = 10
+    onnx.checker.check_model(model)
+    return model
+
+
 class TestQdqToDqTranspose:
     """qdq_to_dq must trace a Transpose and follow the Q/DQ pair's own quantization axis."""
 
@@ -1359,6 +1401,40 @@ class TestQdqToDqTranspose:
             qdq_to_dq(model)
 
 
+class TestQdqToDqWeightType:
+    """The converted weight must keep the type of the zero point the DQ node still uses."""
+
+    @pytest.mark.parametrize("unsigned", [False, True])
+    def test_converted_weight_matches_zero_point_type(self, unsigned):
+        weight = np.random.RandomState(3).randn(16, 32).astype(np.float32)
+        if unsigned:
+            # Asymmetric UINT8: the zero point is non-zero and the weight spans 0..255.
+            low, high = weight.min(axis=0), weight.max(axis=0)
+            scale = ((high - low) / 255.0).astype(np.float32)
+            zero_point = np.round(-low / scale).astype(np.uint8)
+            expected_type = TensorProto.UINT8
+        else:
+            scale = (np.abs(weight).max(axis=0) / 127.0).astype(np.float32)
+            zero_point = np.zeros(32, dtype=np.int8)
+            expected_type = TensorProto.INT8
+
+        model = create_test_model_with_matmul_qdq(zero_point, scale, weight)
+        inputs = {"input": np.random.RandomState(5).randn(4, 16).astype(np.float32)}
+
+        def run(m):
+            return ort.InferenceSession(
+                m.SerializeToString(), providers=["CPUExecutionProvider"]
+            ).run(None, inputs)[0]
+
+        expected = run(model)
+        converted = qdq_to_dq(onnx.ModelProto.FromString(model.SerializeToString()))
+
+        stored = next(t for t in converted.graph.initializer if t.name == "weight")
+        assert stored.data_type == expected_type
+        # onnx.checker does not catch a weight/zero-point type mismatch, so load it.
+        assert np.array_equal(run(converted), expected)
+
+
 class TestQdqToDqValidation:
     """Regression tests for qdq_to_dq input validation."""
 
@@ -1412,7 +1488,9 @@ class TestQdqToDqValidation:
         converted = qdq_to_dq(model)
         onnx.checker.check_model(converted, full_check=True)
         assert not any(node.op_type == "QuantizeLinear" for node in converted.graph.node)
+        # Keep this check on the graph output, independent of ORT fusion numerics.
         options = ort.SessionOptions()
+        options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
         options.intra_op_num_threads = 2
         options.inter_op_num_threads = 1
         session = ort.InferenceSession(
@@ -1502,3 +1580,45 @@ class TestLegacyEdgeLLMShims:
         assert "linear.weight_f8_scale" in initializer_names
         assert "linear.weight_f8_scale_f32_scale" in initializer_names
         assert "linear.weight" not in initializer_names
+
+
+@pytest.mark.parametrize("blocked_axis", [0, 1])
+@pytest.mark.parametrize("declared_axis", [0, 1])
+def test_insert_dq_uses_stored_blocked_layout(blocked_axis, declared_axis, monkeypatch):
+    """Inserted DQ must dequantize the stored layout, including transposed Gemm weights."""
+    # Restore GraphSurgeon hooks after exercising the real insertion helper.
+    for owner, attribute in [
+        (gs, "make_constant"),
+        (gs, "make_variable"),
+        (gs.exporters.onnx_exporter.OnnxExporter, "export_tensor_proto"),
+        (gs.exporters.onnx_exporter.OnnxExporter, "export_value_info_proto"),
+    ]:
+        monkeypatch.setattr(owner, attribute, getattr(owner, attribute, None), raising=False)
+    patch_gs_modules()
+    rng = np.random.default_rng(7125744)
+    shape = (256, 16) if blocked_axis == 0 else (16, 256)
+    quantized = rng.integers(-8, 8, size=shape, dtype=np.int8)
+    scale_shape = list(shape)
+    scale_shape[blocked_axis] //= 128
+    scale = rng.uniform(0.01, 0.03, size=scale_shape).astype(np.float32)
+    x = gs.Variable("x", dtype=np.float32, shape=(2, 256))
+    weight = gs.Constant("weight", np.zeros(shape, dtype=np.float32))
+    y = gs.Variable("y", dtype=np.float32, shape=(2, 16))
+    node = gs.Node("Gemm", "gemm", inputs=[x, weight], outputs=[y], attrs={"transB": blocked_axis})
+    graph = gs.Graph([node], inputs=[x], outputs=[y], opset=21)
+    attributes = {"axis": declared_axis, "block_size": 128}
+    insert_dq_nodes(graph, {"weight": scale}, {"weight": quantized}, attributes=attributes)
+    model = gs.export_onnx(graph)
+    model.ir_version = 10
+    onnx.checker.check_model(model)
+    data = rng.normal(size=(2, 256)).astype(np.float32)
+    dequantized = quantized.astype(np.float32) * np.repeat(scale, 128, axis=blocked_axis)
+    expected = data @ (dequantized.T if blocked_axis else dequantized)
+    options = ort.SessionOptions()
+    options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
+    options.intra_op_num_threads = 1
+    session = ort.InferenceSession(
+        model.SerializeToString(), sess_options=options, providers=["CPUExecutionProvider"]
+    )
+    np.testing.assert_allclose(session.run(None, {"x": data})[0], expected, atol=1e-6, rtol=1e-5)
+    assert attributes == {"axis": declared_axis, "block_size": 128}

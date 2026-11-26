@@ -21,16 +21,16 @@ import os
 import random
 import time
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager, suppress
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
-import requests
 import torch
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
+from .distributed import all_reduce, recorded_distribution_plan
 from .logging import print_rank_0, warn_rank_0
 
 if TYPE_CHECKING:
@@ -888,6 +888,8 @@ def get_dataset_dataloader(
         all_samples,
         return_tensors="pt",
         padding=True,
+        # Left padding creates fully masked causal rows, which can yield NaNs in cuDNN backward.
+        padding_side="right" if include_labels else None,
         truncation=True,
         max_length=max_sample_length,
     )
@@ -961,36 +963,43 @@ def _iter_use_cache_configs(model: torch.nn.Module) -> Iterator[Any]:
 
 
 @contextmanager
-def _disable_use_cache(model: torch.nn.Module) -> Iterator[None]:
+def _disable_use_cache(
+    model: torch.nn.Module, *, for_layerwise_capture: bool = False
+) -> Iterator[None]:
     """Set model config ``use_cache`` flags to ``False`` for the duration of the block.
 
     KV caching is unwanted during calibration / memory-probe forward passes:
     it wastes memory, and for hybrid Mamba/attention models (e.g., NemotronH)
-    the cache state is mutated in-place and breaks correctness. Setting
-    ``use_cache`` unconditionally (rather than only when it was already
-    present) also sidesteps configs that never assign the attribute at all
-    — e.g., ``Step3p5Config`` from stepfun-ai/Step-3.5-Flash — where forward
-    code that reads ``self.config.use_cache`` would otherwise raise
-    ``AttributeError``. Step3.7 keeps the relevant language config nested
-    under ``text_config``; that config object is handled the same way. The
-    prior value is restored on exit if one existed.
+    the cache state is mutated in-place and breaks correctness. Step-3.5-Flash
+    and Step3.7 read ``use_cache`` directly even when their configs omit it.
+    Dataset loops and batch-size probes provide this temporary flag on custom
+    configs too. Layerwise capture may see unrelated decoder metadata, so it
+    creates a missing flag only on those Step configs.
     """
-    states = []
-    for config in _iter_use_cache_configs(model):
-        had_attr = hasattr(config, "use_cache")
-        prev = config.use_cache if had_attr else None
-        config.use_cache = False
-        states.append((config, had_attr, prev))
+    missing = object()
 
-    try:
+    def restore(config, prev):
+        if getattr(config, "use_cache", missing) is prev:
+            return
+        if prev is missing:
+            delattr(config, "use_cache")
+        else:
+            config.use_cache = prev
+
+    with ExitStack() as stack:
+        for config in _iter_use_cache_configs(model):
+            prev = getattr(config, "use_cache", missing)
+            if (
+                for_layerwise_capture
+                and prev is missing
+                and getattr(config, "model_type", None) not in ("step3p5", "step3p7")
+            ):
+                continue
+            # An assignment validator may store the new value before raising.
+            stack.callback(restore, config, prev)
+            if prev is not False:
+                config.use_cache = False
         yield
-    finally:
-        for config, had_attr, prev in reversed(states):
-            if had_attr:
-                config.use_cache = prev
-            else:
-                with suppress(AttributeError):
-                    delattr(config, "use_cache")
 
 
 def get_max_batch_size(
@@ -999,17 +1008,62 @@ def get_max_batch_size(
     sample_memory_usage_ratio: float = 1.0,
     sample_input_single_batch: torch.Tensor | None = None,
     enable_grad: bool = False,
+    forward_step: Callable[[torch.nn.Module, torch.Tensor], Any] | None = None,
 ):
-    """Get the maximum batch size that can be used for the model."""
+    """Get the maximum batch size that can be used for the model.
+
+    ``forward_step(model, inputs)`` optionally probes a custom workload, including during
+    OOM retries. By default, probe a model forward (or generation for encoder-decoder models).
+
+    For a model whose recorded plan spans several ranks
+    (:func:`~modelopt.torch.utils.distributed.set_distribution_plan`), every rank must call it, and
+    every rank gets the same size: the smallest that each rank estimates from one forward on the GPU
+    it computes on. That estimate is not retried on out-of-memory; if it does not fit, pass an
+    explicit batch size. A model with no plan recorded is measured on every visible GPU.
+    """
+    args = (
+        model,
+        max_sample_length,
+        sample_memory_usage_ratio,
+        sample_input_single_batch,
+        enable_grad,
+        forward_step,
+    )
+    plan = recorded_distribution_plan(model)
+    if plan is not None and plan.world_size > 1:
+        # The smallest estimate gives every rank the same number of calibration steps. It is not
+        # probed: a rank retrying a smaller batch after an out-of-memory error would run more
+        # forwards, and their collectives, than its peers, and one that runs out of memory partway
+        # through a forward leaves them waiting in its collectives.
+        # The device this rank computes on, which LOCAL_RANK does not name under a launcher that
+        # shows each rank one GPU.
+        device = torch.device("cuda", torch.cuda.current_device())
+        return all_reduce("calib_batch_size", lambda: _max_batch_size(*args, device=device), min)
+    return _max_batch_size(*args)
+
+
+def _max_batch_size(
+    model: torch.nn.Module,
+    max_sample_length: int,
+    sample_memory_usage_ratio: float,
+    sample_input_single_batch: torch.Tensor | None,
+    enable_grad: bool,
+    forward_step: Callable[[torch.nn.Module, torch.Tensor], Any] | None,
+    device: torch.device | None = None,
+) -> int:
+    """:func:`get_max_batch_size` measured on ``device`` with one probe, or on every visible GPU."""
+    devices = range(torch.cuda.device_count()) if device is None else [device]
 
     def _get_free_gpu_mem():
-        min_gpu_free_mem = torch.cuda.get_device_properties(0).total_memory
+        min_gpu_free_mem = torch.cuda.get_device_properties(
+            0 if device is None else device
+        ).total_memory
         max_allocated_mem = 0
-        for device in range(torch.cuda.device_count()):
-            free_mem = torch.cuda.mem_get_info(device)[0]
+        for gpu in devices:
+            free_mem = torch.cuda.mem_get_info(gpu)[0]
             if free_mem < min_gpu_free_mem:
                 min_gpu_free_mem = free_mem
-                max_allocated_mem = torch.cuda.max_memory_allocated(device)
+                max_allocated_mem = torch.cuda.max_memory_allocated(gpu)
         return min_gpu_free_mem, max_allocated_mem
 
     torch.cuda.empty_cache()
@@ -1018,7 +1072,12 @@ def get_max_batch_size(
     is_enc_dec = model_type_is_enc_dec(model)
     # Call the module (not .forward) so nn.Module.__call__ runs pre/post-forward hooks — this is how
     # FSDP2 unshards/reshards a sharded root. generate() also calls the module internally.
-    infer_method = model.generate if is_enc_dec else model
+    if forward_step is None:
+        infer_method = model.generate if is_enc_dec else model
+    else:
+
+        def infer_method(inputs):
+            return forward_step(model, inputs)
 
     if sample_input_single_batch is None:
         sample_input_single_batch = (
@@ -1047,27 +1106,27 @@ def get_max_batch_size(
         else:
             target_data_batch = max(int(free_mem_before / mem_diff_per_data_batch), 1)
 
-        def _expand_to(batch: int) -> torch.Tensor:
-            return sample_input_single_batch.expand(
-                [
-                    batch if index == 0 else dim
-                    for index, dim in enumerate(sample_input_single_batch.shape)
-                ]
-            )
-
-        target_input = _expand_to(target_data_batch)
-
         # For some models on multi GPU, we observe the memory per batch is not a constant.
-        # So we just test the target batch size and make sure we do not go OOM.
-        while target_data_batch > 1:
-            with torch.set_grad_enabled(enable_grad):
-                try:
-                    infer_method(target_input)
-                    break
-                except torch.cuda.OutOfMemoryError:  # pragma: no cover - GPU OOM retry path
-                    target_data_batch = target_data_batch // 2  # pragma: no cover
-                    target_input = _expand_to(target_data_batch)  # pragma: no cover
-                    torch.cuda.empty_cache()  # pragma: no cover
+        # So we just test the target batch size and make sure we do not go OOM. A model distributed
+        # over several ranks is measured once, not probed (see get_max_batch_size).
+        if device is None:
+
+            def _expand_to(batch: int) -> torch.Tensor:
+                return sample_input_single_batch.expand(
+                    [
+                        batch if index == 0 else dim
+                        for index, dim in enumerate(sample_input_single_batch.shape)
+                    ]
+                )
+
+            while target_data_batch > 1:
+                with torch.set_grad_enabled(enable_grad):
+                    try:
+                        infer_method(_expand_to(target_data_batch))
+                        break
+                    except torch.cuda.OutOfMemoryError:  # pragma: no cover - GPU OOM retry path
+                        target_data_batch = target_data_batch // 2  # pragma: no cover
+                        torch.cuda.empty_cache()  # pragma: no cover
 
     # Regulate the data batch target to be 1, 2, 4, 8, 12, ..., capped at 64
     if target_data_batch < 2:
@@ -1107,7 +1166,11 @@ def _slice_batch(batch_data, start, end):
 
 
 def _process_batch(
-    batch_data, infer_method, max_working_batch_size=None, allowed_non_tensor_keys=None
+    batch_data,
+    infer_method,
+    max_working_batch_size=None,
+    allowed_non_tensor_keys=None,
+    split_on_oom=True,
 ):
     """Process a batch of data through the model's inference method.
 
@@ -1116,6 +1179,8 @@ def _process_batch(
         infer_method: Model's inference method (either forward or generate)
         max_working_batch_size: Maximum batch size known to work without OOM
         allowed_non_tensor_keys: Set of key names whose values may be non-tensor types
+        split_on_oom: Whether a batch that runs out of GPU memory is retried as two halves;
+            otherwise the error is raised
 
     Returns:
         The maximum batch size that worked successfully
@@ -1138,7 +1203,11 @@ def _process_batch(
             width = min(max_working_batch_size, batch_size - offset)
             split_data = _slice_batch(batch_data, offset, offset + width)
             max_working_batch_size = _process_batch(
-                split_data, infer_method, max_working_batch_size, allowed_non_tensor_keys
+                split_data,
+                infer_method,
+                max_working_batch_size,
+                allowed_non_tensor_keys,
+                split_on_oom,
             )
             offset += width
 
@@ -1153,6 +1222,8 @@ def _process_batch(
             else max(batch_size, max_working_batch_size)
         )  # This batch size worked successfully
     except torch.cuda.OutOfMemoryError:
+        if not split_on_oom:
+            raise
         assert batch_size > 1, (
             "CUDA out of memory error occurred while processing a single sample. "
             "This indicates the model is too large for the available GPU memory. "
@@ -1190,6 +1261,11 @@ def _forward_loop(
         dataloader: DataLoader containing the batched input data
         allowed_non_tensor_keys: Set of key names whose values may be non-tensor types
     """
+    # A batch that runs out of GPU memory is retried in halves, except for a model whose recorded plan
+    # spans several ranks: its forward can hold collectives, and a rank that retried would run more
+    # forwards than its peers, which would wait in them.
+    plan = recorded_distribution_plan(model)
+    split_on_oom = plan is None or plan.world_size == 1
     with _disable_use_cache(model), torch.no_grad():
         is_enc_dec = model_type_is_enc_dec(model)
         # Call the module (not .forward) so nn.Module.__call__ runs pre/post-forward hooks — this is
@@ -1200,7 +1276,7 @@ def _forward_loop(
         for _, data in enumerate(tqdm(dataloader)):
             # Process batch and update max working batch size
             max_working_batch_size = _process_batch(
-                data, infer_method, max_working_batch_size, allowed_non_tensor_keys
+                data, infer_method, max_working_batch_size, allowed_non_tensor_keys, split_on_oom
             )
 
 
@@ -1316,6 +1392,7 @@ def download_hf_dataset_as_jsonl(
     Returns:
         List of paths to downloaded JSONL files.
     """
+    import requests
     from datasets import load_dataset
     from huggingface_hub.utils import build_hf_headers
 

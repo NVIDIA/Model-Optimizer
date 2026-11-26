@@ -32,12 +32,12 @@ def convert_to_eagle_model(model: nn.Module, config: EagleConfig) -> ConvertRetu
     # initialize the true module if necessary
     model = model.init_modellike() if isinstance(model, ModelLikeModule) else model
 
-    original_cls = type(model)
-    if original_cls not in EagleDMRegistry:
-        for cls in EagleDMRegistry._registry:
-            if issubclass(original_cls, cls):
-                EagleDMRegistry.register({original_cls: "base_model_class"})(EagleDMRegistry[cls])
-                break
+    EagleDMRegistry.register_subclass(type(model), "base_model_class")
+
+    if config.eagle_loss_type not in EagleDMRegistry[type(model)]._supported_loss_types:
+        raise ValueError(
+            f"eagle_loss_type={config.eagle_loss_type!r} is not supported for {type(model).__name__}"
+        )
 
     # merge custom config with default config
     default_arch_config = {
@@ -45,7 +45,19 @@ def convert_to_eagle_model(model: nn.Module, config: EagleConfig) -> ConvertRetu
         "kimik2": kimik2_eagle_default_config,
     }[config.eagle_decoder_type]
     custom_config = config.eagle_architecture_config
-    config.eagle_architecture_config = {**default_arch_config, **custom_config}
+    arch_config = {**default_arch_config, **custom_config}
+    if config.eagle_loss_type == "lk_lambda":
+        base_config = (
+            getattr(model.config, "text_config", None)
+            or getattr(model.config, "llm_config", None)
+            or model.config
+        )
+        if arch_config.get("draft_vocab_size", base_config.vocab_size) != base_config.vocab_size:
+            raise ValueError(
+                "eagle_loss_type='lk_lambda' requires the full target vocabulary. "
+                "Use eagle_loss_type='soft_target_ce' for reduced-vocabulary EAGLE."
+            )
+    config.eagle_architecture_config = arch_config
 
     eagle_model = EagleDMRegistry.convert(model)
     eagle_model.modify(config)

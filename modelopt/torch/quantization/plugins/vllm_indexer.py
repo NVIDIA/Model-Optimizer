@@ -13,9 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Fake quantization of the sparse-attention indexer query and K cache in vLLM.
+"""Fake quantization of the sparse-attention indexer query, K cache and scorer in vLLM.
 
-Covers the CSA indexer of DeepSeek-V4 and the k-pool indexer of GLM-5.3-Flash.
+Covers the CSA indexer of DeepSeek-V4 and the k-pool indexer of GLM-5.3-Flash, whose layouts live
+with their models (``modelopt/torch/models/<model_type>/modeling_ptq_vllm.py``).
 
 ``indexer_k_quantizer`` fake-quantizes the key the serving kernel quantizes into the indexer K
 cache, and ``indexer_q_quantizer`` the query it quantizes for scoring. vLLM only materializes both
@@ -23,54 +24,24 @@ inside fused kernels that already produced FP8, so the FP8 tensors (the cache en
 current step, the query) are dequantized, fake-quantized and quantized again with the kernels' scale
 rule. The names avoid the ``*[kv]_bmm_quantizer`` globs, so the KV-cache presets leave them
 disabled.
+
+GLM-5.3-Flash's DeepGEMM scorer computes ``score[q, k] = k_scale[k] * sum_h W[q, h] *
+ReLU(q_h . k)``. ``indexer_scorer_kwargs_quantizer`` passes keyword arguments to that kernel, per
+layer, e.g. the numerics options of a DeepGEMM build that declares them in
+``MQA_LOGITS_NUMERICS``. :func:`register_indexer_scorer_kwargs_quantizer` adds quantizers that turn
+their own configs into such arguments. They start disabled.
 """
 
-import functools
-import importlib
 import inspect
-import weakref
 from collections.abc import Callable
-from types import ModuleType
 
 import torch
-from vllm.forward_context import get_forward_context
 
-from ..nn import QuantModule, QuantModuleRegistry, TensorQuantizer
+from ..config import QuantizerAttributeConfig
+from ..nn import QuantModule, TensorQuantizer, is_registered_quant_backend, register_quant_backend
 from .vllm import create_parallel_state
 
-__all__ = []
-
-# NotImplementedError: some vLLM model packages reject unsupported platforms at import
-# (e.g. glm5next on XPU).
-try:
-    from vllm.models.deepseek_v4.attention import DeepseekV4Indexer as VllmDeepseekV4Indexer
-except (ImportError, NotImplementedError):
-    VllmDeepseekV4Indexer = None
-
-
-def _import_glm5next_indexer() -> tuple[type | None, ModuleType | None]:
-    """Return GLM-5.3-Flash's ``Indexer`` and the module its indexer op binds as ``kpool_ops``."""
-    for indexer_path, op_path in (
-        # vLLM main: the op module is platform-dispatched, follow it to the bound variant.
-        ("vllm.models.glm5next.common.attention", "vllm.models.glm5next.sparse_indexer"),
-        # vLLM 0.28
-        (
-            "vllm.models.glm5next.nvidia.attention",
-            "vllm.model_executor.layers.sparse_attn_indexer_kpool",
-        ),
-    ):
-        try:
-            indexer_cls = importlib.import_module(indexer_path).Indexer
-            op_module = importlib.import_module(op_path)
-            op_module = importlib.import_module(op_module.SparseAttnIndexerKpool.__module__)
-            kpool_ops = op_module.kpool_ops
-        except (ImportError, AttributeError, NotImplementedError):
-            continue
-        return indexer_cls, kpool_ops
-    return None, None
-
-
-VllmGlm5NextIndexer, _glm5next_kpool_ops = _import_glm5next_indexer()
+__all__ = ["register_indexer_scorer_kwargs_quantizer"]
 
 _INDEXER_FP8_MAX = 448.0
 _INDEXER_K_SCALE_BYTES = 4
@@ -156,12 +127,84 @@ def _get_arg(args: tuple, kwargs: dict, name: str, pos: int):
     return kwargs[name] if name in kwargs else args[pos]
 
 
+# The built-in quantizer whose ``backend_extra_args`` are the scorer kernel's keyword arguments.
+_SCORER_KWARGS_QUANTIZER = "indexer_scorer_kwargs_quantizer"
+_SCORER_KWARGS_BACKEND = "scorer_kwargs"
+# Scorer keyword arguments of stock DeepGEMM; a build declares the others it accepts, with their
+# values, in ``deep_gemm.MQA_LOGITS_NUMERICS``.
+_STOCK_SCORER_KWARGS = ("logits_dtype",)
+
+
+def _passed_scorer_kwargs(quantizer: TensorQuantizer) -> dict:
+    """``indexer_scorer_kwargs_quantizer``: its ``backend_extra_args``, passed on as they are."""
+    if quantizer.backend != _SCORER_KWARGS_BACKEND:
+        raise ValueError(
+            f"{_SCORER_KWARGS_QUANTIZER} needs backend '{_SCORER_KWARGS_BACKEND}', "
+            f"got {quantizer.backend!r}."
+        )
+    return dict(quantizer.backend_extra_args or {})
+
+
+# The quantizers whose configs become keyword arguments of the GLM-5.3-Flash indexer's DeepGEMM
+# scorer kernel, with the functions that turn an enabled one into those arguments.
+_SCORER_KWARGS_QUANTIZERS: dict[str, Callable[[TensorQuantizer], dict]] = {
+    _SCORER_KWARGS_QUANTIZER: _passed_scorer_kwargs
+}
+
+
+def register_indexer_scorer_kwargs_quantizer(
+    name: str, scorer_kwargs: Callable[[TensorQuantizer], dict]
+) -> None:
+    """Add the quantizer ``name`` to the vLLM indexers that are converted from now on.
+
+    It starts disabled. Enabled, ``scorer_kwargs(quantizer)`` turns its config into keyword
+    arguments of the GLM-5.3-Flash indexer's DeepGEMM scorer kernel, which every scorer call of
+    that layer then gets while the quantizer quantizes; it raises for a config it cannot express.
+    Other indexers reject the quantizer. The built-in ``indexer_scorer_kwargs_quantizer`` passes its
+    ``backend_extra_args`` (``backend: scorer_kwargs``) on as they are. Like for the built-in one,
+    ``mtq.quantize`` raises when a config enables the quantizer but no indexer has it.
+    """
+    from ..model_quant import _PLUGIN_QUANTIZERS
+
+    _SCORER_KWARGS_QUANTIZERS[name] = scorer_kwargs
+    _PLUGIN_QUANTIZERS[name] = _PLUGIN_QUANTIZERS[_SCORER_KWARGS_QUANTIZER]
+
+
+def _scorer_kwargs_backend(inputs: torch.Tensor, quantizer: TensorQuantizer) -> torch.Tensor:
+    raise RuntimeError(
+        f"backend '{_SCORER_KWARGS_BACKEND}' passes keyword arguments to the DeepGEMM indexer "
+        "scorer kernel and never runs on a tensor."
+    )
+
+
+if not is_registered_quant_backend(_SCORER_KWARGS_BACKEND):
+    register_quant_backend(_SCORER_KWARGS_BACKEND, _scorer_kwargs_backend)
+
+
+def _scorer_logits_dtype(value) -> torch.dtype:
+    """The scorer's ``logits_dtype``, also from its name in a config (``bfloat16``)."""
+    dtype = getattr(torch, value, None) if isinstance(value, str) else value
+    if dtype not in (torch.float32, torch.bfloat16):
+        raise ValueError(f"The scorer's logits_dtype is float32 or bfloat16, got {value!r}.")
+    return dtype
+
+
+def _widen_logits(logits: torch.Tensor) -> torch.Tensor:
+    """FP32 copy of ``logits`` with the same strides, which vLLM's top-k kernels read explicitly."""
+    widened = torch.empty_strided(
+        logits.shape, logits.stride(), dtype=torch.float32, device=logits.device
+    )
+    return widened.copy_(logits)
+
+
 class _QuantVLLMIndexerBase(QuantModule):
-    """Owner of ``indexer_q_quantizer`` and ``indexer_k_quantizer`` for one vLLM indexer layout."""
+    """Owner of the indexer quantizers for one vLLM indexer layout."""
 
     def _setup(self):
         self.indexer_q_quantizer = TensorQuantizer()
         self.indexer_k_quantizer = TensorQuantizer()
+        for name in _SCORER_KWARGS_QUANTIZERS:  # opt-in, unlike the q and K quantizers
+            setattr(self, name, TensorQuantizer(QuantizerAttributeConfig(enable=False)))
         self.parallel_state = create_parallel_state()
 
     def forward(self, *args, **kwargs):
@@ -171,199 +214,23 @@ class _QuantVLLMIndexerBase(QuantModule):
         # would otherwise try to convert it a second time (inconsistent MRO).
         return super().forward(*args, **kwargs)
 
+    def modelopt_post_restore(self, prefix: str = ""):
+        """Also reject restored scorer quantizers that the layout cannot apply."""
+        super().modelopt_post_restore(prefix)
+        self._validate_scorer_quantizers()
 
-class _QuantVLLMDeepseekV4Indexer(_QuantVLLMIndexerBase):
-    """DeepSeek-V4 indexer: fused kernels FP8-quantize the query and cache the compressed key.
+    def _enabled_scorer_quantizers(self) -> list[str]:
+        # A quantizer registered after the conversion is missing.
+        return [
+            name
+            for name in _SCORER_KWARGS_QUANTIZERS
+            if hasattr(self, name) and getattr(self, name).is_enabled
+        ]
 
-    After the forward, the cache entries the compressor wrote (one per ``compress_ratio`` tokens)
-    are re-quantized through ``indexer_k_quantizer`` and the returned query through
-    ``indexer_q_quantizer``. vLLM uses both without the Hadamard rotation that the DeepSeek
-    reference applies.
-    """
-
-    def _setup(self):
-        super()._setup()
-        self._positions_pos = _native_positional_index(self, "forward", "positions")
-        self._indexer_weights_pos = _native_positional_index(self, "forward", "indexer_weights")
-
-    def forward(self, *args, **kwargs):
-        q, q_scale, weights = super().forward(*args, **kwargs)
-        if self.indexer_k_quantizer.is_enabled:
-            self._check_fp8_indexer()
-            self._requantize_written_keys(_get_arg(args, kwargs, "positions", self._positions_pos))
-        if self.indexer_q_quantizer.is_enabled and q is not None:  # None: short-context shortcut
-            self._check_fp8_indexer()
-            indexer_weights = _get_arg(args, kwargs, "indexer_weights", self._indexer_weights_pos)
-            q, weights = self._requantize_query(q, weights, indexer_weights)
-        return q, q_scale, weights
-
-    def _check_fp8_indexer(self) -> None:
-        if getattr(self, "use_fp4_kv", False):
+    def _validate_scorer_quantizers(self) -> None:
+        """Reject enabled scorer quantizers; the layouts that implement them override this."""
+        if enabled := self._enabled_scorer_quantizers():
             raise NotImplementedError(
-                "The indexer quantizers re-quantize the FP8 indexer query and cache; serve with "
-                "the default indexer_kv_dtype instead of 'mxfp4'."
+                f"{', '.join(enabled)}: the indexer scorer quantizers are only implemented for the "
+                "GLM-5.3-Flash k-pool indexer."
             )
-
-    def _requantize_query(
-        self, q: torch.Tensor, weights: torch.Tensor, indexer_weights: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Re-quantize the FP8 query; the kernel folds its power-of-two scale into ``weights``.
-
-        The kernel returns ``indexer_weights * q_scale * softmax_scale * n_head**-0.5`` as
-        ``weights`` and no ``q_scale``: divide the other factors out, round to the power of two and
-        swap in the new scale.
-        """
-        base = indexer_weights.float() * self.softmax_scale * self.n_head**-0.5
-        # A head with zero weight does not score; zero its row instead of recovering its scale.
-        live = (weights != 0) & (base != 0)
-        ratio = torch.where(live, weights / torch.where(live, base, 1.0), 1.0)
-        old_scale = torch.exp2(torch.round(torch.log2(ratio)))
-        x = torch.where(live[..., None], q.float() * old_scale[..., None], 0.0)
-        q, new_scale = _fake_quantize_fp8_rows(x, self.indexer_q_quantizer)
-        return q, weights * (new_scale / old_scale)
-
-    def _requantize_written_keys(self, positions: torch.Tensor) -> None:
-        attn_metadata = get_forward_context().attn_metadata
-        if not isinstance(attn_metadata, dict):  # profiling run: nothing was written
-            return
-        # The compress kernel skips tokens without a compressor-state slot or an indexer-cache
-        # slot, and only the last token of each compression group produces an entry.
-        state_slots = attn_metadata[self.compressor.state_cache.prefix].slot_mapping
-        num_tokens = state_slots.shape[0]
-        k_slots = attn_metadata[self.k_cache.prefix].slot_mapping[:num_tokens]
-        positions = positions[:num_tokens]
-        valid = (k_slots >= 0) & (state_slots >= 0) & ((positions + 1) % self.compress_ratio == 0)
-        _requantize_fp8_indexer_k_cache(
-            self.k_cache.kv_cache, k_slots, valid, self.indexer_k_quantizer
-        )
-
-
-# GLM-5.3-Flash indexers converted in this process, looked up by the cache tensor a kernel writes.
-_glm5next_indexers: weakref.WeakSet = weakref.WeakSet()
-
-
-def _glm5next_quantizer_for(kv_cache: torch.Tensor) -> TensorQuantizer | None:
-    """The enabled ``indexer_k_quantizer`` of the indexer that owns ``kv_cache``, if any."""
-    for indexer in _glm5next_indexers:
-        quantizer = indexer.indexer_k_quantizer
-        if quantizer.is_enabled and indexer.k_cache.kv_cache.data_ptr() == kv_cache.data_ptr():
-            return quantizer
-    return None
-
-
-def _kpool_prefill_written(arguments: dict) -> tuple[torch.Tensor, torch.Tensor]:
-    """Slots written by ``kpool_compress_and_write_cache``: ``loc`` where valid and unmasked."""
-    loc = arguments["loc"]
-    valid = loc >= 0
-    if arguments.get("write_mask") is not None:
-        valid = valid & arguments["write_mask"]
-    if not arguments.get("write_cache", True):
-        valid = torch.zeros_like(valid)
-    return loc, valid
-
-
-def _kpool_decode_written(arguments: dict) -> tuple[torch.Tensor, torch.Tensor]:
-    """Slots written by the decode update: pool-completing tokens with valid slot and position."""
-    slots = arguments["slot_mapping"].reshape(-1)
-    positions = arguments["positions"].reshape(-1)
-    pool_size = arguments["pool_size"]
-    valid = (slots >= 0) & (positions >= 0) & (positions % pool_size == pool_size - 1)
-    return slots, valid
-
-
-def _wrap_kpool_cache_writer(kpool_ops: ModuleType, name: str, written_slots: Callable) -> None:
-    """Wrap ``kpool_ops.<name>`` so the pools it wrote are re-quantized after every call.
-
-    The wrap is permanent: the indexer op is a breakable-cudagraph eager break that vLLM replays
-    without re-entering ``Indexer.forward``, so a per-forward patch would miss every replayed step.
-    """
-    original = getattr(kpool_ops, name)
-    if getattr(original, "_modelopt_indexer_k_wrapped", False):
-        return
-    signature = inspect.signature(original)
-
-    @functools.wraps(original)
-    def wrapper(*args, **kwargs):
-        out = original(*args, **kwargs)
-        # Conversion registers every indexer, also those whose quantizer is disabled.
-        if not any(indexer.indexer_k_quantizer.is_enabled for indexer in _glm5next_indexers):
-            return out
-        bound = signature.bind(*args, **kwargs)
-        bound.apply_defaults()
-        kv_cache = bound.arguments["kv_cache"]
-        quantizer = _glm5next_quantizer_for(kv_cache)
-        if quantizer is not None:
-            slots, valid = written_slots(bound.arguments)
-            _requantize_fp8_indexer_k_cache(kv_cache, slots, valid, quantizer)
-        return out
-
-    wrapper._modelopt_indexer_k_wrapped = True  # type: ignore[attr-defined]
-    setattr(kpool_ops, name, wrapper)
-
-
-# GLM-5.3-Flash's fused Hadamard + FP8 quantization of the indexer query.
-_GLM5NEXT_QUERY_KERNEL = "fwht128_quant_fp8"
-
-
-class _QuantVLLMGlm5NextIndexer(_QuantVLLMIndexerBase):
-    """GLM-5.3-Flash indexer: kernels Hadamard-rotate and FP8-quantize the query and pooled keys.
-
-    The kernel entry points that write the indexer K cache are wrapped process-wide and re-quantize
-    the pools they wrote, on prefill and on decode pool completion. The query kernel is swapped for
-    a re-quantizing wrapper while ``forward`` runs; CUDA graph capture records the wrapper.
-    """
-
-    kpool_ops: ModuleType | None = _glm5next_kpool_ops
-    # The native forward looks up its query kernel in this module.
-    indexer_module: ModuleType | None = (
-        inspect.getmodule(VllmGlm5NextIndexer) if VllmGlm5NextIndexer is not None else None
-    )
-
-    def _setup(self):
-        super()._setup()
-        assert self.kpool_ops is not None  # imported together with the registered indexer class
-        _glm5next_indexers.add(self)
-        # Every layer calls these; only the first call wraps.
-        _wrap_kpool_cache_writer(
-            self.kpool_ops, "kpool_compress_and_write_cache", _kpool_prefill_written
-        )
-        _wrap_kpool_cache_writer(
-            self.kpool_ops,
-            "kpool_decode_update_and_maybe_write_cache_batched",
-            _kpool_decode_written,
-        )
-
-    def forward(self, *args, **kwargs):
-        if not self.indexer_q_quantizer.is_enabled:
-            return super().forward(*args, **kwargs)
-        module = self.indexer_module
-        quant_fn = getattr(module, _GLM5NEXT_QUERY_KERNEL, None)
-        if quant_fn is None:
-            raise NotImplementedError(
-                "indexer_q_quantizer: this vLLM version's GLM-5.3-Flash indexer does not quantize "
-                f"the query with {_GLM5NEXT_QUERY_KERNEL}."
-            )
-        # Swap the module global for this call only; vLLM runs one forward at a time.
-        setattr(module, _GLM5NEXT_QUERY_KERNEL, functools.partial(self._quantize_query, quant_fn))
-        try:
-            return super().forward(*args, **kwargs)
-        finally:
-            setattr(module, _GLM5NEXT_QUERY_KERNEL, quant_fn)
-
-    def _quantize_query(
-        self, quant_fn: Callable, q: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        q_fp8, q_scale = quant_fn(q)  # rotated query [rows, 128] and its [rows, 1] scales
-        q_fp8, q_scale = _fake_quantize_fp8_rows(q_fp8.float() * q_scale, self.indexer_q_quantizer)
-        return q_fp8, q_scale[:, None]
-
-
-if VllmDeepseekV4Indexer is not None:
-    QuantModuleRegistry.register({VllmDeepseekV4Indexer: "vllm_DeepseekV4Indexer"})(
-        _QuantVLLMDeepseekV4Indexer
-    )
-
-if VllmGlm5NextIndexer is not None:
-    QuantModuleRegistry.register({VllmGlm5NextIndexer: "vllm_Glm5NextIndexer"})(
-        _QuantVLLMGlm5NextIndexer
-    )

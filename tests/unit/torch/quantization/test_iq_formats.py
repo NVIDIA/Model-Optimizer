@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Behaviour every GGML IQ format shares, exercised identically for each of them.
+"""Shared IQ1/IQ2 catalog contracts, exercised identically for each of them.
 
 The formats differ only in codebook size, payload layout and bits per weight. Anything that
 should hold for one should hold for all, so the contract lives here once and is parametrized
@@ -36,6 +36,7 @@ import modelopt.torch.quantization.ggml.iq2_xs as iq2_xs_module
 import modelopt.torch.quantization.ggml.iq2_xxs as iq2_xxs_module
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.ggml import IQ_FORMAT_REGISTRY
+from modelopt.torch.quantization.ggml.scale_fields import decode_scale_fields, replace_scale_fields
 from modelopt.torch.quantization.nn import TensorQuantizer
 
 # name -> (module, packed bytes per block, codebook entries, bits per weight)
@@ -47,11 +48,13 @@ FORMATS = {
     "iq2_s": (iq2_s_module, 82, 1024, 2.5625),
 }
 NAMES = sorted(FORMATS)
-# The formats backend dispatch can reach. A codec can land before it is registered, so the
-# tests that go through TensorQuantizer iterate these rather than every codec above.
+# The formats backend dispatch can reach.
 DISPATCHED = sorted(IQ_FORMAT_REGISTRY)
 # IQ1 grids are ternary; IQ2 grids hold the magnitudes 8, 25 and 43.
 TERNARY = {"iq1_s", "iq1_m"}
+# Weights sharing one sub-block scale: the formats with an extra 0.19-0.25 bits per weight spend
+# them on scales twice as fine.
+INT8_GROUP_SIZES = {"iq1_s": 32, "iq1_m": 16, "iq2_xxs": 32, "iq2_xs": 16, "iq2_s": 16}
 # name -> (largest representable magnitude, scale anchor at peak-to-RMS 1, 4, 8 and 16), where the
 # anchor is d * native max / amax. IQ1_S is flat; IQ1_M rises with peak-to-RMS and the IQ2 formats
 # fall with it, each clamped at both ends. Written out rather than read from the modules, so a
@@ -213,6 +216,12 @@ def test_saturates_finite_values_above_the_float32_range(name):
     packed, _ = quantize(weight)
     assert torch.equal(packed, quantize(saturated)[0])
     assert not torch.equal(packed, quantize(zeroed)[0])
+    # Forwards and export encode at a derived, energy-matched scale, which must saturate too
+    # rather than overflow and zero the block.
+    fmt = IQ_FORMAT_REGISTRY[name]
+    packed, _ = fmt.plain_quantize(weight)
+    assert torch.equal(packed, fmt.plain_quantize(saturated)[0])
+    assert fmt.payload_scales(packed.reshape(-1, fmt.block_bytes)).item() == 65504
 
 
 @pytest.mark.parametrize("name", NAMES)
@@ -225,10 +234,24 @@ def test_rejects_invalid_shape_metadata(name):
 
 
 @pytest.mark.parametrize("name", NAMES)
-def test_rejects_scalar_packed_payload(name):
-    _, _, dequantize, _, _, _, _ = _parts(name)
+@pytest.mark.parametrize("malformation", ["scalar", "dtype", "width"])
+def test_rejects_invalid_packed_payload(name, malformation):
+    _, _, dequantize, _, block_bytes, _, _ = _parts(name)
+    fmt = IQ_FORMAT_REGISTRY[name]
+    packed = torch.zeros((2, 1, block_bytes), dtype=torch.uint8)
+    global_scale, local, _ = decode_scale_fields(packed, fmt)
+    if malformation == "scalar":
+        packed = torch.tensor(0, dtype=torch.uint8)
+    elif malformation == "dtype":
+        packed = packed.to(torch.int16)
+    else:
+        packed = packed.reshape(1, 2 * block_bytes)
     with pytest.raises(ValueError, match="packed_weights"):
-        dequantize(torch.tensor(0, dtype=torch.uint8), torch.tensor([1, 256]))
+        dequantize(packed, torch.tensor([2, 256]))
+    with pytest.raises(ValueError):
+        decode_scale_fields(packed, fmt)
+    with pytest.raises(ValueError):
+        replace_scale_fields(packed, fmt, global_scale, local)
 
 
 @pytest.mark.parametrize("name", DISPATCHED)
@@ -293,6 +316,24 @@ def test_decoder_matches_llama_cpp_on_captured_blocks(name):
     ).reshape(count, 256)
 
     assert np.array_equal(decoded.numpy(), expected_values(name))
+
+
+@pytest.mark.parametrize("name", NAMES)
+def test_int8_view_matches_llama_cpp_on_captured_blocks(name):
+    """Integer levels times their group's step are llama.cpp's decoding, exactly."""
+    record = IQ_FORMAT_REGISTRY[name]
+    blocks = torch.from_numpy(packed_blocks(name))
+    count, group_size = blocks.shape[0], INT8_GROUP_SIZES[name]
+
+    levels, steps = record.decode_int8(blocks.reshape(count, 1, -1), torch.tensor([count, 256]))
+
+    assert record.int8_group_size == group_size
+    assert levels.dtype == torch.int8
+    assert set(levels.abs().unique().tolist()) <= (
+        {8, 25, 43} if name not in TERNARY else {1, 7, 9}
+    )
+    decoded = levels.float().reshape(count, -1, group_size) * steps.unsqueeze(-1)
+    assert np.array_equal(decoded.reshape(count, 256).numpy(), expected_values(name))
 
 
 def test_every_format_has_conformance_vectors():
@@ -367,3 +408,40 @@ def test_rejects_invalid_importance(name, importance, match):
 
     with pytest.raises(ValueError, match=match):
         quantize(torch.randn(4, 512), importance=importance)
+
+
+@pytest.mark.parametrize("name", NAMES)
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf"), -1.0, -1e-4])
+def test_rejects_invalid_scales(name, bad):
+    """A non-finite scale decodes to garbage; a negative one inverts every decoded element.
+
+    The encoders check the values, as they do importance's, so the CUDA packers need not read them
+    back on every encode.
+    """
+    _, quantize, *_ = _parts(name)
+
+    with pytest.raises(ValueError, match="scales must be finite and non-negative"):
+        quantize(torch.randn(1, 256), scales=torch.full((1,), bad, dtype=torch.float16))
+
+
+@pytest.mark.parametrize("name", NAMES)
+def test_fixed_choices_take_each_group_from_that_choices_encoding(name):
+    """A fixed choice decodes as the encoding giving every group that choice; the search's own pick
+    is the choice of least squared error."""
+    fmt = IQ_FORMAT_REGISTRY[name]
+    groups, size = fmt.choice_groups, 256 // fmt.choice_groups
+    weight = torch.randn(4, 512, generator=torch.Generator().manual_seed(0))
+    shape = (4, 2, groups)
+
+    def decode(**kwargs):
+        packed, logical = fmt.quantize(weight, **kwargs)
+        return fmt.dequantize(packed, logical, dtype=torch.float32).reshape(*shape, size)
+
+    each = torch.stack([decode(choices=torch.full(shape, c)) for c in range(fmt.num_choices)])
+    fixed = torch.randint(0, fmt.num_choices, shape, generator=torch.Generator().manual_seed(1))
+    searched = (each - weight.reshape(*shape, size)).square().sum(-1).argmin(0)
+    for picks, kwargs in [(fixed, {"choices": fixed}), (searched, {})]:
+        expected = each.gather(0, picks[None, ..., None].expand(1, *shape, size))[0]
+        assert torch.equal(decode(**kwargs), expected)
+    with pytest.raises(ValueError, match="choices must lie in"):
+        fmt.quantize(weight, choices=torch.full(shape, fmt.num_choices))

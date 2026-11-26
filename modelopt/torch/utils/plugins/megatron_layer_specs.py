@@ -16,14 +16,22 @@
 """Megatron-Core layer specs used to build models for ModelOpt workflows."""
 
 import copy
+import inspect
+from collections.abc import Callable
 
 from megatron.core.models.gpt.moe_module_specs import get_moe_module_spec
 from megatron.core.models.hybrid.hybrid_layer_specs import (
     hybrid_stack_spec as _te_hybrid_stack_spec,
 )
-from megatron.core.transformer.spec_utils import ModuleSpec
+from megatron.core.transformer.identity_op import IdentityOp
+from megatron.core.transformer.moe.experts import SequentialMLP, TEGroupedMLP
+from megatron.core.transformer.spec_utils import ModuleSpec, get_module, get_submodules
 
-__all__ = ["te_hybrid_stack_spec_sequential_mlp"]
+__all__ = [
+    "hybrid_stack_spec_grouped_mlp",
+    "hybrid_stack_spec_sequential_mlp",
+    "te_hybrid_stack_spec_sequential_mlp",
+]
 
 
 def te_hybrid_stack_spec_sequential_mlp() -> ModuleSpec:
@@ -44,3 +52,62 @@ def te_hybrid_stack_spec_sequential_mlp() -> ModuleSpec:
         use_te=True, num_experts=8, moe_grouped_gemm=False
     )
     return te_hybrid_stack_spec
+
+
+def hybrid_stack_spec_sequential_mlp(
+    stack_spec_factory: Callable[..., ModuleSpec], config=None
+) -> ModuleSpec:
+    """Replace only the experts in a model-specific hybrid stack.
+
+    Its module path and name are written into ``run_config.yaml`` as a ``_target_``, so moving or
+    renaming it breaks saved custom-stack checkpoints.
+    """
+    return _hybrid_stack_spec_with_expert_layout(stack_spec_factory, config, moe_grouped_gemm=False)
+
+
+def hybrid_stack_spec_grouped_mlp(
+    stack_spec_factory: Callable[..., ModuleSpec], config=None
+) -> ModuleSpec:
+    """Preserve a model-specific hybrid stack and require TEGroupedMLP experts.
+
+    Its module path and name are checkpoint targets and must remain stable.
+    """
+    return _hybrid_stack_spec_with_expert_layout(stack_spec_factory, config, moe_grouped_gemm=True)
+
+
+def _hybrid_stack_spec_with_expert_layout(stack_spec_factory, config, moe_grouped_gemm):
+    stack_spec = copy.deepcopy(
+        stack_spec_factory(config)
+        if inspect.signature(stack_spec_factory).parameters
+        else stack_spec_factory()
+    )
+    moe_layer = stack_spec.submodules.moe_layer
+    if (
+        moe_layer is None
+        or moe_layer is IdentityOp
+        or getattr(moe_layer, "module", None) is IdentityOp
+    ):
+        return stack_spec
+
+    moe = get_submodules(moe_layer.submodules.mlp)
+    expert_type = (
+        get_module(moe.experts)
+        if isinstance(moe.experts, ModuleSpec)
+        else getattr(moe.experts, "func", moe.experts)
+    )
+    if moe_grouped_gemm:
+        if expert_type is not TEGroupedMLP:
+            raise ValueError(
+                "Grouped GEMM requires a custom hybrid factory that returns TEGroupedMLP experts; "
+                "use moe_grouped_gemm=False (or --no_moe_grouped_gemm in scripts) "
+                "for SequentialMLP experts"
+            )
+        return stack_spec
+    if expert_type is SequentialMLP:
+        return stack_spec
+    if expert_type is not TEGroupedMLP:
+        raise ValueError("Custom hybrid experts must use TEGroupedMLP or SequentialMLP")
+    moe.experts = get_submodules(
+        get_moe_module_spec(use_te=True, num_experts=8, moe_grouped_gemm=False)
+    ).experts
+    return stack_spec

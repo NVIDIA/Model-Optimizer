@@ -31,7 +31,6 @@ uv run launch.py --yaml examples/Qwen/Qwen3-8B/megatron_lm_ptq.yaml --dryrun --y
 uv run launch.py --yaml examples/Qwen/Qwen3-8B/megatron_lm_ptq.yaml --to-yaml resolved.yaml
 
 # Run unit tests
-uv pip install pytest
 uv run python3 -m pytest tests/ -v
 ```
 
