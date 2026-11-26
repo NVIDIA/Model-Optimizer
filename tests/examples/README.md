@@ -92,6 +92,9 @@ Model paths and TP are bound at runtime. For paired draft checkpoints, use `base
 target and `model_id` for the drafter; the adapter supplies the draft path after
 any local-checkpoint preparation. Do not duplicate that path inside
 `engine_kwargs` or disable speculation: an EAGLE case must load its drafter.
+For Kimi-K2.6-Eagle3, TRT-LLM and SGLang use the published model ID by default.
+Setting `MODELOPT_LOCAL_EAGLE_MODEL` selects the staged drafter and skips the case
+if the directory is missing.
 The subprocess logs engine option names before initialization. The YAML
 records their values. Transformers loaders follow the selected backend's
 `trust_remote_code` setting, which defaults to `false`. With SGLang layernorm
@@ -128,8 +131,10 @@ pytest tests/examples/hf_ptq/test_deploy.py --run-release \
   --basetemp=test_artifacts/deploy_hf/pytest
 ```
 
-The image, logs and resolved request are saved in the case's pytest temporary
-directory. The command above keeps them in a directory suitable for archiving.
+The image, stage log, and numeric request and parallelism settings are saved in
+the case's pytest temporary directory. The worker receives private overrides in a
+separate temporary file. Its raw output can include those overrides and is discarded.
+The command above keeps the artifacts in a directory suitable for archiving.
 An insufficient GPU allocation or unsupported SM is reported as a skip. A job
 qualifying a specific image checkpoint must require a passing result for its
 selected case; a skip does not qualify the checkpoint.
@@ -181,8 +186,11 @@ memory for the largest case, and do not use pytest-xdist to run these cases
 concurrently on that allocation. Step-5 uses its own image and a separate run.
 Each model runs in a fresh child process; engine shutdown and process-group
 cleanup release its GPU resources before the next model starts. Hugging Face
-disk caches are retained across cases, allowing a target checkpoint to be reused
-by its draft case. The job or workspace owner controls disk-cache cleanup.
+downloads in a default sequential run use a private directory on the Hub cache
+volume. The suite keeps shared targets and drafters through their last selected
+case and removes the private directory at teardown. `HF_HUB_CACHE` selects the
+volume. Offline runs, xdist workers, and explicit legacy Transformers cache
+overrides use caller-managed snapshots.
 
 The run YAML customizes the checked-in cases; it is not another model catalog.
 Existing GPU/SM skips, checkpoint preparation and shared ModelOpt pytest

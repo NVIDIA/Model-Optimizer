@@ -14,6 +14,8 @@
 # limitations under the License.
 
 import os
+import shutil
+import tempfile
 from functools import cache
 from pathlib import Path
 
@@ -63,8 +65,48 @@ def pytest_generate_tests(metafunc):
     metafunc.parametrize("command", commands, indirect=True)
 
 
+@pytest.fixture(scope="module")
+def _deployment_cache(request):
+    # Legacy Transformers cache overrides take precedence over the Hub cache in some images.
+    transformers_caches = (
+        "TRANSFORMERS_CACHE",
+        "PYTORCH_TRANSFORMERS_CACHE",
+        "PYTORCH_PRETRAINED_BERT_CACHE",
+    )
+    offline = any(
+        os.getenv(key, "").upper() in {"1", "ON", "YES", "TRUE"}
+        for key in ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE")
+    )
+    if (
+        offline
+        or hasattr(request.config, "workerinput")
+        or any(os.getenv(key) for key in transformers_caches)
+    ):
+        yield None
+        return
+
+    # Hub is optional during collection. Use its configured volume for large downloads.
+    from huggingface_hub.constants import HF_HUB_CACHE
+
+    hub = Path(HF_HUB_CACHE)
+    hub.mkdir(parents=True, exist_ok=True)
+    last_consumer = {}
+    for item in request.session.items:
+        if item.path != request.node.path:
+            continue
+        parameter = item.callspec.params.get("command")
+        if not isinstance(parameter, tuple):  # pytest placeholder for a group without a backend
+            continue
+        case, _ = parameter
+        for repo_id in (case["model_id"], case.get("base_model")):
+            if repo_id:
+                last_consumer["models--" + repo_id.replace("/", "--")] = item
+    with tempfile.TemporaryDirectory(prefix=".modelopt-deploy-", dir=hub) as owned:
+        yield Path(owned), last_consumer
+
+
 @pytest.fixture
-def command(request):
+def command(request, _deployment_cache, monkeypatch):
     """Apply run overrides only after pytest has selected this case."""
     case, backend = request.param
     _, overrides = _deployment_settings(request.config)
@@ -72,7 +114,22 @@ def command(request):
         case, backend, overrides, tensor_parallel_size=request.config.getoption("--deploy-tp")
     )
     deployer = ImageModelDeployer if case.get("task") == "image-generation" else ModelDeployer
-    return deployer(**params)
+    if _deployment_cache is None:
+        yield deployer(**params)
+        return
+    hub, last_consumer = _deployment_cache
+    # Every engine starts in a fresh process and reads this before importing the Hub.
+    monkeypatch.setenv("HF_HUB_CACHE", str(hub))
+    try:
+        yield deployer(**params)
+    finally:
+        for entry in hub.glob("models--*"):
+            if last_consumer.get(entry.name, request.node) is request.node:
+                last_consumer.pop(entry.name, None)
+                if entry.is_symlink():
+                    entry.unlink()
+                elif entry.is_dir():
+                    shutil.rmtree(entry)
 
 
 def test_deepseek(command):
@@ -102,6 +159,10 @@ def test_phi(command):
 
 
 def test_kimi(command):
+    if command.model_id == "nvidia/Kimi-K2.6-Eagle3" and command.backend in {"trtllm", "sglang"}:
+        draft = _local_eagle_draft(command.model_id)
+        if draft is not None:
+            command.model_id = str(draft)
     command.run()
 
 
@@ -121,20 +182,22 @@ def test_medusa(command):
     command.run()
 
 
-def test_eagle(command):
-    """Skip test if MODELOPT_LOCAL_EAGLE_MODEL is set but model doesn't exist locally.
-    speculative models should be loaded by local path"""
+def _local_eagle_draft(model_id):
     local_root = os.getenv("MODELOPT_LOCAL_EAGLE_MODEL")
-    if not local_root:
-        pytest.skip("MODELOPT_LOCAL_EAGLE_MODEL is not set")
+    if local_root:
+        draft = Path(local_root) / model_id
+        if not draft.is_dir():
+            pytest.skip(f"Local model not found: {draft}")
+        return draft
+    return None
 
-    local_path = os.path.join(local_root, command.model_id)
-    if os.path.isdir(local_path):
-        # Update model_id to use local path
-        command.model_id = local_path
-        command.run()
-    else:
-        pytest.skip(f"Local model not found: {local_path}")
+
+def test_eagle(command):
+    draft = _local_eagle_draft(command.model_id)
+    if draft is None:
+        pytest.skip("MODELOPT_LOCAL_EAGLE_MODEL is not set")
+    command.model_id = str(draft)
+    command.run()
 
 
 def test_nvidia_nemotron_3_ultra_550b_a55b_nvfp4(command):
