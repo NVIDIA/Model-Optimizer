@@ -107,12 +107,14 @@ def _run_capturing(
     cleanup_process_group: bool = False,
     timeout: float | None = None,
     log: TextIO | None = None,
+    discard_output: bool = False,
 ) -> tuple[int, str]:
     """Run a command, streaming and capturing combined stdout/stderr to catch transient errors.
 
     Drained by a reader thread rather than ``subprocess.run``, which waits for EOF: a descendant
     outliving the command keeps the pipe open, hanging the read and discarding every log line.
     When a log is supplied, capture to that file instead of accumulating output in memory.
+    Use discard_output when a backend may echo credentials; still drain its pipe for cleanup proof.
     """
     chunks: list[str] = []
     process = subprocess.Popen(
@@ -146,6 +148,8 @@ def _run_capturing(
         try:
             with process.stdout as stream:
                 for line in stream:
+                    if discard_output:
+                        continue
                     print(line, end="", flush=log is not None)
                     if log is None:
                         chunks.append(line)
@@ -177,7 +181,7 @@ def _run_capturing(
         with contextlib.suppress(Exception):
             process.wait(timeout=_KILLED_PIPE_TIMEOUT_S)
         raise
-    except BaseException as error:
+    except BaseException:
         # Interrupted (most likely pytest-timeout) while the command runs: its own process group is
         # not swept up with pytest's, so take the descendants down rather than leak them.
         try:
@@ -188,24 +192,13 @@ def _run_capturing(
         finally:
             with contextlib.suppress(Exception):
                 process.wait(timeout=_KILLED_PIPE_TIMEOUT_S)  # reap: WNOWAIT left it waitable
-            if cleanup_process_group:
-                # A descendant that formed its own process group escapes the group scan above;
-                # only a drained output pipe confirms nothing survived.
-                reader.join(_KILLED_PIPE_TIMEOUT_S)
-                if reader.is_alive():
-                    raise ProcessGroupCleanupError(
-                        "Output pipe is still held open after process group cleanup; "
-                        "a detached descendant may still hold GPU resources"
-                    ) from error
         raise
     finally:
         reader.join(_KILLED_PIPE_TIMEOUT_S)
+        if cleanup_process_group and reader.is_alive():
+            # A worker outside the original process group may still own the pipe and GPUs.
+            raise ProcessGroupCleanupError("Output pipe is still open after deployment cleanup")
     if reader.is_alive():
-        if cleanup_process_group:
-            raise ProcessGroupCleanupError(
-                "Output pipe is still held open after process group cleanup; "
-                "a detached descendant may still hold GPU resources"
-            )
         raise OSError("Timed out draining subprocess output")
     if capture_error is not None:
         raise OSError("Failed to capture subprocess output") from capture_error

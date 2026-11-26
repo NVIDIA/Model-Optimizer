@@ -14,7 +14,6 @@
 # limitations under the License.
 """Deploy published image checkpoints without importing their engines during collection."""
 
-import contextlib
 import copy
 import fnmatch
 import importlib.metadata
@@ -127,41 +126,46 @@ class ImageModelDeployer:
         directory = Path(output_dir).resolve()
         directory.mkdir(parents=True, exist_ok=True)
         config_path = directory / "deployment-config.json"
-        _write_json(config_path, _redacted(self.config))
-        evidence_path = directory / "deployment-result.json"
-        _write_json(evidence_path, {"stage": "starting", "passed": False})
-        print(
-            f"Image deployment engine option names: {sorted(self.config['engine_kwargs'])}",
-            flush=True,
+        _write_json(
+            config_path,
+            {
+                key: self.config[key]
+                for key in (
+                    "model_id",
+                    "revision",
+                    "backend",
+                    "pipeline_class",
+                    "engine_version",
+                    "tensor_parallel_size",
+                    "mini_sm",
+                    "sm_versions",
+                    "task",
+                )
+            },
         )
+        evidence_path = directory / "deployment-result.json"
+        _record_result(evidence_path, {"stage": "starting", "passed": False})
         print(f"Image deployment artifacts: {directory}", flush=True)
-        # The verbatim config carries user-supplied engine options: keep it out of the
-        # archived artifacts directory and remove it once the worker has exited.
-        fd, payload_path = tempfile.mkstemp(suffix=".json")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as stream:
-                json.dump(self.config, stream)
-        except BaseException:
-            os.unlink(payload_path)
-            raise
-        command = [
-            sys.executable,
-            "-u",
-            str(Path(__file__).resolve()),
-            payload_path,
-            str(directory),
-        ]
-        log_path = directory / "deployment.log"
         try:
             assert os.name == "posix", "Image deployment requires Linux"
-            with log_path.open("w", encoding="utf-8") as log:
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", suffix=".json") as payload:
+                json.dump(self.config, payload)
+                payload.flush()
+                command = [
+                    sys.executable,
+                    "-u",
+                    str(Path(__file__).resolve()),
+                    payload.name,
+                    str(directory),
+                ]
+                # Engines and validation errors may echo private overrides to either stream.
                 returncode, _ = _run_capturing(
                     command,
                     Path.cwd(),
                     os.environ.copy(),
                     cleanup_process_group=True,
                     timeout=6900,
-                    log=log,
+                    discard_output=True,
                 )
             if returncode == _GPU_SKIP_EXIT_CODE:
                 evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
@@ -171,7 +175,7 @@ class ImageModelDeployer:
                 raise subprocess.CalledProcessError(returncode, command)
         except ProcessGroupCleanupError as error:
             try:
-                _write_json(
+                _record_result(
                     evidence_path,
                     {"stage": "cleanup", "passed": False, "subprocess_error": str(error)},
                 )
@@ -180,28 +184,32 @@ class ImageModelDeployer:
         except (subprocess.SubprocessError, OSError) as error:
             evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
             evidence.update(passed=False, subprocess_error=str(error))
-            _write_json(evidence_path, evidence)
+            _record_result(evidence_path, evidence)
+            print(f"Image deployment failed: {json.dumps(evidence)}", flush=True)
             raise
-        finally:
-            with contextlib.suppress(OSError):
-                os.unlink(payload_path)
         evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
         assert evidence.get("passed") is True, f"Image deployment did not pass: {evidence}"
 
 
-_SENSITIVE_KEY = re.compile(r"token|secret|password|credential|api_key", re.IGNORECASE)
+def _record_request(directory, sampling):
+    fields = (
+        "width",
+        "height",
+        "num_inference_steps",
+        "guidance_scale",
+        "seed",
+        "num_images_per_prompt",
+        "num_outputs_per_prompt",
+    )
+    public = {name: sampling[name] for name in fields if type(sampling.get(name)) in (int, float)}
+    _write_json(directory / "deployment-request.json", public)
 
 
-def _redacted(value):
-    # Archived evidence files must not expose credentials passed via engine or sampling options.
-    if isinstance(value, dict):
-        return {
-            key: "<redacted>" if _SENSITIVE_KEY.search(str(key)) else _redacted(item)
-            for key, item in value.items()
-        }
-    if isinstance(value, list):
-        return [_redacted(item) for item in value]
-    return value
+def _record_result(path, evidence):
+    _write_json(path, evidence)
+    mode = "w" if evidence["stage"] == "starting" else "a"
+    with path.with_name("deployment.log").open(mode, encoding="utf-8") as log:
+        print(json.dumps(evidence), file=log)
 
 
 def _write_json(path, value):
@@ -266,18 +274,15 @@ def _generate_sglang(config, snapshot, directory):
         "output_file_name": "output.png",
         "save_output": True,
     }
-    _write_json(directory / "deployment-request.json", request)
-    print(f"Image deployment request: {json.dumps(request)}", flush=True)
+    _record_request(directory, request)
     with DiffGenerator.from_pretrained(
         model_path=str(snapshot), **config["engine_kwargs"]
     ) as engine:
-        runtime = {"model_path": str(snapshot), **config["engine_kwargs"]}
-        runtime.update(
-            {
-                name: getattr(engine.server_args, name)
-                for name in ("backend", "num_gpus", "tp_size", "sp_degree")
-            }
-        )
+        runtime = {
+            name: getattr(engine.server_args, name)
+            for name in ("num_gpus", "tp_size", "sp_degree")
+            if type(getattr(engine.server_args, name)) is int
+        }
         runtime["pipeline_config_class"] = type(engine.server_args.pipeline_config).__name__
         _write_json(directory / "deployment-runtime.json", runtime)
         result = engine.generate(sampling_params_kwargs=request)
@@ -341,7 +346,7 @@ def _deploy(config, directory, evidence):
     from PIL import Image
 
     evidence["stage"] = "download"
-    _write_json(directory / "deployment-result.json", evidence)
+    _record_result(directory / "deployment-result.json", evidence)
     snapshot = Path(snapshot_download(repo_id=config["model_id"], revision=config["revision"]))
     evidence.update(stage="checkpoint", snapshot=str(snapshot))
     model_index = json.loads((snapshot / "model_index.json").read_text(encoding="utf-8"))
@@ -349,14 +354,16 @@ def _deploy(config, directory, evidence):
     assert model_index.get("_class_name") == config["pipeline_class"], model_index
     _check_static_nvfp4(snapshot, directory)
     evidence["stage"] = "generation"
-    _write_json(directory / "deployment-result.json", evidence)
+    _record_result(directory / "deployment-result.json", evidence)
     if backend == "sglang":
         output_path, width, height = _generate_sglang(config, snapshot, directory)
     else:
         runtime_args.model = str(snapshot)
         _write_json(
             directory / "deployment-runtime.json",
-            _redacted(runtime_args.model_dump(mode="json")),
+            runtime_args.model_dump(
+                mode="json", include={"parallel_config": {"tp_size", "cfg_size", "ulysses_size"}}
+            ),
         )
         # No quant_config override: VisualGen loads the checkpoint's static NVFP4 metadata.
         with VisualGen(model=str(snapshot), args=runtime_args) as engine:
@@ -367,13 +374,8 @@ def _deploy(config, directory, evidence):
             validated = type(params).model_validate(config["sampling_kwargs"])
             for name in config["sampling_kwargs"]:
                 setattr(params, name, getattr(validated, name))
-            request = {
-                "prompt": config["input_config"]["prompt"],
-                "params": params.model_dump(mode="json"),
-            }
-            _write_json(directory / "deployment-request.json", _redacted(request))
-            print(f"Image deployment request: {json.dumps(request)}", flush=True)
-            result = engine.generate(inputs=request["prompt"], params=params)
+            _record_request(directory, params.model_dump(mode="json"))
+            result = engine.generate(inputs=config["input_config"]["prompt"], params=params)
             assert result.error is None, f"TRT-LLM image generation failed: {result.error}"
             assert result.image is not None, "TRT-LLM generated no image"
             expected_shape = (1, params.height, params.width, 3)
@@ -407,7 +409,7 @@ if __name__ == "__main__":
         evidence.update(stage="skipped", reason=str(error))
         sys.exit(_GPU_SKIP_EXIT_CODE)
     except Exception as error:
-        evidence["error"] = f"{type(error).__name__}: {error}"
+        evidence["error_type"] = type(error).__name__
         raise
     finally:
-        _write_json(directory / "deployment-result.json", evidence)
+        _record_result(directory / "deployment-result.json", evidence)

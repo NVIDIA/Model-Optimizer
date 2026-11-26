@@ -13,10 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import collections
 import os
-import shutil
-from pathlib import Path
 
 import pytest
 from _test_utils.examples.gpu_lock import gpu_lock
@@ -32,62 +29,6 @@ def pytest_collection_modifyitems(config, items):
     if deselected:
         items[:] = [item for item in items if not item.get_closest_marker("deploy_empty_group")]
         config.hook.pytest_deselected(items=deselected)
-
-
-def _deploy_hub_dir(model_id):
-    """Hub repository id to its HF cache directory; local paths do not map."""
-    if not model_id or model_id.startswith("/") or "/" not in model_id:
-        return None
-    return "models--" + model_id.replace("/", "--")
-
-
-def pytest_collection_finish(session):
-    # Runs here rather than in collection_modifyitems so the item list is final and
-    # deselected deploy cases no longer count as snapshot consumers.
-    consumers = {}
-    for item in session.items:
-        param = getattr(getattr(item, "callspec", None), "params", {}).get("command")
-        if not isinstance(param, tuple) or not param or not isinstance(param[0], dict):
-            continue
-        repos = {
-            name
-            for name in (
-                _deploy_hub_dir(param[0].get("model_id")),
-                _deploy_hub_dir(param[0].get("base_model")),
-            )
-            if name
-        }
-        if repos:
-            consumers[item.nodeid] = repos
-    config = session.config
-    config._deploy_hf_consumers = consumers
-    config._deploy_hf_remaining = collections.Counter(
-        repo for repos in consumers.values() for repo in repos
-    )
-    config._deploy_hf_hub = Path(
-        os.getenv("HF_HUB_CACHE", os.path.expanduser("~/.cache/huggingface/hub"))
-    )
-    # Snapshots that predate the run may be a warm cache shared with other jobs; only
-    # directories this run downloaded are evicted once their last consumer finishes.
-    config._deploy_hf_baseline = {
-        path.name for path in config._deploy_hf_hub.glob("models--*") if path.is_dir()
-    }
-
-
-def pytest_runtest_teardown(item):
-    consumers = getattr(item.config, "_deploy_hf_consumers", None)
-    if not consumers or item.nodeid not in consumers:
-        return
-    for repo in consumers[item.nodeid]:
-        item.config._deploy_hf_remaining[repo] -= 1
-        snapshot = item.config._deploy_hf_hub / repo
-        if (
-            item.config._deploy_hf_remaining[repo] <= 0
-            and repo not in item.config._deploy_hf_baseline
-            and snapshot.is_dir()
-        ):
-            print(f"Evicting downloaded checkpoint {repo} after its last selected case")
-            shutil.rmtree(snapshot, ignore_errors=True)
 
 
 def _hold_gpu(tmp_path_factory, *, shared: bool):
