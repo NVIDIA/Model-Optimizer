@@ -117,7 +117,10 @@ def test_copy_aux_files_preserves_sidecars_and_applies_skips(tmp_path):
     assert (output / "assets" / "config.txt").read_text() == "keep"
     assert os.access(output / "assets" / "run.sh", os.X_OK)  # a shipped helper still runs
     if sys.platform != "win32":  # Windows keeps only a read-only flag, not POSIX modes
-        assert stat.S_IMODE((output / "assets" / "config.txt").stat().st_mode) == 0o600  # private
+        # A copy is a new file of the output's, so an owner-only source takes the output's mode.
+        (output / ".new-file").touch()
+        new_file_mode = stat.S_IMODE((output / ".new-file").stat().st_mode)
+        assert stat.S_IMODE((output / "assets" / "config.txt").stat().st_mode) == new_file_mode
     assert not (output / "model.safetensors").exists()
     assert not (output / ".cache").exists()
 
