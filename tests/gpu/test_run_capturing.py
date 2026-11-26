@@ -26,6 +26,15 @@ from _test_utils.examples import run_command
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Requires Linux process groups")
 
 
+def _reap_test_child(pid_file):
+    if pid_file.exists():
+        pid = int(pid_file.read_text())
+        with contextlib.suppress(ChildProcessError):
+            if os.waitpid(pid, os.WNOHANG) == (0, 0):
+                os.kill(pid, signal.SIGKILL)
+                os.waitpid(pid, 0)
+
+
 def test_run_capturing_does_not_block_on_a_survivor_holding_the_pipe(monkeypatch, tmp_path):
     """A killed command whose descendant inherited the output pipe must not hang the caller."""
     # Adopt the orphaned grandchild so the liveness check can reap it; kill(0) alone would
@@ -67,12 +76,7 @@ def test_run_capturing_does_not_block_on_a_survivor_holding_the_pipe(monkeypatch
             pytest.fail(f"survivor {survivor} outlived _run_capturing")
     finally:
         try:
-            if pid_file.exists():
-                survivor = int(pid_file.read_text())
-                with contextlib.suppress(ProcessLookupError):
-                    os.kill(survivor, signal.SIGKILL)
-                with contextlib.suppress(ChildProcessError):
-                    os.waitpid(survivor, 0)
+            _reap_test_child(pid_file)
         finally:
             assert libc.prctl(36, previous.value, 0, 0, 0) == 0
 
@@ -125,12 +129,7 @@ if sys.argv[2] == "timeout":
             )
     finally:
         try:
-            if pid_file.exists():
-                pid = int(pid_file.read_text())
-                with contextlib.suppress(ChildProcessError):
-                    if os.waitpid(pid, os.WNOHANG) == (0, 0):
-                        os.kill(pid, signal.SIGKILL)
-                        os.waitpid(pid, 0)
+            _reap_test_child(pid_file)
         finally:
             assert libc.prctl(36, previous.value, 0, 0, 0) == 0
 
