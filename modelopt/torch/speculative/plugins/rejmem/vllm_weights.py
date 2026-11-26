@@ -15,6 +15,15 @@
 
 """C3 draft weight updates: worker-side hooks (weight_version counter, refresh of cached weight copies)."""
 
+__all__ = ["current_weight_version", "install"]
+
+_weight_version = 0
+
+
+def current_weight_version() -> int:
+    """Completed draft weight updates in this worker process; 0 means the launch checkpoint."""
+    return _weight_version
+
 
 def install() -> None:
     """Patch vLLM when enabled by the environment; no-op otherwise. Not implemented yet."""
