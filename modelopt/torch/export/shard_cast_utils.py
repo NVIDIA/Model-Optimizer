@@ -61,7 +61,7 @@ def dequantize_fp8_ue8m0_to_bf16(
     """Decode a native DSV4 FP8 matrix with square UE8M0 blocks into BF16.
 
     Uses square blocks of size ``block``, including partial trailing blocks.
-    Scales are uint8 exponent bytes or float8_e8m0fnu, with no NaN scale codes.
+    Scales are uint8/int8 exponent bytes or float8_e8m0fnu, with no NaN scale codes.
     Set ``validate_scales=False`` only for immutable scales already checked at load time,
     to avoid synchronizing CUDA on repeated calls. Shape and dtype checks always run.
     """
@@ -73,7 +73,11 @@ def dequantize_fp8_ue8m0_to_bf16(
         raise ValueError(f"FP8 block size must be a positive integer, got {block}")
     m, n = weight.shape
     expected = ((m + block - 1) // block, (n + block - 1) // block)
-    if scale.shape != expected or scale.dtype not in (torch.uint8, torch.float8_e8m0fnu):
+    if scale.shape != expected or scale.dtype not in (
+        torch.uint8,
+        torch.int8,
+        torch.float8_e8m0fnu,
+    ):
         raise ValueError(
             f"Expected UE8M0 scales with shape {expected}, got {tuple(scale.shape)} ({scale.dtype})"
         )

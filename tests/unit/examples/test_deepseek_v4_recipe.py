@@ -317,8 +317,8 @@ def test_tokenizer_aware_transformer_requires_a_tokenizer(load_with):
         load_with(_TokenizerAwareTransformer, tokenizer=None)
 
 
-@pytest.mark.parametrize("scale_dtype", [torch.uint8, torch.float8_e8m0fnu])
-@pytest.mark.parametrize("scale_code", [127, 255])
+@pytest.mark.parametrize("scale_dtype", [torch.uint8, torch.int8, torch.float8_e8m0fnu])
+@pytest.mark.parametrize("scale_code", [127, 128, 255])
 def test_load_validates_native_fp8_checkpoint_scales(load_with, tmp_path, scale_dtype, scale_code):
     class FP8Transformer(torch.nn.Module):
         def __init__(self, args):
@@ -346,7 +346,7 @@ def test_load_validates_native_fp8_checkpoint_scales(load_with, tmp_path, scale_
         model = load_with(FP8Transformer, None, model_path=str(tmp_path), dummy_weights=False)
         torch.testing.assert_close(
             dsv4_ptq._dequantize_linear_weight(model.proj),
-            source.proj.weight.to(torch.bfloat16),
+            source.proj.weight.to(torch.bfloat16) * 2 ** (scale_code - 127),
             rtol=0,
             atol=0,
         )

@@ -296,7 +296,7 @@ def load_deepseek_v4(
             if weight.dtype != torch.float8_e4m3fn:
                 continue
             scale = getattr(weight, "scale", None)
-            if scale is None or scale.dtype not in (torch.uint8, torch.float8_e8m0fnu):
+            if scale is None or scale.dtype not in (torch.uint8, torch.int8, torch.float8_e8m0fnu):
                 continue
             if (scale.contiguous().view(torch.uint8) == 255).any():
                 raise ValueError(f"Native checkpoint scales for {name} contain NaN codes")
