@@ -503,7 +503,7 @@ def test_awq_scale_search_per_node_supports_rank3_batched_matmul(tmp_path):
     )
     model = onnx.helper.make_model(graph, opset_imports=[onnx.helper.make_opsetid("", 21)])
     augmented_onnx_path = str(tmp_path / "rank3_matmul.onnx")
-    onnx.save(model, augmented_onnx_path)
+    save_onnx(model, augmented_onnx_path)
     session = ort.InferenceSession(augmented_onnx_path, providers=["CPUExecutionProvider"])
     act_tensor = gs.Variable("act", dtype=np.float32, shape=(4, 4))
 
@@ -523,6 +523,14 @@ def test_awq_scale_search_per_node_supports_rank3_batched_matmul(tmp_path):
         [],
     )
 
+    weight_scale = awq_lite[0].weight_scale
+    if int4.has_cupy:
+        weight_scale = int4.np.asnumpy(weight_scale)
+    np.testing.assert_allclose(
+        weight_scale,
+        _reference_block_normalization(weight, block_size, np.finfo(weight.dtype).tiny),
+        rtol=1e-6,
+    )
     assert awq_lite[0].best_scale.shape == (4, 4)
     assert clip_alphas == {}
 
