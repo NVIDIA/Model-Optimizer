@@ -116,7 +116,8 @@ def test_copy_aux_files_preserves_sidecars_and_applies_skips(tmp_path):
     assert (output / "tokenizer_config.json").read_text() == "{}"
     assert (output / "assets" / "config.txt").read_text() == "keep"
     assert os.access(output / "assets" / "run.sh", os.X_OK)  # a shipped helper still runs
-    assert stat.S_IMODE((output / "assets" / "config.txt").stat().st_mode) == 0o600  # stays private
+    if sys.platform != "win32":  # Windows keeps only a read-only flag, not POSIX modes
+        assert stat.S_IMODE((output / "assets" / "config.txt").stat().st_mode) == 0o600  # private
     assert not (output / "model.safetensors").exists()
     assert not (output / ".cache").exists()
 

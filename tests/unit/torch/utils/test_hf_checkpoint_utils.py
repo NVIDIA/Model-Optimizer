@@ -789,8 +789,9 @@ def test_copy_non_model_files_copies_everything_the_export_does_not_own(tmp_path
     exported = {p.relative_to(export_dir).as_posix() for p in export_dir.rglob("*") if p.is_file()}
     assert exported == {*expected, *export_files}
     assert os.access(export_dir / "super_v3_reasoning_parser.py", os.X_OK)  # a helper still runs
-    # A local file keeps its mode, so an owner-only one stays private.
-    assert stat.S_IMODE((export_dir / "chat_template.jinja").stat().st_mode) == 0o600
+    if sys.platform != "win32":  # Windows keeps only a read-only flag, not POSIX modes
+        # A local file keeps its mode, so an owner-only one stays private.
+        assert stat.S_IMODE((export_dir / "chat_template.jinja").stat().st_mode) == 0o600
 
 
 def test_copy_non_model_files_skips_an_export_inside_the_source(tmp_path):
