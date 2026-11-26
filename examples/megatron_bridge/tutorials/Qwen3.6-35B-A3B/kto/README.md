@@ -104,16 +104,16 @@ See [Reproducibility](reproducibility/README.md) for data collection, training, 
 
 We compare benchmark scores below; changes are QAKTO − QAD baseline, in percentage points (pp).
 
-| Benchmark | QAD baseline | QAKTO | Difference [95% CI], pp | QAKTO higher, p | QAD baseline higher, p (context) |
-| --- | --- | --- | --- | --- | --- |
-| SciCode, 294 subtasks | 42.81% | 44.39% | +1.57 [−0.48, +3.67] | 0.080 | 0.931 |
-| AA-Omniscience | 21.62% | 21.68% | +0.07 [−0.85, +0.98] | 0.443 | 0.557 |
-| GPQA Diamond | 83.40% | 83.68% | +0.28 [−0.96, +1.53] | 0.327 | 0.673 |
-| IFBench | 59.06% | 60.05% | +0.98 [−0.17, +2.14] | 0.047 | 0.953 |
-| AA-LCR | 68.50% | 68.50% | 0.00 [−3.73, +3.73] | 0.500 | 0.500 |
-| MMMU-Pro | 73.76% | 73.87% | +0.12 [−0.28, +0.51] | 0.283 | 0.717 |
-| MMLU-Pro | 84.67% | 84.74% | +0.07 [−0.25, +0.38] | 0.339 | 0.661 |
-| tau2-bench Telecom | 94.83% | 95.42% | +0.58 [−1.12, +2.29] | 0.250 | 0.750 |
+| Benchmark | QAD baseline | QAKTO | Difference [95% CI], pp | QAKTO higher, p |
+| --- | --- | --- | --- | --- |
+| SciCode, 294 subtasks | 42.81% | 44.39% | +1.57 [−0.48, +3.67] | 0.080 |
+| AA-Omniscience | 21.62% | 21.68% | +0.07 [−0.85, +0.98] | 0.443 |
+| GPQA Diamond | 83.40% | 83.68% | +0.28 [−0.96, +1.53] | 0.327 |
+| IFBench | 59.06% | 60.05% | +0.98 [−0.17, +2.14] | 0.047 |
+| AA-LCR | 68.50% | 68.50% | 0.00 [−3.73, +3.73] | 0.500 |
+| MMMU-Pro | 73.76% | 73.87% | +0.12 [−0.28, +0.51] | 0.283 |
+| MMLU-Pro | 84.67% | 84.74% | +0.07 [−0.25, +0.38] | 0.339 |
+| tau2-bench Telecom | 94.83% | 95.42% | +0.58 [−1.12, +2.29] | 0.250 |
 
 QAKTO’s mean scores were higher on seven benchmarks and unchanged on AA-LCR. The increases were not statistically significant.
 
@@ -142,18 +142,18 @@ A cap hit reaches the output-token limit; it screens for potential loops without
 
 For SciCode, we evaluated all 338 subtasks with each problem’s prerequisite steps in place. After scoring, we used the [44/11 split](reproducibility/data/subtask_split.yaml) to exclude the 44 training subtasks for the 294-subtask row and select the 11 held-out error-prone subtasks for the 11-subtask row. Both rows use the same eight runs per model.
 
-| Benchmark | QAD baseline | QAKTO | Difference [95% CI], pp | QAKTO lower, p | QAKTO higher, p (context) |
-| --- | --- | --- | --- | --- | --- |
-| SciCode, 294 subtasks | 1.53% (36/2,352) | 0.00% (0/2,352) | −1.53 [−2.13, −1.02] | <0.001 | 1.000 |
-| SciCode, held-out error-prone (11 subtasks) | 10.23% (9/88) | 0.00% (0/88) | −10.23 [−14.77, −5.68] | 0.004 | 1.000 |
-| AA-Omniscience | 0.50% (30/6,000) | 0.20% (12/6,000) | −0.30 [−0.50, −0.12] | 0.002 | 0.999 |
-| GPQA Diamond | 0.22% (7/3,168) | 0.16% (5/3,168) | −0.06 [−0.25, +0.09] | 0.375 | 0.844 |
-| IFBench | 6.79% (326/4,800) | 5.38% (258/4,800) | −1.42 [−2.21, −0.65] | <0.001 | 1.000 |
-| AA-LCR | 0.00% (0/800) | 0.00% (0/800) | No observed events | 1.000 | 1.000 |
-| MMMU-Pro | 0.35% (98/27,680) | 0.10% (28/27,680) | −0.25 [−0.35, −0.16] | <0.001 | 1.000 |
-| MMLU-Pro | 0.058% (14/24,064) | 0.029% (7/24,064) | −0.029 [−0.066, +0.004] | 0.084 | 0.968 |
-| tau2-bench Telecom, NEL (retries may hide cap hits) | 0.00% (0/1,026) | 0.00% (0/1,026) | No observed events | 1.000 | 1.000 |
-| tau2-bench Telecom, custom runner | 5.17% (53/1,026) | 1.07% (11/1,026) | −4.09 [−5.85, −2.44] | <0.001 | 1.000 |
+| Benchmark | QAD baseline | QAKTO | Difference [95% CI], pp | QAKTO lower, p |
+| --- | --- | --- | --- | --- |
+| SciCode, 294 subtasks | 1.53% (36/2,352) | 0.00% (0/2,352) | −1.53 [−2.13, −1.02] | <0.001 |
+| SciCode, held-out error-prone (11 subtasks) | 10.23% (9/88) | 0.00% (0/88) | −10.23 [−14.77, −5.68] | 0.004 |
+| AA-Omniscience | 0.50% (30/6,000) | 0.20% (12/6,000) | −0.30 [−0.50, −0.12] | 0.002 |
+| GPQA Diamond | 0.22% (7/3,168) | 0.16% (5/3,168) | −0.06 [−0.25, +0.09] | 0.375 |
+| IFBench | 6.79% (326/4,800) | 5.38% (258/4,800) | −1.42 [−2.21, −0.65] | <0.001 |
+| AA-LCR | 0.00% (0/800) | 0.00% (0/800) | No observed events | 1.000 |
+| MMMU-Pro | 0.35% (98/27,680) | 0.10% (28/27,680) | −0.25 [−0.35, −0.16] | <0.001 |
+| MMLU-Pro | 0.058% (14/24,064) | 0.029% (7/24,064) | −0.029 [−0.066, +0.004] | 0.084 |
+| tau2-bench Telecom, NEL (retries may hide cap hits) | 0.00% (0/1,026) | 0.00% (0/1,026) | No observed events | 1.000 |
+| tau2-bench Telecom, custom runner | 5.17% (53/1,026) | 1.07% (11/1,026) | −4.09 [−5.85, −2.44] | <0.001 |
 
 QAKTO had lower observed cap-hit rates on seven of eight benchmarks across the reported evaluations, with zero observed caps on SciCode.
 
@@ -161,15 +161,15 @@ For tau2-bench Telecom, NEL can retry capped responses that contain only reasoni
 
 #### Missing final answers
 
-| Benchmark | QAD baseline | QAKTO | Difference [95% CI], pp | QAKTO lower, p | QAKTO higher, p (context) |
-| --- | --- | --- | --- | --- | --- |
-| SciCode, 294 subtasks | 1.62% (38/2,352) | 0.04% (1/2,352) | −1.57 [−2.17, −1.02] | <0.001 | 1.000 |
-| AA-Omniscience | 0.50% (30/6,000) | 0.20% (12/6,000) | −0.30 [−0.50, −0.12] | 0.002 | 0.999 |
-| GPQA Diamond | 0.22% (7/3,168) | 0.16% (5/3,168) | −0.06 [−0.25, +0.09] | 0.375 | 0.844 |
-| IFBench | 6.73% (323/4,800) | 5.31% (255/4,800) | −1.42 [−2.21, −0.65] | <0.001 | 1.000 |
-| AA-LCR | 0.12% (1/800) | 0.00% (0/800) | −0.12 [−0.38, 0.00] | 0.500 | 1.000 |
-| MMMU-Pro | 0.33% (92/27,680) | 0.11% (30/27,680) | −0.22 [−0.32, −0.14] | <0.001 | 1.000 |
-| MMLU-Pro | 0.058% (14/24,064) | 0.029% (7/24,064) | −0.029 [−0.066, +0.004] | 0.084 | 0.968 |
+| Benchmark | QAD baseline | QAKTO | Difference [95% CI], pp | QAKTO lower, p |
+| --- | --- | --- | --- | --- |
+| SciCode, 294 subtasks | 1.62% (38/2,352) | 0.04% (1/2,352) | −1.57 [−2.17, −1.02] | <0.001 |
+| AA-Omniscience | 0.50% (30/6,000) | 0.20% (12/6,000) | −0.30 [−0.50, −0.12] | 0.002 |
+| GPQA Diamond | 0.22% (7/3,168) | 0.16% (5/3,168) | −0.06 [−0.25, +0.09] | 0.375 |
+| IFBench | 6.73% (323/4,800) | 5.31% (255/4,800) | −1.42 [−2.21, −0.65] | <0.001 |
+| AA-LCR | 0.12% (1/800) | 0.00% (0/800) | −0.12 [−0.38, 0.00] | 0.500 |
+| MMMU-Pro | 0.33% (92/27,680) | 0.11% (30/27,680) | −0.22 [−0.32, −0.14] | <0.001 |
+| MMLU-Pro | 0.058% (14/24,064) | 0.029% (7/24,064) | −0.029 [−0.066, +0.004] | 0.084 |
 
 Missing-final-answer counts were lower on all seven benchmarks, falling from 38 to 1 on SciCode.
 
@@ -177,24 +177,24 @@ Missing-final-answer counts were lower on all seven benchmarks, falling from 38 
 
 We count a response as an abstention when its final answer is non-empty and the judge labels it `NOT_ATTEMPTED`. This category can include uncertain guesses. Following the [evaluation guide](https://github.com/NVIDIA/Model-Optimizer/blob/c8559d2b4e547960db1713640d3d54bb9b7c8280/docs/source/announcements/evaluating_models_efficiently_during_optimization_experiments/index.rst#abstention-ratio), the abstention rate is `abstentions / (all responses − correct responses)`. Incorrect, partial and missing answers stay in the denominator.
 
-| Measure | QAD baseline | QAKTO | Difference [95% CI], pp | QAKTO higher, p | QAKTO lower, p (context) |
-| --- | --- | --- | --- | --- | --- |
-| Abstention rate (among non-correct responses) | 33.30% (1,566/4,703) | 35.18% (1,653/4,699) | +1.88 [+0.32, +3.45] | 0.010 | 0.990 |
+| Measure | QAD baseline | QAKTO | Difference [95% CI], pp | QAKTO higher, p |
+| --- | --- | --- | --- | --- |
+| Abstention rate (among non-correct responses) | 33.30% (1,566/4,703) | 35.18% (1,653/4,699) | +1.88 [+0.32, +3.45] | 0.010 |
 
 The abstention rate among non-correct responses rose by 1.88 pp with QAKTO (p=0.010).
 
 ### Inference efficiency
 
-| Benchmark | QAD baseline mean / median | QAKTO mean / median | Mean difference [95% CI], tokens | QAKTO shorter, p | QAKTO longer, p (context) |
-| --- | --- | --- | --- | --- | --- |
-| SciCode, 294 subtasks | 6,512 / 2,993 | 3,063 / 1,803 | −3450 [−4236, −2664] | <0.001 | 1.000 |
-| AA-Omniscience | 2,865 / 1,944 | 2,418 / 1,848 | −447 [−707, −187] | <0.001 | 1.000 |
-| GPQA Diamond | 11,088 / 5,821 | 12,654 / 6,419 | +1566 [+982, +2150] | 1.000 | <0.001 |
-| IFBench | 14,581 / 4,568 | 12,609 / 4,425 | −1972 [−2923, −1022] | <0.001 | 1.000 |
-| AA-LCR | 2,769 / 2,454 | 2,724 / 2,410 | −45 [−134, +44] | 0.158 | 0.842 |
-| MMMU-Pro | 8,903 / 5,358 | 8,259 / 4,897 | −643 [−770, −517] | <0.001 | 1.000 |
-| MMLU-Pro | 2,808 / 2,167 | 2,750 / 2,146 | −58 [−104, −11] | 0.008 | 0.992 |
-| tau2-bench Telecom | 5,218 / 4,736 | 4,044 / 3,725 | −1174 [−1344, −1004] | <0.001 | 1.000 |
+| Benchmark | QAD baseline mean / median | QAKTO mean / median | Mean difference [95% CI], tokens | QAKTO shorter, p |
+| --- | --- | --- | --- | --- |
+| SciCode, 294 subtasks | 6,512 / 2,993 | 3,063 / 1,803 | −3450 [−4236, −2664] | <0.001 |
+| AA-Omniscience | 2,865 / 1,944 | 2,418 / 1,848 | −447 [−707, −187] | <0.001 |
+| GPQA Diamond | 11,088 / 5,821 | 12,654 / 6,419 | +1566 [+982, +2150] | 1.000 |
+| IFBench | 14,581 / 4,568 | 12,609 / 4,425 | −1972 [−2923, −1022] | <0.001 |
+| AA-LCR | 2,769 / 2,454 | 2,724 / 2,410 | −45 [−134, +44] | 0.158 |
+| MMMU-Pro | 8,903 / 5,358 | 8,259 / 4,897 | −643 [−770, −517] | <0.001 |
+| MMLU-Pro | 2,808 / 2,167 | 2,750 / 2,146 | −58 [−104, −11] | 0.008 |
+| tau2-bench Telecom | 5,218 / 4,736 | 4,044 / 3,725 | −1174 [−1344, −1004] | <0.001 |
 
 Mean completion tokens fell on seven of eight benchmarks, most on SciCode (53%) and tau2-bench Telecom (22.5%). GPQA increased by 14.1%.
 
