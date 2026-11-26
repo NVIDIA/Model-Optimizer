@@ -89,7 +89,8 @@ class BaseQuantizedTensor:
         """Pack a fake torch.Tensor into a real quantized tensor.
 
         Args:
-            fake_quant_tensor (torch.Tensor): The fake quantized tensor.
+            input (torch.Tensor): The input tensor to be quantized.
+            block_size (int): The size of each block for quantization.
 
         Returns:
             A real quantized tensor, scales.
