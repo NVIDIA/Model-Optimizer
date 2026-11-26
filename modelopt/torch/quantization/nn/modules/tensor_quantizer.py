@@ -176,6 +176,12 @@ class TensorQuantizer(nn.Module):
         "pre_bwd_fn",
         # quantizer cache for custom backends, like luts
         "_quantizer_cache",
+        # Bypass masters and replay overrides belong to the active repair policy.
+        "_local_repair_state",
+        "_local_repair_active",
+        "_fake_quantize",
+        # Only its allowlisted original property values are merged into checkpoints.
+        "_local_repair_properties",
         # Runtime-only set of storage attributes tied to shared state. The tied
         # aliases are rebuilt from calibration config and tensor state during restore.
         "_shared_quant_tied_attrs",
@@ -1404,6 +1410,14 @@ class TensorQuantizer(nn.Module):
         modelopt_state = {}
         for k in self._get_properties_for_modelopt_state():
             modelopt_state[k] = getattr(self, k)
+        if (repair_properties := getattr(self, "_local_repair_properties", None)) is not None:
+            # IQRepairPolicy snapshots these before temporary layout setup; missing keys
+            # must stay absent when saving the original model during active repair.
+            for name in ("_if_calib", "_axis", "_block_sizes", "_slices", "_amax_shape_for_export"):
+                if name in repair_properties:
+                    modelopt_state[name] = repair_properties[name]
+                else:
+                    modelopt_state.pop(name, None)
 
         if properties_only:
             return modelopt_state

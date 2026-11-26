@@ -371,6 +371,47 @@ class TensorQuantizerTester:
         x = torch.randn(10, 10).to(self.device)
         assert torch.allclose(tensor_quantizer_ref(x), tensor_quantizer_test(x))
 
+        # Runtime repair values must not replace the caller's checkpoint properties.
+        allowed = ("_if_calib", "_axis", "_block_sizes", "_slices", "_amax_shape_for_export")
+        originals = {
+            name: getattr(tensor_quantizer_ref, name)
+            for name in allowed
+            if hasattr(tensor_quantizer_ref, name)
+        }
+        tensor_quantizer_ref._local_repair_active = True
+        object.__setattr__(tensor_quantizer_ref, "_local_repair_state", object())
+        tensor_quantizer_ref._fake_quantize = lambda value: value
+        tensor_quantizer_ref._local_repair_properties = {
+            **originals,
+            "_num_bits": 1,
+            "arbitrary": 7,
+        }
+        tensor_quantizer_ref._if_calib = not originals["_if_calib"]
+        tensor_quantizer_ref._slices = (slice(0, 1),)
+        tensor_quantizer_ref._amax_shape_for_export = (1,)
+        saved = tensor_quantizer_ref.get_modelopt_state()
+        assert (
+            not {
+                "_local_repair_state",
+                "_local_repair_active",
+                "_local_repair_properties",
+                "_fake_quantize",
+                "arbitrary",
+            }
+            & saved.keys()
+        )
+        assert saved["_num_bits"] == state_dict["_num_bits"]
+        for name in allowed:
+            if name in originals:
+                assert saved[name] == originals[name]
+            else:
+                assert name not in saved
+        restored = TensorQuantizer()
+        restored.set_from_modelopt_state(saved)
+        restored.load_state_dict(tensor_quantizer_ref.state_dict())
+        restored.to(self.device)
+        torch.testing.assert_close(restored(x), tensor_quantizer_test(x), rtol=0, atol=0)
+
     def test_amax_export(self):
         a = torch.randn(4, 6, 8)
 
