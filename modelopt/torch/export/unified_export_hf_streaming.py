@@ -48,7 +48,6 @@ from .quant_aware_conversion import _build_reverse_rules, build_reverse_name_map
 from .quant_utils import (
     _get_kv_cache_postprocess_config,
     _postprocess_single_tensor,
-    _refuse_declared_modules_outside,
     get_quant_config,
 )
 from .registry import ExportContext
@@ -356,23 +355,6 @@ def _export_transformers_checkpoint_streaming(
     # call re-derives them, which is O(N^2) over a MoE model's expert modules.
     names = module_name_maps(model)
 
-    # Handlers run only in the decoder-layer windows and in the windows of the other modules whose
-    # weights need materializing, below. Before changing the model, refuse a module whose handler
-    # declares its format but that opens neither, such as an untied lm_head kept resident.
-    decoder_layers = LayerActivationCollector.get_decoder_layers(model)
-    if decoder_layers is not None:  # else refused below
-        reached = {id(m) for layer in decoder_layers for m in layer.modules()}
-        for module in model.modules():
-            if id(module) not in reached and requires_weight_materialization(module, model, names):
-                reached.update(id(m) for m in module.modules())
-        _refuse_declared_modules_outside(
-            model,
-            reached,
-            "the offloaded export packs only the decoder layers and the modules whose weights it "
-            "materializes, and would write this resident weight unpacked. Export the model "
-            "without offload, or offload this module too.",
-        )
-
     # --- Same model-level setup as _export_transformers_checkpoint ---
     dtype = _resolve_export_dtype(model, dtype)
     _prepare_moe_inputs(model, dtype, is_modelopt_qlora)
@@ -482,6 +464,7 @@ def _export_transformers_checkpoint_streaming(
 
     # Non-decoder modules whose weights are not directly readable (embed_tokens, norm,
     # lm_head, ...). Containers are skipped: their children get their own window.
+    packed_ids = set(decoder_owned_ids)
     for name, module in model.named_modules():
         if id(module) in decoder_owned_ids:
             continue
@@ -491,6 +474,7 @@ def _export_transformers_checkpoint_streaming(
             for sub_name, sub_mod in module.named_modules():
                 full_name = f"{name}.{sub_name}" if sub_name else name
                 _dispatch_export_handler(full_name, sub_mod, ctx)
+                packed_ids.add(id(sub_mod))
             prefix = f"{name}." if name else ""
             for key, tensor in module.state_dict().items():
                 full_key = prefix + key
@@ -498,6 +482,13 @@ def _export_transformers_checkpoint_streaming(
                     continue
                 seen_keys.add(full_key)
                 _stream_tensor(full_key, tensor)
+
+    # The modules that neither loop packed because their weights are resident, such as an lm_head
+    # kept on the GPU beside an offloaded decoder layer: pack them here, as the resident export
+    # does, so that the tensors streamed below are the ones that the quant config describes.
+    for name, module in model.named_modules():
+        if id(module) not in packed_ids:
+            _dispatch_export_handler(name, module, ctx)
 
     # GPU-resident parameters and persistent buffers (not covered by the above loops).
     # named_buffers() includes non-persistent buffers that state_dict() excludes; filter them.

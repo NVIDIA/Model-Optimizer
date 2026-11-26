@@ -26,7 +26,9 @@ precedence. Registering a handler for a new module type replaces what previously
 editing if/elif chains inside ``unified_export_hf.py``.
 """
 
-from collections.abc import Callable
+import contextlib
+from collections.abc import Callable, Iterator
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -210,6 +212,10 @@ class _ExportHandlerRegistryCls:
         return None
 
 
+# Whether an export that reads the formats that ExportModuleRegistry handlers declare is running.
+_READING_DECLARED_FORMATS: ContextVar[bool] = ContextVar("reading_declared_formats", default=False)
+
+
 class _ExportModuleRegistryCls(_ExportHandlerRegistryCls):
     """The registry of the whole-model export walk, whose handlers can declare their format."""
 
@@ -229,11 +235,12 @@ class _ExportModuleRegistryCls(_ExportHandlerRegistryCls):
 
         Keys, ``predicate`` and ``prepend`` match as in the other registries. ``export_format``
         (an :class:`ExportFormat`) declares the format in which the handler writes the quantized
-        weights of the modules it exports. Export then reads the format and block size of such a
-        module, and with them its quantization config, from this entry instead of from the module's
-        quantizers, as long as the module's weight quantizer is enabled. The entry applies only to
-        the modules it matches first, the ones its handler exports, so register it with
-        ``prepend=True``.
+        weights of the modules it exports. The exports that read declared formats then take the
+        format and block size of such a module, and with them its quantization config, from this
+        entry instead of from the module's quantizers, as long as the module's weight quantizer is
+        enabled. The entry applies only to the modules it matches first, so register it with
+        ``prepend=True``. These exports then run the predicates of the entries during format
+        detection, so a predicate should check what a module is, and not call format detection.
 
         Declare the format for weights that a custom quantization backend (see
         :func:`~modelopt.torch.quantization.nn.modules.tensor_quantizer.register_quant_backend`)
@@ -253,17 +260,14 @@ class _ExportModuleRegistryCls(_ExportHandlerRegistryCls):
         which rescales weights and recalibrates their ``amax``. Under
         :attr:`ExportContext.keep_fused_experts`, the distributed export that packs a still-sharded
         model, the handler must pack as the built-in handlers do, FSDP2-owned weights inside their
-        unit's weight-update window and fused experts kept fused, or raise. The export of an
-        offloaded model calls the handler only for the decoder layers and the modules it
-        materializes, and raises for another such module, such as an untied ``lm_head`` kept
-        resident.
+        unit's weight-update window and fused experts kept fused, or raise.
 
-        ``export_hf_vllm_fq_checkpoint``, which writes the weights the backend fake-quantizes,
-        reads the declared format and does not call the handler. It folds a fake-quant
-        ``TensorQuantizer`` into the weight and raises for any other weight quantizer of these
-        modules, such as a ``SequentialQuantizer``, and, with ``inplace_mem_efficient=True``, which
-        folds only the decoder layers, for these modules outside them. The exporters that pack
-        weights with the built-in math, such as the Megatron export, raise for these modules.
+        Only ``export_hf_checkpoint`` and ``_export_transformers_checkpoint``
+        (``examples/llm_qat/export.py``) read a declared format (see
+        :meth:`reading_declared_formats`). The other exporters, such as
+        ``export_hf_vllm_fq_checkpoint``, the Megatron export and the layerwise export, ignore it
+        and export these modules as they would without it, which for a ``num_bits`` of the
+        backend's own means that they raise ``Unsupported quantizer``.
 
         Usage::
 
@@ -292,8 +296,31 @@ class _ExportModuleRegistryCls(_ExportHandlerRegistryCls):
 
         return decorator
 
+    @contextlib.contextmanager
+    def reading_declared_formats(self) -> Iterator[None]:
+        """Mark an export that reads the formats that these handlers declare.
+
+        ``export_hf_checkpoint`` and ``_export_transformers_checkpoint`` run inside it. Outside it,
+        :meth:`declared_format` returns ``None``, so that every other exporter exports a module as
+        it would if no format were declared.
+        """
+        token = _READING_DECLARED_FORMATS.set(True)
+        try:
+            yield
+        finally:
+            _READING_DECLARED_FORMATS.reset(token)
+
     def declared_format(self, module: nn.Module) -> ExportFormat | None:
-        """Return the format that the handler exporting ``module`` declares, or ``None``."""
+        """Return the format that the handler exporting ``module`` declares, or ``None``.
+
+        ``None`` too outside :meth:`reading_declared_formats`.
+        """
+        if not _READING_DECLARED_FORMATS.get():
+            return None
+        return self._find_declared_format(module)
+
+    def _find_declared_format(self, module: nn.Module) -> ExportFormat | None:
+        """Return the format that the handler exporting ``module`` declares, in any export."""
         # Format detection calls this for every quantized layer: match only if a format is declared.
         if not self._declared:
             return None

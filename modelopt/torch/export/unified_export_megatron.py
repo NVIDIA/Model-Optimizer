@@ -72,7 +72,6 @@ from .quant_format import (
     QUANTIZATION_W4A16_NVFP4,
 )
 from .quant_utils import (
-    _refuse_built_in_packing,
     get_activation_scaling_factor,
     get_kv_cache_dtype,
     get_kv_cache_scaling_factor,
@@ -84,7 +83,6 @@ from .quant_utils import (
     to_quantized_weight,
     uses_iq_quantization,
 )
-from .registry import ExportModuleRegistry
 
 with import_plugin("transformers", verbose=False):
     import transformers
@@ -347,15 +345,6 @@ class GPTModelExporter:
         is_last_stage_main_rank = pp_rank == pp_size - 1 and tp_rank == 0
         is_writer_rank = self._is_sidecar_writer_rank(is_last_stage_main_rank)
 
-        # Only the handler that declares a module's format packs it, and this export calls none:
-        # _get_quantized_state refuses such a module. Agree first, so that a stage without one does
-        # not go on into the collectives below while the stage that holds one raises.
-        if self._any_rank(self._has_declared_format_weights()):
-            raise NotImplementedError(
-                "The Megatron export cannot pack a module whose ExportModuleRegistry handler "
-                "declares its quantization format: only that handler packs it, in "
-                "export_hf_checkpoint."
-            )
         quantization_format = self._get_quantization_format(self.model)
         if self._any_rank_uses_iq_quantization():
             # Both sizes below are identical on every rank, and the GGML flag is agreed across
@@ -1330,7 +1319,6 @@ class GPTModelExporter:
 
         if qformat == QUANTIZATION_NONE:
             return name_to_value, qformat, block_size
-        _refuse_built_in_packing(module)
         # GGML formats derive all block metadata directly from the weight and do not use amax or
         # separately exported scaling tensors. Keep the weight on-device until it can be packed
         # along its contraction axis, so the CUDA packer can be used. A weight that keeps pinned
@@ -1372,18 +1360,6 @@ class GPTModelExporter:
         peers exit. Agree across ranks first, mirroring ``_gather_exclude_modules``.
         """
         return self._any_rank(uses_iq_quantization(self.model))
-
-    def _has_declared_format_weights(self) -> bool:
-        """Whether this rank holds a module that ``_get_quantized_state`` refuses to pack.
-
-        Format detection gives such a module the format that its handler declares. The vLLM
-        fake-quant export, which folds the weights instead, detects no format.
-        """
-        return any(
-            ExportModuleRegistry.declared_format(module) is not None
-            and self._get_quantization_format(module) != QUANTIZATION_NONE
-            for module in self.model.modules()
-        )
 
     def _has_quantized_split_mtp_projection(self) -> bool:
         """Whether this rank's MTP has a quantized split e_proj / h_proj (GLM-5.3-Flash).

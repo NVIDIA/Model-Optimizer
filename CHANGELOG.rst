@@ -23,7 +23,7 @@ Changelog
 *Quantization - Export & Deployment*
 
 - ``examples/hf_ptq/convert_ggml_to_int8.py`` now also converts GGML exports that hold other formats (FP8, NVFP4, KV cache quantization): their GGML layers become ModelOpt ``INT8_PB_WO`` layers beside the rest of the export, which vLLM newer than 0.34.0 serves. Exports with only GGML layers still become compressed-tensors, and fused MoE experts now convert in both.
-- ``ExportModuleRegistry.register`` takes ``export_format``, an ``ExportFormat`` with the quantization format and block size in which the handler writes the weights it exports, which export then uses for those modules. With it, models quantized with a custom quantization backend (``register_quant_backend``) whose ``num_bits`` is the backend's own export from ``examples/hf_ptq/hf_ptq.py``, ``--vllm_fakequant_export`` included, and ``examples/llm_qat/export.py`` instead of failing with ``Unsupported quantizer``.
+- ``ExportModuleRegistry.register`` takes ``export_format``, an ``ExportFormat`` with the quantization format and block size in which the handler writes the weights it exports, which export then uses for those modules. With it, models quantized with a custom quantization backend (``register_quant_backend``) whose ``num_bits`` is the backend's own export with ``export_hf_checkpoint`` (``examples/hf_ptq/hf_ptq.py``) and ``examples/llm_qat/export.py`` instead of failing with ``Unsupported quantizer``. The other exporters, such as ``--vllm_fakequant_export``, the layerwise export and the Megatron export, ignore the declared format.
 
 *Quantization - Recipes*
 
@@ -48,6 +48,7 @@ Changelog
 *Quantization*
 
 - ``capture_quantized_weight_export_state`` now works on FSDP2-sharded (DTensor) weights; it raised on them, and could pick another weight's quantizer when local shards were empty.
+- ``export_hf_checkpoint`` of a CPU- or disk-offloaded model now packs a quantized module outside the decoder layers that stays on the GPU, such as an untied ``lm_head``. It wrote such a weight unquantized and without its scales, under a quantization config that listed it as quantized. Re-export affected checkpoints.
 - NVFP4 weight export (Hugging Face checkpoints without TensorRT-LLM, and ONNX) now normalizes weights by the correctly rounded reciprocal of the block scale, as the Triton NVFP4 fake quant does, so a weight on an exact E2M1 rounding boundary no longer packs to a neighboring FP4 value; the Triton fake quant and FP8 scale sweep can also change at such boundaries. Re-export affected NVFP4 checkpoints.
 - Unified HF export now writes model-hub tensor names for models with 3-D weights that do not stack experts. GGML exports of MoE models whose conversion mapping fuses experts, and models with a short convolution such as GLM-5.3-Flash, fell back to transformers' in-memory names, which vLLM cannot load. Re-export affected checkpoints.
 - Fixed a KV-cache length mismatch that could interrupt layerwise GPTQ calibration of Hugging Face models such as Qwen3 in ModelOpt 0.48.0.

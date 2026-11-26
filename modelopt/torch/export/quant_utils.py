@@ -188,36 +188,6 @@ def get_activation_scaling_factor(
     return get_scaling_factor(input_quantizer)
 
 
-def _refuse_built_in_packing(module: nn.Module) -> None:
-    """Raise for a module whose export handler declares its format: only that handler packs it."""
-    if ExportModuleRegistry.declared_format(module) is not None:
-        raise NotImplementedError(
-            f"The built-in export cannot pack this {type(module).__name__}: the "
-            "ExportModuleRegistry handler that declares its quantization format packs it, in "
-            "export_hf_checkpoint."
-        )
-
-
-def _refuse_declared_modules_outside(model: nn.Module, reached: set[int], reason: str) -> None:
-    """Raise for a quantized module whose format is declared but that the export does not reach.
-
-    An export that packs or folds the weights of only some modules (``reached``, by id) would write
-    the weight of such a module as it is, while the declared format lists it as quantized.
-    """
-    for name, module in model.named_modules():
-        if ExportModuleRegistry.declared_format(module) is None or id(module) in reached:
-            continue
-        if any(
-            (quantizer := representative_weight_quantizer(module, weight_name)) is not None
-            and quantizer.is_enabled
-            for weight_name in weight_attr_names(module)
-        ):
-            raise NotImplementedError(
-                f"Cannot export {name}, whose export handler declares its quantization format: "
-                f"{reason}"
-            )
-
-
 def get_weight_scaling_factor(module: nn.Module, weight_name: str = "weight") -> torch.Tensor:
     """Returns the weight scaling factor."""
     # module.weight_quantizer could be a TensorQuantizer (for algorithms except W4A8) or
@@ -231,9 +201,6 @@ def get_weight_scaling_factor(module: nn.Module, weight_name: str = "weight") ->
 
     if weight_quantizer is None:
         return None
-
-    if weight_quantizer.is_enabled:
-        _refuse_built_in_packing(module)
 
     if isinstance(weight_quantizer, SequentialQuantizer):
         return get_scaling_factor(weight_quantizer[0])
@@ -649,7 +616,14 @@ def _get_quantization_from_quantizers(
         if scale_bits == (8, 0):
             return QUANTIZATION_MXFP4
 
-    raise NotImplementedError(f"Unsupported quantizer with num_bits: {weight_quantizer.num_bits}")
+    message = f"Unsupported quantizer with num_bits: {weight_quantizer.num_bits}"
+    if ExportModuleRegistry._find_declared_format(layer) is not None:
+        message += (
+            ". Its ExportModuleRegistry handler declares the format to export it in, but only "
+            "export_hf_checkpoint and _export_transformers_checkpoint read a declared format; the "
+            "other exporters, the layerwise export included, do not."
+        )
+    raise NotImplementedError(message)
 
 
 def get_quantization_format(module) -> str | None:

@@ -142,7 +142,6 @@ from .quant_format import (
 from .quant_utils import (
     _get_kv_cache_postprocess_config,
     _get_uncalibrated_static_input_module_names,
-    _refuse_built_in_packing,
     fuse_prequant_layernorm,
     fuse_prequant_to_linear,
     get_activation_scaling_factor,
@@ -667,7 +666,12 @@ def _export_quantized_weight(
         return
 
     # The built-in fused-experts packing passes a wrapper per expert, which a handler can match.
-    _refuse_built_in_packing(sub_module)
+    if ExportModuleRegistry.declared_format(sub_module) is not None:
+        raise NotImplementedError(
+            f"The built-in export cannot pack this {type(sub_module).__name__}: the "
+            "ExportModuleRegistry handler that matches it declares its quantization format, and "
+            "only that handler can pack it."
+        )
     block_size = get_weight_block_size(sub_module, weight_name)
     quantizer_attrs = quantizer_attr_names(weight_name)
     weight: nn.Parameter = getattr(sub_module, weight_name)
@@ -1146,6 +1150,7 @@ def _diffusion_quantization_target_types(model: nn.Module) -> list[str]:
     return sorted(target_types)
 
 
+@ExportModuleRegistry.reading_declared_formats()
 def _export_transformers_checkpoint(
     model: nn.Module,
     dtype: torch.dtype | None = None,
@@ -2092,6 +2097,7 @@ def _no_gather_export_asked() -> bool:
     return env.fsdp2_export() == "nogather"
 
 
+@ExportModuleRegistry.reading_declared_formats()
 def export_hf_checkpoint(
     model: Any,
     dtype: torch.dtype | None = None,

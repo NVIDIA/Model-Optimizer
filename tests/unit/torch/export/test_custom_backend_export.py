@@ -17,33 +17,28 @@
 
 A toy backend fake-quantizes the MLP weights and registers an export handler that packs its linears
 and declares the format it writes. The exporters that ``hf_ptq.py`` and ``llm_qat/export.py`` call
-then export the model with no change to them, and the built-in packing refuses the modules whose
-format a handler declares.
+then export the model with no change to them, the built-in packing refuses the modules whose format
+a handler declares, and the other exporters ignore the declared format.
 """
 
 import json
-from collections import OrderedDict
 from fnmatch import fnmatch
 from types import SimpleNamespace
-from unittest import mock
 
 import pytest
 import torch
 import torch.nn as nn
 
 pytest.importorskip("transformers")
-from _test_utils.torch.distributed.utils import bounded_collectives
 from _test_utils.torch.transformers_models import get_tiny_gpt_oss, get_tiny_llama, get_tiny_mixtral
 from safetensors.torch import load_file
 
-import modelopt.torch.export.unified_export_megatron as uem
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export import (
     capture_quantized_weight_export_state,
     export_hf_checkpoint,
     export_hf_vllm_fq_checkpoint,
 )
-from modelopt.torch.export.plugins.vllm_fakequant_megatron import VllmFqGPTModelExporter
 from modelopt.torch.export.quant_format import (
     QUANTIZATION_FP8,
     QUANTIZATION_FP8_PB_WO,
@@ -54,23 +49,14 @@ from modelopt.torch.export.quant_format import (
     QUANTIZATION_Q8_0,
     QUANTIZATION_W4A16_NVFP4,
 )
-from modelopt.torch.export.quant_utils import (
-    get_quant_config,
-    get_quantization_format,
-    get_weight_scaling_factor,
-)
+from modelopt.torch.export.quant_utils import get_quant_config, get_quantization_format
 from modelopt.torch.export.registry import ExportFormat, ExportModuleRegistry
 from modelopt.torch.export.unified_export_hf import (
     _export_quantized_weight,
     _export_transformers_checkpoint,
 )
 from modelopt.torch.export.unified_export_megatron import GPTModelExporter
-from modelopt.torch.quantization.config import QuantizerAttributeConfig
-from modelopt.torch.quantization.nn import (
-    TensorQuantizer,
-    register_quant_backend,
-    unregister_quant_backend,
-)
+from modelopt.torch.quantization.nn import register_quant_backend, unregister_quant_backend
 from modelopt.torch.quantization.qtensor import NVFP4QTensor
 
 BACKEND = "toy_backend"
@@ -300,7 +286,8 @@ def test_the_declared_format_holds_whatever_the_input_quantizer(
     )
     _declare(_has_toy_weights, quantization_format, NVFP4_BLOCK_SIZE)
 
-    quantization = get_quant_config(model)["quantization"]
+    with ExportModuleRegistry.reading_declared_formats():
+        quantization = get_quant_config(model)["quantization"]
     assert quantization["quant_algo"] == quant_algo
     assert not [name for name in MLP_LINEARS if _excluded(name, quantization)]
 
@@ -314,7 +301,8 @@ def test_fused_experts_take_the_declared_format(toy_backend, quantization_format
     block_size, quant_algo, group_size = DECLARED_FORMATS[quantization_format]
     _declare(_has_fused_experts, quantization_format, block_size)
 
-    quantization = get_quant_config(model)["quantization"]
+    with ExportModuleRegistry.reading_declared_formats():
+        quantization = get_quant_config(model)["quantization"]
     assert quantization["quant_algo"] == quant_algo
     assert quantization["group_size"] == group_size
     assert not [name for name in experts if _excluded(name, quantization)]
@@ -327,13 +315,12 @@ def test_a_disabled_weight_takes_no_declared_format(toy_backend):
     # Matches the down projections too, whose weight quantizer is disabled.
     _declare(lambda module: hasattr(module, "weight_quantizer"), QUANTIZATION_W4A16_NVFP4, 16)
 
-    quantization = get_quant_config(model)["quantization"]
+    with ExportModuleRegistry.reading_declared_formats():
+        quantization = get_quant_config(model)["quantization"]
     assert quantization["quant_algo"] == "W4A16_NVFP4"
     assert {name for name in MLP_LINEARS if _excluded(name, quantization)} == {
         f"model.layers.{i}.mlp.down_proj" for i in range(2)
     }
-    # The packing of the TensorRT-LLM export still gets no scale for it.
-    assert get_weight_scaling_factor(model.model.layers[0].mlp.down_proj) is None
 
 
 def test_the_built_in_packing_refuses_each_weight_of_a_declared_module(toy_backend):
@@ -345,12 +332,13 @@ def test_the_built_in_packing_refuses_each_weight_of_a_declared_module(toy_backe
     assert not experts.down_proj_weight_quantizer.is_enabled
     _declare(lambda module: module is experts, QUANTIZATION_W4A16_NVFP4, NVFP4_BLOCK_SIZE)
 
-    assert get_quantization_format(experts) == QUANTIZATION_W4A16_NVFP4
-    # The packing that the built-in handler of these experts does for each weight, the disabled
-    # one included, which would otherwise take its scales in the declared format.
-    for weight_name in ("gate_up_proj", "down_proj"):
-        with pytest.raises(NotImplementedError, match="built-in export cannot pack"):
-            _export_quantized_weight(experts, torch.bfloat16, weight_name)
+    with ExportModuleRegistry.reading_declared_formats():
+        assert get_quantization_format(experts) == QUANTIZATION_W4A16_NVFP4
+        # The packing that the built-in handler of these experts does for each weight, the
+        # disabled one included, which would otherwise take its scales in the declared format.
+        for weight_name in ("gate_up_proj", "down_proj"):
+            with pytest.raises(NotImplementedError, match="built-in export cannot pack"):
+                _export_quantized_weight(experts, torch.bfloat16, weight_name)
 
 
 def test_only_the_handler_that_exports_a_module_declares_its_format(toy_backend):
@@ -358,8 +346,9 @@ def test_only_the_handler_that_exports_a_module_declares_its_format(toy_backend)
     # Registered after the built-in handler of quantized linears, which exports them instead.
     _declare(_has_toy_weights, QUANTIZATION_W4A16_NVFP4, NVFP4_BLOCK_SIZE, prepend=False)
 
-    with pytest.raises(
-        NotImplementedError, match=f"Unsupported quantizer with num_bits: {BACKEND}"
+    with (
+        ExportModuleRegistry.reading_declared_formats(),
+        pytest.raises(NotImplementedError, match=rf"num_bits: {BACKEND}$"),
     ):
         get_quant_config(model)
 
@@ -370,10 +359,28 @@ def test_re_registering_a_handler_replaces_its_declared_format(toy_backend):
     # As when its module is reloaded.
     ExportModuleRegistry.register(predicate=_has_toy_weights, prepend=True)(handler)
 
-    with pytest.raises(
-        NotImplementedError, match=f"Unsupported quantizer with num_bits: {BACKEND}"
+    with (
+        ExportModuleRegistry.reading_declared_formats(),
+        pytest.raises(NotImplementedError, match=rf"num_bits: {BACKEND}$"),
     ):
         get_quant_config(model)
+
+
+def test_only_the_hf_exports_read_the_declared_format(toy_backend):
+    model = _quantize(get_tiny_llama())
+    down_proj = model.model.layers[0].mlp.down_proj
+    export_format = ExportFormat(
+        quantization_format=QUANTIZATION_W4A16_NVFP4, block_size=NVFP4_BLOCK_SIZE
+    )
+    _declare(_has_toy_weights, QUANTIZATION_W4A16_NVFP4, NVFP4_BLOCK_SIZE)
+
+    assert ExportModuleRegistry.declared_format(down_proj) is None
+    with ExportModuleRegistry.reading_declared_formats():
+        assert ExportModuleRegistry.declared_format(down_proj) == export_format
+    # The export reads it and calls the handler, which raises; then it is unread again.
+    with pytest.raises(AssertionError, match="was not to be packed"):
+        _export_transformers_checkpoint(model)
+    assert ExportModuleRegistry.declared_format(down_proj) is None
 
 
 def test_the_declared_format_must_be_an_export_format():
@@ -399,6 +406,10 @@ def test_the_declared_format_must_be_an_export_format():
             "block_size must be an int >= 0",
         ),
         (
+            {"quantization_format": QUANTIZATION_W4A16_NVFP4, "block_size": 16.0},
+            "block_size must be an int >= 0",
+        ),
+        (
             {"quantization_format": "w4a16_nvpf4", "block_size": NVFP4_BLOCK_SIZE},
             "not a format that export writes a config for",
         ),
@@ -417,108 +428,42 @@ def test_an_export_format_takes_its_fields_by_keyword():
         ExportFormat(QUANTIZATION_W4A16_NVFP4, NVFP4_BLOCK_SIZE)
 
 
-def test_vllm_export_writes_the_backend_weights_and_keeps_activation_quantization(
-    toy_backend, tmp_path
-):
-    input_cfg = {"quantizer_name": "*mlp*input_quantizer", "cfg": {"num_bits": 8, "axis": None}}
-    model = _quantize(get_tiny_llama(), extra_cfg=(input_cfg,), algorithm="max")
+def _megatron_packing(model: nn.Module, tmp_path) -> None:
+    """Pack a layer as the Megatron export does, with the parts of the exporter that it calls."""
+    exporter = SimpleNamespace(
+        _get_quantization_format=get_quantization_format,
+        _record_excluded_module=lambda prefix: None,
+        _get_weight_bias=lambda module, dtype, name_to_value, keep_weight_device: {
+            "weight": module.weight.detach()
+        },
+    )
+    GPTModelExporter._get_quantized_state(
+        exporter, model.model.layers[1].mlp.down_proj, torch.bfloat16
+    )
+
+
+# Exporters that do not read a declared format.
+OTHER_EXPORTERS = {
+    "export_hf_vllm_fq_checkpoint": EXPORTERS["export_hf_vllm_fq_checkpoint"],
+    "megatron": _megatron_packing,
+    "functional": lambda model, tmp_path: capture_quantized_weight_export_state(
+        model.model.layers[1].mlp.down_proj
+    ),
+}
+
+
+@pytest.mark.parametrize("exporter", sorted(OTHER_EXPORTERS))
+def test_the_other_exporters_ignore_a_declared_format(toy_backend, exporter, tmp_path):
+    model = _quantize(get_tiny_llama())
     packed = _register_toy_packer(QUANTIZATION_W4A16_NVFP4, NVFP4_BLOCK_SIZE)
-    weights = {
-        name: module.weight.detach().clone()
-        for name, module in model.named_modules()
-        if _has_toy_weights(module)
-    }
-    EXPORTERS["export_hf_vllm_fq_checkpoint"](model, tmp_path)
 
+    # As without a declared format, but naming the exporters that read it.
+    with pytest.raises(
+        NotImplementedError,
+        match=rf"num_bits: {BACKEND}\. Its ExportModuleRegistry handler declares the format",
+    ):
+        OTHER_EXPORTERS[exporter](model, tmp_path)
     assert not packed
-    state_dict = load_file(tmp_path / "model.safetensors")
-    assert sorted(weights) == sorted(MLP_LINEARS)
-    for name, weight in weights.items():
-        expected = _toy_fake_quant(weight.float(), None).to(weight.dtype)
-        assert not torch.equal(expected, weight)
-        assert torch.equal(state_dict[f"{name}.weight"], expected)
-    modelopt_state = torch.load(tmp_path / "vllm_fq_modelopt_state.pth", weights_only=False)
-    for name in MLP_LINEARS:
-        assert modelopt_state["modelopt_state_weights"][f"{name}.input_quantizer"]["_amax"] > 0
-
-
-@pytest.mark.parametrize("weight_quantizer", ["SequentialQuantizer", "TensorQuantizer"])
-def test_vllm_export_refuses_a_declared_weight_it_cannot_fold(
-    toy_backend, weight_quantizer, tmp_path
-):
-    sequential = weight_quantizer == "SequentialQuantizer"
-    model = _quantize(get_tiny_llama(), cfg=[TOY_CFG, TOY_CFG] if sequential else TOY_CFG)
-    quantized = {
-        name: module
-        for name, module in model.named_modules()
-        if getattr(module, "weight_quantizer", None) is not None
-        and module.weight_quantizer.is_enabled
-    }
-    if not sequential:
-        # A real-quant weight quantizer, which the export does not apply to the weight either.
-        for module in quantized.values():
-            module.weight_quantizer._fake_quant = False
-    weights = {name: module.weight.detach().clone() for name, module in quantized.items()}
-    _declare(
-        lambda module: module in quantized.values(), QUANTIZATION_W4A16_NVFP4, NVFP4_BLOCK_SIZE
-    )
-
-    with pytest.raises(NotImplementedError, match=f"cannot fold the {weight_quantizer}"):
-        EXPORTERS["export_hf_vllm_fq_checkpoint"](model, tmp_path)
-    # It refuses before changing the model.
-    assert sorted(quantized) == sorted(MLP_LINEARS)
-    for name, module in quantized.items():
-        assert module.weight_quantizer.is_enabled
-        assert torch.equal(module.weight, weights[name])
-    assert not any(tmp_path.iterdir())
-
-
-def _quantize_with_lm_head() -> nn.Module:
-    """Quantize the MLP weights and the weight of the untied lm_head with the toy backend."""
-    model = _quantize(
-        get_tiny_llama(),
-        extra_cfg=({"quantizer_name": "*lm_head*weight_quantizer", "cfg": TOY_CFG},),
-    )
-    assert not model.config.tie_word_embeddings
-    assert _has_toy_weights(model.lm_head)
-    return model
-
-
-def test_vllm_export_folds_a_declared_lm_head(toy_backend, tmp_path):
-    model = _quantize_with_lm_head()
-    weights = {
-        name: model.get_submodule(name).weight.detach().clone()
-        for name in [*MLP_LINEARS, "lm_head"]
-    }
-    _declare(_has_toy_weights, QUANTIZATION_W4A16_NVFP4, NVFP4_BLOCK_SIZE)
-    export_hf_vllm_fq_checkpoint(model, export_dir=tmp_path, inplace_mem_efficient=False)
-
-    state_dict = load_file(tmp_path / "model.safetensors")
-    for name, weight in weights.items():
-        expected = _toy_fake_quant(weight.float(), None).to(weight.dtype)
-        assert not torch.equal(expected, weight)
-        assert torch.equal(state_dict[f"{name}.weight"], expected)
-
-
-def test_vllm_export_in_place_refuses_a_declared_weight_outside_the_decoder_layers(
-    toy_backend, tmp_path
-):
-    model = _quantize_with_lm_head()
-    weights = {
-        name: model.get_submodule(name).weight.detach().clone()
-        for name in [*MLP_LINEARS, "lm_head"]
-    }
-    _declare(_has_toy_weights, QUANTIZATION_W4A16_NVFP4, NVFP4_BLOCK_SIZE)
-
-    # In place, it folds only the weights of the decoder layers, and would save the lm_head's as is.
-    with pytest.raises(NotImplementedError, match=r"Cannot export lm_head, .* decoder layers"):
-        export_hf_vllm_fq_checkpoint(model, export_dir=tmp_path, inplace_mem_efficient=True)
-    # It refuses before changing the model.
-    for name, weight in weights.items():
-        module = model.get_submodule(name)
-        assert module.weight_quantizer.is_enabled
-        assert torch.equal(module.weight, weight)
-    assert not any(tmp_path.iterdir())
 
 
 def _offload(*modules: nn.Module) -> None:
@@ -529,127 +474,42 @@ def _offload(*modules: nn.Module) -> None:
         cpu_offload(module, execution_device="cpu")
 
 
-def test_offloaded_export_packs_a_declared_lm_head_that_it_materializes(toy_backend, tmp_path):
+def _load_shards(export_dir) -> dict[str, torch.Tensor]:
+    return {k: v for f in export_dir.glob("*.safetensors") for k, v in load_file(f).items()}
+
+
+@pytest.mark.parametrize("offload_lm_head", [True, False])
+def test_offloaded_export_packs_each_declared_module_once(toy_backend, offload_lm_head, tmp_path):
     pytest.importorskip("accelerate")
-    model = _quantize(get_tiny_llama(), "*lm_head*weight_quantizer")
+    lm_head_cfg = {"quantizer_name": "*lm_head*weight_quantizer", "cfg": TOY_CFG}
+    model = _quantize(get_tiny_llama(), extra_cfg=(lm_head_cfg,))
     packed = _register_toy_packer(QUANTIZATION_W4A16_NVFP4, NVFP4_BLOCK_SIZE)
-    _offload(model.model.layers[0], model.lm_head)
+    # A resident lm_head, which no offload window reaches, is packed too.
+    _offload(model.model.layers[0], *([model.lm_head] if offload_lm_head else []))
     export_hf_checkpoint(model, export_dir=tmp_path)
 
-    state_dict = {k: v for f in tmp_path.glob("*.safetensors") for k, v in load_file(f).items()}
-    assert sorted(packed) == ["lm_head"]
-    for key, tensor in packed["lm_head"].items():
-        exported = state_dict[f"lm_head.{key}"]
-        assert exported.dtype == tensor.dtype and torch.equal(exported.float(), tensor.float())
+    state_dict = _load_shards(tmp_path)
+    # A handler called twice for a module would leave tensors other than the exported ones here.
+    assert sorted(packed) == sorted([*MLP_LINEARS, "lm_head"])
+    for name, tensors in packed.items():
+        for key, tensor in tensors.items():
+            exported = state_dict[f"{name}.{key}"]
+            assert exported.dtype == tensor.dtype and torch.equal(exported.float(), tensor.float())
 
 
-def test_offloaded_export_refuses_a_declared_lm_head_kept_resident(toy_backend, tmp_path):
+def test_offloaded_export_packs_a_resident_lm_head(tmp_path):
     pytest.importorskip("accelerate")
-    model = _quantize(get_tiny_llama(), "*lm_head*weight_quantizer")
-    weight = model.lm_head.weight.detach().clone()
-    packed = _register_toy_packer(QUANTIZATION_W4A16_NVFP4, NVFP4_BLOCK_SIZE)
+    fp8 = _quantizer_cfg(mtq.FP8_DEFAULT_CFG, "*weight_quantizer")
+    model = _quantize(get_tiny_llama(), "*lm_head*weight_quantizer", cfg=fp8, algorithm="max")
     _offload(model.model.layers[0])
+    export_hf_checkpoint(model, export_dir=tmp_path)
 
-    # It packs only the decoder layers and the modules it materializes, and would save the resident
-    # lm_head's weight unpacked.
-    with pytest.raises(NotImplementedError, match=r"Cannot export lm_head, .* resident weight"):
-        export_hf_checkpoint(model, export_dir=tmp_path)
-    # It refuses before changing the model.
-    assert not packed
-    assert model.lm_head.weight_quantizer.is_enabled
-    assert torch.equal(model.lm_head.weight, weight)
-    assert not any(tmp_path.iterdir())
-
-
-@pytest.mark.parametrize(
-    ("quantization_format", "block_size"),
-    [(QUANTIZATION_W4A16_NVFP4, NVFP4_BLOCK_SIZE), (QUANTIZATION_Q8_0, 32)],
-)
-def test_the_megatron_packing_refuses_a_declared_module(
-    toy_backend, quantization_format, block_size
-):
-    model = _quantize(get_tiny_llama())
-    down_proj = model.model.layers[1].mlp.down_proj
-    _declare(_has_toy_weights, quantization_format, block_size)
-    # The parts of the exporter that _get_quantized_state calls, for one layer.
-    exporter = SimpleNamespace(
-        _get_quantization_format=get_quantization_format,
-        _record_excluded_module=lambda prefix: None,
-        _get_weight_bias=lambda module, dtype, name_to_value, keep_weight_device: {
-            "weight": module.weight.detach()
-        },
-    )
-
-    with pytest.raises(NotImplementedError, match="built-in export cannot pack"):
-        GPTModelExporter._get_quantized_state(exporter, down_proj, torch.bfloat16)
-    # The TensorRT-LLM export takes the weight scales of each layer it packs from here.
-    with pytest.raises(NotImplementedError, match="built-in export cannot pack"):
-        get_weight_scaling_factor(down_proj)
-
-
-def _one_stage_holds_a_declared_module_job(rank, size):
-    linear = nn.Linear(16, 16, bias=False)
-    if rank == size - 1:  # the last pipeline stage alone
-        linear.weight_quantizer = TensorQuantizer(QuantizerAttributeConfig(**TOY_CFG))
-    exporter = object.__new__(GPTModelExporter)
-    exporter.model = nn.Sequential(linear)
-    exporter.exclude_modules = []
-    exporter._layer_state_dicts = OrderedDict()
-
-    def export_walk(self):  # packs each layer as the export rules do
-        self._get_quantized_state(linear, prefix="model.layers.0.mlp.down_proj.")
-
-    raised = None
-    with (
-        mock.patch.object(ExportModuleRegistry, "_entries", list(ExportModuleRegistry._entries)),
-        mock.patch.object(ExportModuleRegistry, "_declared", dict(ExportModuleRegistry._declared)),
-        mock.patch.object(GPTModelExporter, "_get_state_dict", export_walk),
-        mock.patch.object(GPTModelExporter, "_is_sidecar_writer_rank", return_value=False),
-        # create: the unit tests run without Megatron-Core.
-        mock.patch.multiple(
-            uem,
-            create=True,
-            get_pipeline_model_parallel_rank=lambda: rank,
-            get_pipeline_model_parallel_world_size=lambda: size,
-            get_tensor_model_parallel_rank=lambda: 0,
-            get_tensor_model_parallel_world_size=lambda: 1,
-            get_expert_model_parallel_rank=lambda: 0,
-            get_expert_model_parallel_world_size=lambda: 1,
-            get_data_parallel_rank=lambda: 0,
-        ),
-        bounded_collectives(),
-    ):
-        _declare(_has_toy_weights, QUANTIZATION_FP8, 0)
-        # Not pytest.raises: when nothing is raised it fails with a BaseException, which would take
-        # the shared worker down instead of failing this test alone.
-        try:
-            exporter.save_pretrained("unused", "unused")
-        except (NotImplementedError, RuntimeError) as e:
-            raised = e
-    assert isinstance(raised, NotImplementedError), raised
-    assert "declares its quantization format" in str(raised), raised
-
-
-def test_every_stage_refuses_a_declared_module_that_one_stage_holds(cpu_dist_workers):
-    """The stages without such a module must not wait in the export's collectives for the one that
-    refuses it, but refuse it too."""
-    cpu_dist_workers.run(_one_stage_holds_a_declared_module_job)
-
-
-@pytest.mark.parametrize(
-    ("exporter_type", "refused"), [(GPTModelExporter, True), (VllmFqGPTModelExporter, False)]
-)
-def test_the_megatron_export_refuses_declared_modules_up_front(exporter_type, refused):
-    """The vLLM fake-quant export folds the weights instead of packing them."""
-    model = _quantize(get_tiny_llama())
-    _declare(_has_toy_weights, QUANTIZATION_FP8, 0)
-    exporter = object.__new__(exporter_type)
-    exporter.model = model
-    assert exporter._has_declared_format_weights() is refused
+    state_dict = _load_shards(tmp_path)
+    assert state_dict["lm_head.weight"].dtype == torch.float8_e4m3fn
+    assert "lm_head.weight_scale" in state_dict
 
 
 def test_the_fused_experts_packing_refuses_a_declared_expert(tmp_path):
-    # The FP8 packing takes no scale from get_weight_scaling_factor, which refuses too.
     fp8 = _quantizer_cfg(mtq.FP8_DEFAULT_CFG, "*weight_quantizer")
     model = _quantize(get_tiny_mixtral(), "*experts*weight_quantizer*", cfg=fp8)
     # Matches the wrapper that the built-in packing of fused experts passes for each expert.
@@ -663,20 +523,10 @@ def test_the_fused_experts_packing_refuses_a_declared_expert(tmp_path):
         export_hf_checkpoint(model, export_dir=tmp_path)
 
 
-def test_the_functional_export_refuses_a_declared_module():
-    fp8 = _quantizer_cfg(mtq.FP8_DEFAULT_CFG, "*weight_quantizer")
-    model = _quantize(get_tiny_llama(), cfg=fp8, algorithm="max")
-    down_proj = model.model.layers[1].mlp.down_proj
-    _declare(lambda module: module is down_proj, QUANTIZATION_FP8, 0)
-
-    with pytest.raises(NotImplementedError, match="built-in export cannot pack"):
-        capture_quantized_weight_export_state(down_proj)
-
-
 @pytest.mark.parametrize("exporter", sorted(EXPORTERS))
 def test_backend_without_declared_format_is_unsupported(toy_backend, exporter, tmp_path):
     model = _quantize(get_tiny_llama())
     with pytest.raises(
-        NotImplementedError, match=f"Unsupported quantizer with num_bits: {BACKEND}"
+        NotImplementedError, match=rf"^Unsupported quantizer with num_bits: {BACKEND}$"
     ):
         EXPORTERS[exporter](model, tmp_path)

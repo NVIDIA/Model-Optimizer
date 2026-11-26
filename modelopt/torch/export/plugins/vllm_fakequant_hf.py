@@ -52,8 +52,7 @@ from modelopt.torch.utils import get_unwrapped_name, safe_save
 from modelopt.torch.utils.plugins.hf_checkpoint_utils import copy_off_index_safetensors
 
 from ..layer_utils import get_experts_list
-from ..quant_utils import _refuse_declared_modules_outside, get_quantization_format
-from ..registry import ExportModuleRegistry
+from ..quant_utils import get_quantization_format
 from ..unified_export_hf import (
     _copy_non_model_files_from_source,
     _source_checkpoint,
@@ -160,48 +159,6 @@ def _check_all_weight_quantizers_disabled(model: nn.Module) -> None:
                         f"vLLM fakequant export: {attr_name!r} must be disabled before saving "
                         f"quantizer_state (weights already folded). "
                         f"See filter_modelopt_state_quantizer_state_for_model in vllm_reload_utils."
-                    )
-
-
-def _refuse_unfoldable_declared_weights(model: nn.Module, inplace_mem_efficient: bool) -> None:
-    """Raise for a declared module whose weights the export cannot fold, before changing the model.
-
-    The export folds only enabled fake-quant ``TensorQuantizer`` weight quantizers into the weights,
-    and with ``inplace_mem_efficient=True`` only those of the decoder layers. Format detection
-    refuses some other ones, such as a SequentialQuantizer other than W4A8's, but not for a module
-    whose export handler declares its format.
-    """
-    if inplace_mem_efficient:
-        decoder_layers = LayerActivationCollector.get_decoder_layers(model)
-        if decoder_layers is not None:  # else refused by the export
-            _refuse_declared_modules_outside(
-                model,
-                {id(m) for layer in decoder_layers for m in layer.modules()},
-                "with inplace_mem_efficient=True, export_hf_vllm_fq_checkpoint folds only the "
-                "weights of the decoder layers, and would write this weight unfolded. Export "
-                "with inplace_mem_efficient=False.",
-            )
-    for name, module in model.named_modules():
-        if (
-            not isinstance(module, QuantModule)
-            or ExportModuleRegistry.declared_format(module) is None
-        ):
-            continue
-        for attr_name, child in module.named_children():
-            if attr_name.endswith("weight_quantizer"):
-                quantizers = [child]
-            elif attr_name.endswith("weight_quantizers") and isinstance(child, nn.ModuleList):
-                quantizers = list(child)
-            else:
-                continue
-            for quantizer in quantizers:
-                if not isinstance(quantizer, AnyQuantizer) or not quantizer.is_enabled:
-                    continue
-                if not (isinstance(quantizer, TensorQuantizer) and quantizer.fake_quant):
-                    raise NotImplementedError(
-                        f"export_hf_vllm_fq_checkpoint cannot fold the {type(quantizer).__name__} "
-                        f"{name}.{attr_name} into its weight: it folds only a fake-quant "
-                        "TensorQuantizer of a module whose export handler declares its format."
                     )
 
 
@@ -699,7 +656,6 @@ def export_hf_vllm_fq_checkpoint(
             dict materialization. This is destructive — model weights are permanently
             modified and weight quantizers are not re-enabled after export.
     """
-    _refuse_unfoldable_declared_weights(model, inplace_mem_efficient)
     export_dir = Path(export_dir)
     export_dir.mkdir(parents=True, exist_ok=True)
 
