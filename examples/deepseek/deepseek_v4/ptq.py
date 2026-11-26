@@ -291,19 +291,22 @@ def load_deepseek_v4(
                 f"checkpoint key mismatch while loading {ckpt}: "
                 f"missing={missing}, unexpected={unexpected}"
             )
-        # Validate once here rather than synchronizing CUDA on every expert forward.
-        for name, weight in model.named_parameters():
-            if weight.dtype != torch.float8_e4m3fn:
-                continue
-            scale = getattr(weight, "scale", None)
-            if not isinstance(scale, torch.Tensor) or scale.dtype not in (
-                torch.uint8,
-                torch.int8,
-                torch.float8_e8m0fnu,
+        # Match QuantModuleRegistry's expert selection; validate once instead of
+        # synchronizing CUDA on every expert forward.
+        for name, expert in model.named_modules():
+            if (
+                not isinstance(expert, deekseep_v4_model.Expert)
+                or type(expert).forward is not deekseep_v4_model.Expert.forward
             ):
                 continue
-            if (scale.contiguous().view(torch.uint8) == 255).any():
-                raise ValueError(f"Native checkpoint scales for {name} contain NaN codes")
+            for projection in ("w1", "w2", "w3"):
+                weight = getattr(expert, projection).weight
+                if weight.dtype != torch.float8_e4m3fn:
+                    continue
+                if (weight.scale.contiguous().view(torch.uint8) == 255).any():
+                    raise ValueError(
+                        f"Native checkpoint scales for {name}.{projection}.weight contain NaN codes"
+                    )
         print(f"[rank {rank}] loaded")
     # Match generate.py: default device to this rank's CUDA so that any
     # torch.empty(...) / torch.zeros(...) inside the V4 forward (TileLang
