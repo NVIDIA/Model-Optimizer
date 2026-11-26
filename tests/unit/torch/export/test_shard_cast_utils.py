@@ -100,6 +100,8 @@ def test_copy_aux_files_preserves_sidecars_and_applies_skips(tmp_path):
     (source / "tokenizer_config.json").write_text("{}")
     (source / "model.safetensors").write_bytes(b"shard")
     (source / "assets" / "config.txt").write_text("keep")
+    (source / "assets" / "run.sh").write_text("#!/bin/sh\n")
+    (source / "assets" / "run.sh").chmod(0o755)
     (source / ".cache" / "stale.json").write_text("{}")
 
     copy_aux_files(
@@ -112,6 +114,7 @@ def test_copy_aux_files_preserves_sidecars_and_applies_skips(tmp_path):
 
     assert (output / "tokenizer_config.json").read_text() == "{}"
     assert (output / "assets" / "config.txt").read_text() == "keep"
+    assert os.access(output / "assets" / "run.sh", os.X_OK)  # a shipped helper still runs
     assert not (output / "model.safetensors").exists()
     assert not (output / ".cache").exists()
 

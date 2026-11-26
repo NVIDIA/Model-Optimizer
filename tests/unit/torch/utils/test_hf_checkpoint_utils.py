@@ -16,6 +16,7 @@
 """Tests for modelopt/torch/utils/plugins/hf_checkpoint_utils.py"""
 
 import json
+import os
 import stat
 import sys
 import warnings
@@ -587,7 +588,7 @@ def test_off_index_still_keeps_a_genuine_mtp_sidecar(tmp_path):
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="requires POSIX symlink support")
-def test_copies_a_symlinked_sidecar_from_a_hub_cache_layout(tmp_path):
+def test_copies_a_symlinked_sidecar_from_a_hub_cache_layout(tmp_path, monkeypatch):
     """A hub-downloaded checkpoint stores EVERY file as a symlink into ``../../blobs/<sha>``.
 
     Rejecting symlinks outright therefore skips the sidecar of every checkpoint loaded by hub id
@@ -595,13 +596,16 @@ def test_copies_a_symlinked_sidecar_from_a_hub_cache_layout(tmp_path):
     silent-missing-MTP failure the carry-over was written to prevent. The guard must look at what
     the link resolves to, not at whether it is a link.
     """
-    blobs = tmp_path / "blobs"
-    snapshot = tmp_path / "snapshots" / "deadbeef"
-    blobs.mkdir(parents=True)
-    snapshot.mkdir(parents=True)
+    monkeypatch.setattr("huggingface_hub.constants.HF_HUB_CACHE", str(tmp_path))
+    blobs = tmp_path / "models--org--model" / "blobs"
+    snapshot = tmp_path / "models--org--model" / "snapshots" / "deadbeef"
+    store = tmp_path / "blobs" / "ab"  # since huggingface_hub 1.32, a store the whole cache shares
+    for directory in (blobs, snapshot, store):
+        directory.mkdir(parents=True)
 
-    save_file({"model.mtp.eh_proj.weight": torch.zeros(1)}, str(blobs / "sha123"))
-    (blobs / "sha123").chmod(0o400)  # as huggingface_hub keeps its shared store in a private cache
+    save_file({"model.mtp.eh_proj.weight": torch.zeros(1)}, str(store / "mtp-payload"))
+    (store / "mtp-payload").chmod(0o400)  # read-only, owner-only in a private cache
+    (blobs / "sha123").symlink_to("../../blobs/ab/mtp-payload")  # a Xet-backed file
     save_file({"a.weight": torch.zeros(1)}, str(blobs / "sha456"))
     (snapshot / "mtp.safetensors").symlink_to("../../blobs/sha123")
     (snapshot / "model-00001-of-00001.safetensors").symlink_to("../../blobs/sha456")
@@ -755,6 +759,7 @@ def test_copy_non_model_files_copies_everything_the_export_does_not_own(tmp_path
     for file_name, contents in source_files.items():
         (source_dir / file_name).parent.mkdir(parents=True, exist_ok=True)
         (source_dir / file_name).write_text(contents)
+    (source_dir / "super_v3_reasoning_parser.py").chmod(0o755)
 
     export_files = {
         "config.json": '{"export": "config"}\n',
@@ -782,6 +787,7 @@ def test_copy_non_model_files_copies_everything_the_export_does_not_own(tmp_path
         assert (export_dir / file_name).read_text() == contents
     exported = {p.relative_to(export_dir).as_posix() for p in export_dir.rglob("*") if p.is_file()}
     assert exported == {*expected, *export_files}
+    assert os.access(export_dir / "super_v3_reasoning_parser.py", os.X_OK)  # a helper still runs
 
 
 def test_copy_non_model_files_skips_an_export_inside_the_source(tmp_path):

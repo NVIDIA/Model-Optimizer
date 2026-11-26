@@ -29,6 +29,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import warnings
 from collections.abc import Callable, Iterable
 from datetime import timedelta
@@ -483,6 +484,19 @@ def resolve_checkpoint_file(
     return resolved_src
 
 
+def _copy_into_export(src: Path, dst: Path) -> None:
+    """Copy ``src`` to a new ``dst`` with the export's own mode, keeping ``src``'s execute bits.
+
+    Not ``copy2``, which carries over the hub's shared-store mode: read-only, and owner-only in a
+    private cache.
+    """
+    shutil.copyfile(src, dst)
+    mode = stat.S_IMODE(dst.stat().st_mode)
+    # Execute where the copy is readable, so a shipped helper script still runs from the export.
+    if execute := src.stat().st_mode & 0o111 & (mode & 0o444) >> 2:
+        dst.chmod(mode | execute)
+
+
 def off_index_safetensors_files(src: "str | os.PathLike | None") -> list[str]:
     """Safetensors files in a checkpoint that model loading never opens.
 
@@ -743,7 +757,7 @@ def copy_off_index_safetensors(
         except ValueError as exc:
             warnings.warn(f"Skipping {name}: {exc}")
             continue
-        shutil.copyfile(source, target)  # see copy_non_model_files for why not copy2
+        _copy_into_export(source, target)
         copied.append(name)
     if copied:
         print(f"Copied off-index safetensors into {dst}: {copied}")
@@ -1020,9 +1034,7 @@ def copy_non_model_files(source: str | os.PathLike, export_dir: str | os.PathLik
             continue
         try:
             dst.parent.mkdir(parents=True, exist_ok=True)
-            # Not copy2: the copy takes the export's own mode, not the cache's. The hub keeps its
-            # shared store read-only, and owner-only in a private cache.
-            shutil.copyfile(resolved, dst)
+            _copy_into_export(resolved, dst)
         except OSError as error:
             dst.unlink(missing_ok=True)  # or a rerun would keep the partial file
             warnings.warn(f"Failed to copy checkpoint file {rel}: {error}")
