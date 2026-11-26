@@ -202,39 +202,57 @@ class ModelDeployer:
                 f"Set model_id and tensor_parallel_size instead of {reserved_keys} in "
                 "engine_kwargs so resource checks and engine arguments stay consistent."
             )
-        # Resource checks cover tensor_parallel_size ranks on devices 0..TP-1; fields that
-        # multiply ranks (pipeline/context/data parallelism) or move the placement
-        # (base_gpu_id/gpu_id_step) would bypass them on this single-node harness. Each
-        # field keeps only the one value that leaves count and placement unchanged.
-        topology_defaults = {
+        # Resource checks cover tensor_parallel_size ranks on devices 0..TP-1 spawned as
+        # local children; fields that multiply ranks (pipeline/context/data parallelism),
+        # move the placement (base_gpu_id/gpu_id_step), or hand workers to an external
+        # executor (ray, external_launcher) would bypass them. Each field keeps only the
+        # values that leave count, placement and ownership unchanged.
+        topology_allowed = {
             "vllm": {
-                "pipeline_parallel_size": 1,
-                "data_parallel_size": 1,
-                "prefill_context_parallel_size": 1,
+                "pipeline_parallel_size": {1},
+                "data_parallel_size": {1},
+                "prefill_context_parallel_size": {1},
+                "distributed_executor_backend": {"mp", "uni"},
             },
             "sglang": {
-                "pp_size": 1,
-                "dp_size": 1,
-                "nnodes": 1,
-                "node_rank": 0,
-                "base_gpu_id": 0,
-                "gpu_id_step": 1,
+                "pp_size": {1},
+                "dp_size": {1},
+                "nnodes": {1},
+                "node_rank": {0},
+                "base_gpu_id": {0},
+                "gpu_id_step": {1},
             },
             "trtllm": {
-                "pipeline_parallel_size": 1,
-                "context_parallel_size": 1,
-                "moe_cluster_parallel_size": 1,
+                "pipeline_parallel_size": {1},
+                "context_parallel_size": {1},
+                "moe_cluster_parallel_size": {1},
             },
         }.get(backend, {})
         if unsupported := {
             key: self.engine_kwargs[key]
-            for key in topology_defaults.keys() & self.engine_kwargs.keys()
-            if self.engine_kwargs[key] != topology_defaults[key]
+            for key in topology_allowed.keys() & self.engine_kwargs.keys()
+            if self.engine_kwargs[key] not in topology_allowed[key]
         }:
             raise ValueError(
-                f"Rank-count or device-placement engine option(s) {sorted(unsupported)} need "
-                "resource checks this harness cannot perform"
+                f"Rank-count, device-placement or executor engine option(s) "
+                f"{sorted(unsupported)} need resource checks this harness cannot perform"
             )
+
+    def _tokenizer_source(self):
+        """The tokenizer the engine was configured with: native override, else the model."""
+        return (
+            self.engine_kwargs.get("tokenizer_path")
+            or self.engine_kwargs.get("tokenizer")
+            or self.base_model
+            or self.model_id
+        )
+
+    def _resolved_load_kwargs(self, source):
+        """trust_remote_code, plus the engine's model revision for Hub references."""
+        kwargs = {"trust_remote_code": self.trust_remote_code}
+        if not Path(source).exists() and self.engine_kwargs.get("revision"):
+            kwargs["revision"] = self.engine_kwargs["revision"]
+        return kwargs
 
     def _engine_arguments(self):
         """Bind runtime model paths and TP without supplying test parameter defaults."""
@@ -376,10 +394,10 @@ class ModelDeployer:
                 from transformers import AutoConfig, AutoProcessor
 
                 config = AutoConfig.from_pretrained(
-                    tokenizer_model, trust_remote_code=self.trust_remote_code
+                    tokenizer_model, **self._resolved_load_kwargs(tokenizer_model)
                 )
                 processor = AutoProcessor.from_pretrained(
-                    tokenizer_model, trust_remote_code=self.trust_remote_code
+                    tokenizer_model, **self._resolved_load_kwargs(tokenizer_model)
                 )
                 prompts = [
                     asyncio.run(
@@ -394,8 +412,9 @@ class ModelDeployer:
                     )
                 ]
             else:
+                source = self._tokenizer_source()
                 tokenizer = AutoTokenizer.from_pretrained(
-                    tokenizer_model, trust_remote_code=self.trust_remote_code
+                    source, **self._resolved_load_kwargs(source)
                 )
                 prompts = (
                     [
@@ -513,10 +532,8 @@ class ModelDeployer:
             # Deferred import: transformers is a heavy optional dependency not always present.
             from transformers import AutoTokenizer
 
-            tokenizer_model = self.base_model or self.model_id
-            tokenizer = AutoTokenizer.from_pretrained(
-                tokenizer_model, trust_remote_code=self.trust_remote_code
-            )
+            source = self._tokenizer_source()
+            tokenizer = AutoTokenizer.from_pretrained(source, **self._resolved_load_kwargs(source))
             raw_prompts = [self.input_config["prompt"]] if self.input_config else COMMON_PROMPTS
             conversations = [[{"role": "user", "content": prompt}] for prompt in raw_prompts]
             generation_kwargs = (

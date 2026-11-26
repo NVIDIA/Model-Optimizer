@@ -30,6 +30,9 @@ from _test_utils.deploy_utils import ModelDeployer, _run_deploy_via_subprocess
         ("sglang", "base_gpu_id", 1, True),  # shifts which devices the ranks use
         ("sglang", "gpu_id_step", 2, True),  # skips devices between ranks
         ("sglang", "base_gpu_id", 0, False),
+        ("vllm", "distributed_executor_backend", "ray", True),  # cluster-owned actors
+        ("vllm", "distributed_executor_backend", "external_launcher", True),
+        ("vllm", "distributed_executor_backend", "mp", False),  # local children
         ("trtllm", "context_parallel_size", 4, True),
         ("trtllm", "gpus_per_node", 8, False),
         ("sglang", "ep_size", 2, False),  # expert parallel shares the TP ranks
@@ -42,6 +45,30 @@ def test_text_deploy_topology_overrides(backend, field, value, rejected):
             ModelDeployer(backend=backend, model_id="test/model", **kwargs)
     else:
         ModelDeployer(backend=backend, model_id="test/model", **kwargs)
+
+
+def test_tokenizer_source_honors_engine_overrides(tmp_path):
+    deployer = ModelDeployer(
+        backend="sglang",
+        model_id="test/model",
+        base_model="test/target",
+        engine_kwargs={"tokenizer_path": "/staged/tokenizer"},
+    )
+    assert deployer._tokenizer_source() == "/staged/tokenizer"
+    revised = ModelDeployer(
+        backend="vllm",
+        model_id="test/model",
+        engine_kwargs={"tokenizer": "other/tok", "revision": "rev1"},
+    )
+    assert revised._tokenizer_source() == "other/tok"
+    assert revised._resolved_load_kwargs("other/tok") == {
+        "trust_remote_code": False,
+        "revision": "rev1",
+    }
+    # A local-path source cannot take a Hub revision.
+    local = ModelDeployer(backend="vllm", model_id="test/model", engine_kwargs={"revision": "x"})
+    assert "revision" not in local._resolved_load_kwargs(str(tmp_path))
+    assert local._tokenizer_source() == "test/model"
 
 
 @pytest.mark.parametrize("private", [True, False], ids=["private", "diagnostic"])

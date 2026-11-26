@@ -38,8 +38,16 @@ _SPEC.loader.exec_module(deploy)
         ("HUGGINGFACE_HUB_CACHE", "hub", "hub"),
         ("HF_HOME", "home", "home/hub"),
         ("TRANSFORMERS_CACHE", "legacy", "hub"),
+        ("HF_TOKEN_PATH", "token", None),  # a credential path, not a cache location
     ],
-    ids=["owned", "HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "HF_HOME", "TRANSFORMERS_CACHE"],
+    ids=[
+        "owned",
+        "HF_HUB_CACHE",
+        "HUGGINGFACE_HUB_CACHE",
+        "HF_HOME",
+        "TRANSFORMERS_CACHE",
+        "HF_TOKEN_PATH",
+    ],
 )
 def test_deployment_cache(monkeypatch, tmp_path, env_var, env_value, hub_subpath):
     monkeypatch.chdir(tmp_path)
@@ -47,6 +55,7 @@ def test_deployment_cache(monkeypatch, tmp_path, env_var, env_value, hub_subpath
         "HF_HUB_CACHE",
         "HUGGINGFACE_HUB_CACHE",
         "HF_HOME",
+        "HF_TOKEN_PATH",
         "HF_HUB_OFFLINE",
         "TRANSFORMERS_OFFLINE",
         "TRANSFORMERS_CACHE",
@@ -65,7 +74,7 @@ def test_deployment_cache(monkeypatch, tmp_path, env_var, env_value, hub_subpath
         param=(case, "vllm"),
     )
     monkeypatch.setattr(deploy, "_deployment_settings", lambda config: ({}, load_deploy_config()))
-    expected = (tmp_path / hub_subpath).resolve() if env_var else None
+    expected = (tmp_path / hub_subpath).resolve() if hub_subpath else None
     snapshot = (expected or tmp_path / "hub") / "models--test--model/snapshots/staged/config.json"
     snapshot.parent.mkdir(parents=True)
     snapshot.write_text("{}", encoding="utf-8")
@@ -79,6 +88,7 @@ def test_deployment_cache(monkeypatch, tmp_path, env_var, env_value, hub_subpath
     if env_var:
         # Relative inherited paths are resolved before workers change to tests/.
         assert Path(os.environ[env_var]) == (tmp_path / env_value).resolve()
+    if expected is not None:
         assert worker_cache == expected
         assert (worker_cache / snapshot.relative_to(expected)).read_text() == "{}"
     else:
@@ -87,7 +97,7 @@ def test_deployment_cache(monkeypatch, tmp_path, env_var, env_value, hub_subpath
     command_fixture.close()
     cache_fixture.close()
     assert snapshot.read_text() == "{}"
-    if not env_var:
+    if expected is None:
         assert not worker_cache.exists()
 
 
