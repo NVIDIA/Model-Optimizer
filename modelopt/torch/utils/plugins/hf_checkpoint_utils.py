@@ -449,10 +449,16 @@ def _allowed_source_roots(src_dir: Path) -> list[Path]:
     allowed_roots = [source_root]
     if blob_root := _snapshot_blob_root(source_root):
         allowed_roots.append(blob_root)
-    hub_cache = Path(constants.HF_HUB_CACHE).resolve()
-    if _is_relative_to(source_root, hub_cache):
-        allowed_roots.append(hub_cache)
     return allowed_roots
+
+
+def _hub_cache_root(src_dir: Path) -> Path | None:
+    """``HF_HUB_CACHE`` if ``src_dir`` is inside it, else ``None``, as when it cannot be resolved."""
+    try:
+        hub_cache = Path(constants.HF_HUB_CACHE).resolve()
+    except (OSError, RuntimeError):  # RuntimeError: a symlink loop on Python < 3.13
+        return None
+    return hub_cache if _is_relative_to(src_dir.resolve(strict=True), hub_cache) else None
 
 
 def resolve_checkpoint_file(
@@ -470,7 +476,9 @@ def resolve_checkpoint_file(
     if not resolved_src.is_file():
         raise ValueError(f"checkpoint source must resolve to a regular file: {src}")
     if not any(_is_relative_to(resolved_src, root) for root in _allowed_source_roots(src_dir)):
-        raise ValueError(f"checkpoint source is outside the checkpoint directory: {src}")
+        hub_cache = _hub_cache_root(src_dir)
+        if hub_cache is None or not _is_relative_to(resolved_src, hub_cache):
+            raise ValueError(f"checkpoint source is outside the checkpoint directory: {src}")
     if max_bytes is not None and resolved_src.stat().st_size > max_bytes:
         raise ValueError(f"checkpoint source exceeds the {max_bytes}-byte size limit: {src}")
     return resolved_src
