@@ -328,7 +328,7 @@ def quantize_rtn(
 
         # Add transpose nodes for column-major if needed
         if use_column_major:
-            qdq.insert_transpose_nodes_for_column_major(graph)
+            qdq.insert_transpose_nodes_for_column_major(graph, gemm_weights_quantized)
 
         if gather_w_map is not None:
             gather_dq_node_attributes = {
@@ -689,7 +689,7 @@ def _quantize_awq_clip(
         )
         # Add transpose nodes for column-major if needed
         if use_column_major:
-            qdq.insert_transpose_nodes_for_column_major(graph_gs)
+            qdq.insert_transpose_nodes_for_column_major(graph_gs, gemm_weights_quantized)
         if gather_w_map is not None:
             assert gather_s_map is not None, "scale-map not found for quantizable gather nodes"
             gather_dq_node_attributes = {
@@ -1443,7 +1443,7 @@ def _quantize_awq_lite(
         )
         # Add transpose nodes for column-major if needed
         if use_column_major:
-            qdq.insert_transpose_nodes_for_column_major(graph_gs)
+            qdq.insert_transpose_nodes_for_column_major(graph_gs, gemm_weights_quantized)
         if gather_w_map is not None:
             assert gather_s_map is not None, "scale-map not found for quantizable gather nodes"
             assert not use_zero_point or gather_zp_map, (

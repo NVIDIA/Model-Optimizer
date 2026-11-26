@@ -25,6 +25,7 @@ import pytest
 from _test_utils.onnx.lib_test_models import find_init
 
 import modelopt.onnx.quantization as moq
+from modelopt.onnx.quantization import qdq_utils
 from modelopt.onnx.quantization.int4 import quantize as quantize_int4
 from modelopt.onnx.utils import save_onnx
 
@@ -540,3 +541,57 @@ def test_awq_no_temp_file_leak(tmp_path, monkeypatch, calibration_method, use_ex
         assert not os.path.exists(augmented_path), f"Leaked: {augmented_path}"
         if use_external_data_format:
             assert not os.path.exists(augmented_path + "_data"), f"Leaked: {augmented_path}_data"
+
+
+def test_column_major_transpose_skips_other_dq_nodes():
+    # Only the weights this export stored transposed get a Transpose. Other DQ nodes already in
+    # the graph, here two unnamed ones, keep feeding their own MatMul unchanged.
+    rng = np.random.default_rng(0)
+    x = rng.standard_normal((4, 8)).astype(np.float32)
+    w = rng.integers(-7, 8, (8, 8)).astype(np.int8)
+    gx = gs.Variable("x", dtype=np.float32, shape=x.shape)
+    nodes, outputs, refs = [], [], []
+    for i, k in enumerate([1, 2]):
+        dq_out = gs.Variable(f"dq{i}", dtype=np.float32, shape=(8, 8))
+        nodes.append(
+            gs.Node(
+                "DequantizeLinear",
+                "",
+                inputs=[
+                    gs.Constant(f"q{i}", np.eye(8, dtype=np.int8)),
+                    gs.Constant(f"s{i}", np.array(k, dtype=np.float32)),
+                ],
+                outputs=[dq_out],
+            )
+        )
+        outputs.append(gs.Variable(f"y{i}", dtype=np.float32, shape=(4, 8)))
+        nodes.append(gs.Node("MatMul", f"mm{i}", inputs=[gx, dq_out], outputs=[outputs[-1]]))
+        refs.append(x * k)
+    # A weight quantized by this export and stored transposed (column-major).
+    w_dq_out = gs.Variable(qdq_utils._dq_out_name("w"), dtype=np.float32, shape=(8, 8))
+    nodes.append(
+        gs.Node(
+            "DequantizeLinear",
+            "",
+            inputs=[gs.Constant("wq", w.T.copy()), gs.Constant("ws", np.array(1, np.float32))],
+            outputs=[w_dq_out],
+        )
+    )
+    outputs.append(gs.Variable("yw", dtype=np.float32, shape=(4, 8)))
+    nodes.append(gs.Node("MatMul", "mmw", inputs=[gx, w_dq_out], outputs=[outputs[-1]]))
+    refs.append(x @ w.astype(np.float32))
+    graph = gs.Graph(nodes, inputs=[gx], outputs=outputs, opset=21)
+
+    qdq_utils.insert_transpose_nodes_for_column_major(graph, ["w"])
+
+    assert sum(node.op == "Transpose" for node in graph.nodes) == 1
+    options = ort.SessionOptions()
+    # Keep ORT from fusing DQ + MatMul into an integer MatMul that quantizes x.
+    options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
+    session = ort.InferenceSession(
+        gs.export_onnx(graph).SerializeToString(),
+        sess_options=options,
+        providers=["CPUExecutionProvider"],
+    )
+    for y, ref in zip(session.run(None, {"x": x}), refs):
+        np.testing.assert_allclose(y, ref, rtol=1e-5, atol=1e-5)
