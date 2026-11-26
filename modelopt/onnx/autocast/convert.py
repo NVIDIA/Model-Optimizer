@@ -170,9 +170,8 @@ def convert_to_mixed_precision(
     )
     value_info_map, initializer_map, node_to_init_map = utils.setup_mappings(model)
 
-    # Automatically add 'trt' to list of providers if custom ops are detected.
-    # Rebind: inserting would mutate the signature's default list (and a caller's list) for later calls.
-    if "trt" not in providers and graph_sanitizer.custom_ops:
+    # Only confirmed TensorRT plugins require the TensorRT execution provider.
+    if "trt" not in providers and graph_sanitizer.trt_plugin_ops:
         providers = ["trt", *providers]
 
     # Initialize classifiers and converters

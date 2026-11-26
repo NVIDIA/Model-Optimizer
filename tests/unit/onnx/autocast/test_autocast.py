@@ -500,7 +500,10 @@ def test_custom_ops_trt_does_not_leak_into_provider_lists(
 ):
     """Adding 'trt' for custom ops must not mutate the default providers or a caller's list."""
     # Reading custom layers needs a TensorRT network, which the `onnx` extra does not install.
-    monkeypatch.setattr(graphsanitizer, "get_custom_layers", lambda *args, **kwargs: ({}, {}))
+    monkeypatch.setattr(graphsanitizer, "TRT_PYTHON_AVAILABLE", True)
+    monkeypatch.setattr(
+        graphsanitizer, "get_custom_layers", lambda *args, **kwargs: (["plugin"], {})
+    )
     monkeypatch.setattr(
         graphsanitizer, "infer_types_shapes_tensorrt", lambda model, *args, **kwargs: model
     )
@@ -511,7 +514,7 @@ def test_custom_ops_trt_does_not_leak_into_provider_lists(
         def __init__(self, model, providers, trt_plugins):
             seen_providers.append(list(providers))
 
-        def run(self, calibration_data):
+        def run(self, calibration_data, *, calibrate_per_node=False):
             return {}
 
     monkeypatch.setattr(convert, "ReferenceRunner", RecordingReferenceRunner)
