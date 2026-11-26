@@ -51,8 +51,7 @@ Outputs:
   * An ``hf_quant_config.json`` manifest listing the NVFP4-quantized layers.
     MTP expert weights are left in the source format.
   * Ancillary files (``tokenizer.json``, ``LICENSE``, ``encoding/``,
-    ``inference/``, ...) are linked from the source when possible, with a
-    copy fallback across filesystems.
+    ``inference/``, ...) are copied from the source.
 
 Uncalibrated-expert handling: some routed experts receive zero tokens during
 calibration (common in V4's first ``n_hash_layers`` with deterministic

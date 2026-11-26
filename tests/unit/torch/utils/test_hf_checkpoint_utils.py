@@ -47,6 +47,19 @@ from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _hub_cache_elsewhere(tmp_path, monkeypatch):
+    """Keep the test's files out of the configured Hugging Face cache, whatever the environment
+    sets; a test that needs a cache sets its own."""
+    monkeypatch.setattr("huggingface_hub.constants.HF_HUB_CACHE", str(tmp_path / "hf-hub-cache"))
+
+
+def _new_file_mode(directory: Path) -> int:
+    """The mode a file created in ``directory`` gets, i.e. what the umask allows."""
+    (directory / ".new-file").touch()
+    return stat.S_IMODE((directory / ".new-file").stat().st_mode)
+
+
 def test_copy_non_safetensor_files_from_ckpt_supports_additional_exclusions(tmp_path):
     src_dir = tmp_path / "src"
     src_dir.mkdir()
@@ -102,14 +115,14 @@ def test_copy_non_model_files_continues_after_copy_failure(tmp_path, monkeypatch
     (src_dir / "bad.py").write_text("bad")
     (src_dir / "good.py").write_text("good")
 
-    original_copy2 = hf_checkpoint_utils.shutil.copy2
+    original_copyfile = hf_checkpoint_utils.shutil.copyfile
 
-    def copy2(source, *args, **kwargs):
+    def copyfile(source, *args, **kwargs):
         if str(source).endswith("bad.py"):
             raise PermissionError("unreadable")
-        return original_copy2(source, *args, **kwargs)
+        return original_copyfile(source, *args, **kwargs)
 
-    monkeypatch.setattr(hf_checkpoint_utils.shutil, "copy2", copy2)
+    monkeypatch.setattr(hf_checkpoint_utils.shutil, "copyfile", copyfile)
     with pytest.warns(UserWarning, match="bad.py"):
         copied_files = hf_checkpoint_utils.copy_non_model_files(src_dir, tmp_path / "dst")
 
@@ -589,7 +602,7 @@ def test_copies_a_symlinked_sidecar_from_a_hub_cache_layout(tmp_path, monkeypatc
     snapshot.mkdir(parents=True)
 
     save_file({"model.mtp.eh_proj.weight": torch.zeros(1)}, str(blobs / "sha123"))
-    (blobs / "sha123").chmod(0o444)  # as huggingface_hub keeps the files of its shared store
+    (blobs / "sha123").chmod(0o400)  # as huggingface_hub keeps its shared store in a private cache
     save_file({"a.weight": torch.zeros(1)}, str(blobs / "sha456"))
     (snapshot / "mtp.safetensors").symlink_to("../../blobs/sha123")
     (snapshot / "model-00001-of-00001.safetensors").symlink_to("../../blobs/sha456")
@@ -603,7 +616,8 @@ def test_copies_a_symlinked_sidecar_from_a_hub_cache_layout(tmp_path, monkeypatc
     dst.mkdir()
     assert copy_off_index_safetensors(snapshot, dst) == ["mtp.safetensors"]
     assert (dst / "mtp.safetensors").is_file()
-    assert (dst / "mtp.safetensors").stat().st_mode & stat.S_IWUSR
+    # The export's own mode, not the store's: writable, and as readable as the umask allows.
+    assert stat.S_IMODE((dst / "mtp.safetensors").stat().st_mode) == _new_file_mode(dst)
 
 
 def _indexed_ckpt(src):
@@ -809,7 +823,7 @@ def test_copy_non_model_files_removes_a_partial_copy(monkeypatch, tmp_path):
         Path(dst).write_text("{")
         raise OSError("disk full")
 
-    monkeypatch.setattr(hf_checkpoint_utils.shutil, "copy2", failing_copy)
+    monkeypatch.setattr(hf_checkpoint_utils.shutil, "copyfile", failing_copy)
     with pytest.warns(UserWarning, match="disk full"):
         assert hf_checkpoint_utils.copy_non_model_files(source_dir, export_dir) == []
     assert not (export_dir / "tokenizer.json").exists()
@@ -1015,7 +1029,7 @@ def test_copy_non_model_files_follows_hub_snapshot_links_into_blobs(tmp_path, mo
     xet_hash = "ab" * 32
     (cache / "blobs" / "ab").mkdir(parents=True)
     (cache / "blobs" / "ab" / xet_hash).write_text("{}")
-    (cache / "blobs" / "ab" / xet_hash).chmod(0o444)  # the hub keeps store files read-only
+    (cache / "blobs" / "ab" / xet_hash).chmod(0o400)  # read-only, owner-only in a private cache
     (blobs / "sha-tokenizer").symlink_to(f"../../blobs/ab/{xet_hash}")
     (snapshot / "tokenizer.json").symlink_to("../../blobs/sha-tokenizer")
     (tmp_path / "secret").write_text("host file")
@@ -1026,8 +1040,10 @@ def test_copy_non_model_files_follows_hub_snapshot_links_into_blobs(tmp_path, mo
 
     assert copied == ["tokenizer.json", "tokenizer_config.json"]
     assert (tmp_path / "export" / "tokenizer.json").read_text() == "{}"
-    # Writable, so a tokenizer.save_pretrained() into the export can replace it.
-    assert (tmp_path / "export" / "tokenizer.json").stat().st_mode & stat.S_IWUSR
+    # The export's own mode, not the store's: a tokenizer.save_pretrained() into the export can
+    # replace the file, and whoever may read the export's other files may read it.
+    export_mode = stat.S_IMODE((tmp_path / "export" / "tokenizer.json").stat().st_mode)
+    assert export_mode == _new_file_mode(tmp_path / "export")
 
     # A checkpoint outside the cache may not reach into it.
     plain = tmp_path / "plain-checkpoint"
@@ -1045,7 +1061,7 @@ def test_copy_non_model_files_follows_hub_snapshot_links_into_blobs(tmp_path, mo
 @pytest.mark.skipif(sys.platform == "win32", reason="requires POSIX symlink support")
 def test_copy_non_model_files_takes_an_unresolvable_hub_cache_as_absent(tmp_path, monkeypatch):
     """``HF_HUB_CACHE`` is looked up only for a link out of the checkpoint, and one that cannot be
-    resolved -- a symlink loop raises RuntimeError before Python 3.13 -- does not fail the export."""
+    resolved (a symlink loop raises RuntimeError before Python 3.13) does not fail the export."""
 
     class Unresolvable:
         def __fspath__(self):

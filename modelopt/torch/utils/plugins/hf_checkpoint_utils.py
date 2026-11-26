@@ -29,7 +29,6 @@ import json
 import os
 import re
 import shutil
-import stat
 import warnings
 from collections.abc import Callable, Iterable
 from datetime import timedelta
@@ -436,7 +435,7 @@ def _is_relative_to(path: Path, root: Path) -> bool:
 
 
 def _hub_cache_root(src_dir: Path) -> Path | None:
-    """``HF_HUB_CACHE`` if ``src_dir`` is inside it, else ``None``, as when it cannot be resolved."""
+    """``HF_HUB_CACHE`` if ``src_dir`` is inside it, else ``None``, as when it is unresolvable."""
     try:
         hub_cache = Path(constants.HF_HUB_CACHE).resolve()
     except (OSError, RuntimeError):  # RuntimeError: a symlink loop on Python < 3.13
@@ -469,15 +468,6 @@ def resolve_checkpoint_file(
     if max_bytes is not None and resolved_src.stat().st_size > max_bytes:
         raise ValueError(f"checkpoint source exceeds the {max_bytes}-byte size limit: {src}")
     return resolved_src
-
-
-def _copy_writable(src: Path, dst: Path) -> None:
-    """``shutil.copy2``, then owner-writable, as the hub keeps its shared store read-only.
-
-    An export's files must take later writes, e.g. a ``tokenizer.save_pretrained()`` over them.
-    """
-    shutil.copy2(src, dst)
-    dst.chmod(stat.S_IMODE(dst.stat().st_mode) | stat.S_IWUSR)
 
 
 def off_index_safetensors_files(src: "str | os.PathLike | None") -> list[str]:
@@ -725,7 +715,7 @@ def copy_off_index_safetensors(
         # A dangling link fails exists(); copying through it would write outside the export.
         if target.exists() or target.is_symlink():
             continue
-        # copy2 follows symlinks, so a checkpoint shipping ``x.safetensors -> /etc/passwd`` would
+        # Copying follows symlinks, so a checkpoint shipping ``x.safetensors -> /etc/passwd`` would
         # copy whatever that names into the export under an approved-looking name. The question
         # is where the link LANDS, not whether it is a link: a Hugging Face snapshot stores every
         # file as a symlink into ``../../blobs/<sha>``, so refusing links outright drops the
@@ -741,7 +731,7 @@ def copy_off_index_safetensors(
         except ValueError as exc:
             warnings.warn(f"Skipping {name}: {exc}")
             continue
-        _copy_writable(source, target)
+        shutil.copyfile(source, target)  # see copy_non_model_files for why not copy2
         copied.append(name)
     if copied:
         print(f"Copied off-index safetensors into {dst}: {copied}")
@@ -1017,7 +1007,9 @@ def copy_non_model_files(source: str | os.PathLike, export_dir: str | os.PathLik
             continue
         try:
             dst.parent.mkdir(parents=True, exist_ok=True)
-            _copy_writable(resolved, dst)
+            # Not copy2: the copy takes the export's own mode, not the cache's. The hub keeps its
+            # shared store read-only, and owner-only in a private cache.
+            shutil.copyfile(resolved, dst)
         except OSError as error:
             dst.unlink(missing_ok=True)  # or a rerun would keep the partial file
             warnings.warn(f"Failed to copy checkpoint file {rel}: {error}")
