@@ -75,9 +75,11 @@ $$
 \mathcal{L}_{\mathrm{QAKTO}}(\theta) = \frac{1}{B}\sum_{i=1}^{B}\left[1-\sigma\!\left(\beta s_i\left[\log\frac{\pi_\theta(y_i \mid x_i)}{\pi_{\mathrm{ref}}(y_i \mid x_i)}-z\right]\right)\right].
 $$
 
-Here $(x_i, y_i)$ is a question and response; $s_i=+1$ for correct responses and $s_i=-1$ for looping prefixes. $\pi_\theta$ is the model being fine-tuned, $\pi_{\mathrm{ref}}$ the frozen QAD baseline, $\sigma$ the sigmoid, and $\beta=0.05$. Log probabilities sum over response tokens.
+Here $(x_i, y_i)$ is a question and response. We use $s_i=+1$ for correct responses and $s_i=-1$ for looping prefixes. $\pi_\theta$ is the model being fine-tuned, $\pi_{\mathrm{ref}}$ is the frozen QAD baseline, and $\sigma$ is the sigmoid. We use NeMo RL’s DPO default of $\beta=0.05$ to scale the input to the sigmoid. Log probabilities sum over response tokens.
 
 The shared reference level *z* is a batch KL estimate of the model’s overall likelihood shift from the frozen baseline. Each response is judged relative to that shift. During each update, *z* is treated as constant when computing gradients. See the [KTO paper](https://arxiv.org/html/2402.01306v5#S4.SS1.SSS0.Px1) for details.
+
+We used a Megatron Adam learning rate of `1e-6`. This is 80% below the `5e-6` default and gives an update one-fifth as large for the same gradient and Adam state. Smaller updates can help limit changes to the QAD checkpoint when training on 104 correct responses and 104 looping prefixes. We did not systematically tune hyperparameters to optimize KTO performance. [Training config](config/kto.yaml)
 
 ## Experiments and results
 
@@ -187,14 +189,14 @@ The abstention rate among non-correct responses rose by 1.88 pp with QAKTO (p=0.
 
 | Benchmark | QAD baseline mean / median | QAKTO mean / median | Mean difference [95% CI], tokens | QAKTO shorter, p |
 | --- | --- | --- | --- | --- |
-| SciCode, 294 subtasks | 6,512 / 2,993 | 3,063 / 1,803 | −3450 [−4236, −2664] | <0.001 |
+| SciCode, 294 subtasks | 6,512 / 2,993 | 3,063 / 1,803 | −3,450 [−4,236, −2,664] | <0.001 |
 | AA-Omniscience | 2,865 / 1,944 | 2,418 / 1,848 | −447 [−707, −187] | <0.001 |
-| GPQA Diamond | 11,088 / 5,821 | 12,654 / 6,419 | +1566 [+982, +2150] | 1.000 |
-| IFBench | 14,581 / 4,568 | 12,609 / 4,425 | −1972 [−2923, −1022] | <0.001 |
+| GPQA Diamond | 11,088 / 5,821 | 12,654 / 6,419 | +1,566 [+982, +2,150] | 1.000 |
+| IFBench | 14,581 / 4,568 | 12,609 / 4,425 | −1,972 [−2,923, −1,022] | <0.001 |
 | AA-LCR | 2,769 / 2,454 | 2,724 / 2,410 | −45 [−134, +44] | 0.158 |
 | MMMU-Pro | 8,903 / 5,358 | 8,259 / 4,897 | −643 [−770, −517] | <0.001 |
 | MMLU-Pro | 2,808 / 2,167 | 2,750 / 2,146 | −58 [−104, −11] | 0.008 |
-| tau2-bench Telecom | 5,218 / 4,736 | 4,044 / 3,725 | −1174 [−1344, −1004] | <0.001 |
+| tau2-bench Telecom | 5,218 / 4,736 | 4,044 / 3,725 | −1,174 [−1,344, −1,004] | <0.001 |
 
 Mean completion tokens fell on seven of eight benchmarks, most on SciCode (53%) and tau2-bench Telecom (22.5%). GPQA increased by 14.1%.
 
