@@ -5,9 +5,16 @@ This is a simple example to demonstrate calibrating and serving ModelOpt fakequa
 Compared with realquant, fakequant is 2-5x slower, but doesn't require dedicated kernel support and facilitates research.
 
 The general fakequant example is tested with vLLM 0.19.1, 0.26.0, 0.28.0, 0.29.0 and 0.30.0. The
-compact NVFP4 attention worker documented below requires vLLM 0.15.0 or newer.
+compact NVFP4 attention worker documented below requires vLLM 0.15.0 or newer. The Kimi K3
+low-latency fakequant path needs `KimiK3LowLatencyLinearMethod`, which is present in stock vLLM
+0.28.0, 0.29.0 and 0.30.0 but absent from some older releases. For BF16 Kimi K3 weights, it
+supports dense and shared-expert MLP projections; attention projections need separate support.
+On vLLM 0.28.0, ModelOpt bypasses Kimi's fused GEMM-RS MLP path when down-projection
+fake quantizers are enabled and retains it when they are disabled.
 
 The fakequant launcher does not support vLLM 0.9.0. Use one of the tested releases above.
+
+See [Layer and quantizer support](#layer-and-quantizer-support) for available hooks and backend limitations.
 
 ## Prepare environment
 
@@ -23,6 +30,17 @@ docker build -f examples/vllm_serve/Dockerfile -t vllm-modelopt:v0.30.0 .
 The Dockerfile defaults to vLLM 0.30.0. Override `VLLM_VERSION` only when
 building for a different tested release.
 
+The image runs as the `vllm` user, which owns `/workspace`. To run it as a different user, point
+`TORCH_EXTENSIONS_DIR` at a directory that user can write, for example a mounted volume. ModelOpt
+then builds its CUDA extensions there on first use rather than under `/workspace`; without it,
+ModelOpt warns and falls back to slower eager fake quantization.
+
+```bash
+mkdir -p ext_cache
+docker run --user $(id -u) -v "$PWD/ext_cache:/ext_cache" -e TORCH_EXTENSIONS_DIR=/ext_cache \
+  <your usual docker run options> vllm-modelopt:v0.30.0
+```
+
 For a direct installation from the ModelOpt repository root, install the tested vLLM
 release and the ModelOpt extras used by this example:
 
@@ -36,19 +54,23 @@ for details about installing partial dependency sets.
 
 ## Calibrate and serve fake quant model in vLLM
 
-Step 1: Configure fakequant with ModelOpt CLI flags. Each flag falls back to its
-corresponding environment variable when omitted:
+Step 1: Configure quantization with the ModelOpt CLI flags below. Each flag falls back to its corresponding environment variable when omitted:
 
-| CLI flag | Environment fallback | Description |
-| --- | --- | --- |
-| `--modelopt-quant-cfg` | `QUANT_CFG` | Weight/activation quantization config (planned deprecation) |
-| `--modelopt-kv-quant-cfg` | `KV_QUANT_CFG` | KV-cache quantization config (planned deprecation) |
-| `--modelopt-quant-file-path` | `QUANT_FILE_PATH` | Path to `quantizer_state.pth` in a Megatron (MCore) vLLM fakequant export; requires a quantization config or recipe |
-| `--modelopt-state-path` | `MODELOPT_STATE_PATH` | Path to `vllm_fq_modelopt_state.pth` in an HF vLLM fakequant export (full ModelOpt state) |
-| `--modelopt-recipe-path` | `RECIPE_PATH` | ModelOpt PTQ recipe YAML |
-| `--modelopt-quant-dataset` | `QUANT_DATASET` | Calibration dataset |
-| `--modelopt-quant-calib-size` | `QUANT_CALIB_SIZE` | Calibration sample count |
-| `--modelopt-calib-batch-size` | `CALIB_BATCH_SIZE` | Calibration batch size |
+| CLI flag | Environment fallback | Description | Default / auto-detection |
+| --- | --- | --- | --- |
+| `--modelopt-quant-cfg` | `QUANT_CFG` | Weight/activation config (planned deprecation) | Unset |
+| `--modelopt-kv-quant-cfg` | `KV_QUANT_CFG` | KV-cache config (planned deprecation) | Unset |
+| `--modelopt-quant-file-path` | `QUANT_FILE_PATH` | Megatron export's `quantizer_state.pth`; requires a config or recipe | `<model_dir>/quantizer_state.pth` when present with a recipe |
+| `--modelopt-state-path` | `MODELOPT_STATE_PATH` | HF export's full ModelOpt state | `<model_dir>/vllm_fq_modelopt_state.pth` when present |
+| `--modelopt-recipe-path` | `RECIPE_PATH` | PTQ recipe YAML or exported Megatron `quant_recipe.yaml` | `<model_dir>/quant_recipe.yaml` when present |
+| `--modelopt-quant-dataset` | `QUANT_DATASET` | Calibration dataset | `cnn_dailymail` |
+| `--modelopt-quant-calib-size` | `QUANT_CALIB_SIZE` | Calibration sample count | `512` |
+| `--modelopt-calib-batch-size` | `CALIB_BATCH_SIZE` | Calibration batch size | `1` |
+
+CLI values take precedence over their environment fallbacks. `--modelopt-quant-cfg` /
+`--modelopt-kv-quant-cfg` and `--modelopt-recipe-path` are mutually exclusive because a
+recipe already carries its quantization configuration. With no explicit ModelOpt quantization
+settings, HF full state takes precedence over Megatron sidecars in a local model directory.
 
 `QUANT_CFG` and `KV_QUANT_CFG` (and their CLI flags) will be deprecated in a future
 release. They still work today. For new runs, use a PTQ recipe through `RECIPE_PATH` or
@@ -59,7 +81,7 @@ rejects mixing them.
 Run the launcher directly from the repository checkout; the example does not
 need a separate package installation.
 
-Step 2: Serve with any stock vLLM options plus the ModelOpt flags:
+Step 2: Serve with the launcher. It accepts every stock vLLM flag plus the ModelOpt flags above:
 
 ```bash
 python3 examples/vllm_serve/vllm_serve_fakequant.py <model_path> \
@@ -70,12 +92,18 @@ python3 examples/vllm_serve/vllm_serve_fakequant.py <model_path> \
 ```
 
 The launcher assumes the vLLM `serve` subcommand when given a model path; spelling out
-`serve` is optional.
+`serve` is optional. For an exported HF or Megatron fakequant directory containing the
+standard sidecars, no ModelOpt path flags are required:
 
-When fakequant is requested, the launcher selects `fakequant_worker.FakeQuantWorker`
-unless `--worker-cls` is supplied. Without ModelOpt quantization settings,
-it delegates to stock vLLM. ModelOpt flags belong to this launcher; stock
-`vllm serve` does not recognize them.
+```bash
+python3 examples/vllm_serve/vllm_serve_fakequant.py <export_dir> \
+  -tp 8 --host 0.0.0.0 --port 8000
+```
+
+When fakequant is requested explicitly or auto-detected, the launcher selects
+`fakequant_worker.FakeQuantWorker` unless `--worker-cls` is supplied. Without ModelOpt
+settings or recognized sidecars, it delegates to stock vLLM. ModelOpt flags belong to
+this launcher; stock `vllm serve` does not recognize them.
 
 Hybrid attention/Mamba models such as Nemotron 3 Nano are supported on vLLM 0.26.0, 0.28.0, 0.29.0 and
 0.30.0. For example, calibrate and serve with NVFP4 KV-cache fakequant as follows:
@@ -243,7 +271,8 @@ python3 examples/hf_ptq/hf_ptq.py \
 
   Note: `--pyt_ckpt_path` can point to either an HF checkpoint or a ModelOpt-saved checkpoint (e.g., a QAT/QAD checkpoint produced by `examples/llm_qat/train.py`). If the input checkpoint is already quantized, the script will **skip re-quantization** and only export artifacts for vLLM fakequant reload.
 
-- For **MCore** models, export the model with flag `--export-vllm-fq` as described in [Megatron-LM README](https://github.com/NVIDIA/Megatron-LM/tree/main/examples/post_training/modelopt#-nvfp4-quantization-qauntization-aware-training-and-model-export). This generates `quantizer_state.pth`, which contains quantizer tensors for vLLM reload via `QUANT_FILE_PATH`.
+- For **Megatron-Bridge** models, export with `export_quantized_megatron_to_hf.py --vllm_fakequant_export` as described in the [Megatron-Bridge example README](../megatron_bridge/README.md#evaluating-a-qad-checkpoint-in-vllm-with-fake-quantization). This generates `quant_recipe.yaml` (versioned, one ModelOpt quantizer state per HF quantizer name) and `quantizer_state.pth` for vLLM fakequant reload.
+- For **MCore** models, export the model with flag `--export-vllm-fq` as described in [Megatron-LM README](https://github.com/NVIDIA/Megatron-LM/tree/main/examples/post_training/modelopt#-nvfp4-quantization-qauntization-aware-training-and-model-export). This generates `quant_recipe.yaml` and `quantizer_state.pth` for vLLM fakequant reload.
 
 Step 2: use the exported artifacts when serving:
 
@@ -256,14 +285,22 @@ python3 examples/vllm_serve/vllm_serve_fakequant.py <model_path> \
   --host 0.0.0.0 --port 8000
 ```
 
-- **MCore export**: pass the exported `quantizer_state.pth` via `--modelopt-quant-file-path` and set `--modelopt-quant-cfg` to match the MCore quantization recipe
+- **MCore export**: pass the exported recipe and quantizer tensors directly. The loader maps HF quantizer names to vLLM and keeps folded weight quantizers disabled. Custom quantization backends must be registered in the serving environment; the recipe preserves their names and arguments.
 
 ```bash
 # MCore
 python3 examples/vllm_serve/vllm_serve_fakequant.py <model_path> \
-  -tp 8 --modelopt-quant-cfg <quant_cfg> \
-  --modelopt-quant-file-path <quantizer_state.pth> --host 0.0.0.0 --port 8000
+  -tp 8 --modelopt-recipe-path <model_path>/quant_recipe.yaml \
+  --modelopt-quant-file-path <model_path>/quantizer_state.pth \
+  --host 0.0.0.0 --port 8000
 ```
+
+Megatron-LM fakequant export rejects MTP quantization and effective activation pre-quantization
+scales, including SmoothQuant/AWQ smoothing scales. Weight-quantizer transforms are folded into
+backbone weights; MTP weights remain unquantized.
+
+For Nemotron-H with BF16 MTP, add
+`--speculative-config '{"method":"mtp","num_speculative_tokens":1}'` and keep MTP quantizers disabled.
 
 ## Fake-quantize the sparse-attention indexer query and K cache
 
@@ -314,6 +351,52 @@ Notes:
   (`indexer_kv_dtype="mxfp4"`) is rejected.
 - vLLM quantizes the DeepSeek-V4 indexer key and query without a Hadamard rotation and the
   GLM-5.3-Flash ones after one, so the fake quantization applies in that basis.
+
+### Indexer scorer kernel arguments
+
+GLM-5.3-Flash's indexer scores each key as `k_scale * sum_h W[h] * ReLU(q_h . k)` in DeepGEMM, from
+the FP8 query and key and the effective head weights `W` (with the query scale folded in).
+`indexer_scorer_kwargs_quantizer` passes keyword arguments to that scorer kernel, per layer, e.g. the
+numerics options of a DeepGEMM build. It stays disabled unless a recipe enables it with
+`backend: scorer_kwargs`; its `backend_extra_args` are the arguments. For example, this recipe sums
+the heads in BF16:
+
+```yaml
+# modelopt-schema: modelopt.recipe.config.ModelOptPTQRecipe
+imports:
+  base_disable_all: configs/ptq/units/base_disable_all
+
+metadata:
+  description: BF16 head sum in the indexer scorer.
+quantize:
+  algorithm: max
+  quant_cfg:
+    - $import: base_disable_all
+    - quantizer_name: '*indexer_scorer_kwargs_quantizer'
+      cfg:
+        backend: scorer_kwargs
+        backend_extra_args: {logits_dtype: bfloat16}
+```
+
+Plugins can add quantizers that turn their own configs into such arguments with
+`register_indexer_scorer_kwargs_quantizer` of `modelopt.torch.quantization.plugins.vllm_indexer`.
+Stock DeepGEMM takes `logits_dtype`; BF16 scorer reduction requires a compatible DeepGEMM kernel
+and GPU, and ModelOpt does not check GPU compatibility. Other arguments need a DeepGEMM build that takes
+them and declares them, with their values, in `deep_gemm.MQA_LOGITS_NUMERICS`, such as a DeepGEMM
+fork. ModelOpt ships none. vLLM imports an installed `deep_gemm` before its own copy, so install
+such a build into the serving environment and serve:
+
+```bash
+pip install --no-deps --no-build-isolation <DeepGEMM source directory or git URL>
+RECIPE_PATH=<recipe>.yaml \
+  python3 examples/vllm_serve/vllm_serve_fakequant.py <model_path> -tp 8 --host 0.0.0.0 --port 8000
+```
+
+Notes:
+
+- Scores that come out NaN, e.g. from overflowing reduced-precision arithmetic in the scorer, are set
+  to `-inf` before top-k, as vLLM's prefill top-k mishandles NaN.
+- DeepSeek-V4 rejects the scorer quantizers.
 
 ## Fake-quantize MoE expert-parallel communication
 
@@ -368,10 +451,15 @@ Notes:
   the dispatched tokens again, so the expert inputs carry both roundings.
 - Without data parallelism (`--enable-expert-parallel` with tensor parallelism only), vLLM runs no
   all-to-all; the quantizers then emulate one over the same expert partition.
-- The Mega-MoE backend of DeepSeek-V4 and Kimi-K3 (`--moe-backend deep_gemm_mega_moe`) fuses
-  dispatch, expert GEMMs and combine into one kernel, and the FlashInfer MoE-EP backends
-  (`flashinfer_moe_ep_*`) combine inside their kernel. A recipe that enables a quantizer such a
-  backend cannot reach raises an error; use the default MoE backend instead.
+- The DeepGEMM Mega-MoE backend of DeepSeek-V4 and Kimi-K3 (`--moe-backend deep_gemm_mega_moe`)
+  fuses dispatch, expert GEMMs and combine into one kernel. The dispatch quantizer sees its input
+  tokens. The combine quantizer sees the per-(token, expert) outputs, already weighted by the
+  router, which the kernel leaves in its buffer; they are summed again after quantization. There,
+  the combine needs a calibrated (`algorithm: max`) or constant global scale, and quantizing the
+  dispatch needs `VLLM_DISABLE_DSV4_MEGAMOE_SHARED_EXPERT_FUSION=1` (the fused shared expert would
+  read the quantized tokens too).
+- The FlashInfer MoE-EP backends (`flashinfer_moe_ep_*`) combine inside their kernel, so a recipe
+  enabling the combine quantizer raises an error there.
 
 ## Serve a model with sparse attention in vLLM
 
@@ -402,11 +490,14 @@ bash examples/llm_sparsity/attention_sparsity/download_ruler_data.sh
 
 python3 examples/vllm_serve/calibrate_sparse_attn.py <CKPT> \
   --calib_data_dir examples/llm_sparsity/attention_sparsity/data \
+  --validation_prompts_file held_out.txt \
   --target_sparse_ratio 0.5 \
+  --sparsity_tolerance 0.02 --output_dir calibration_run \
   --decode_tokens 32 --tensor_parallel_size 8 --update_checkpoint_config
 ```
 
-Calibration always writes `sparse_attention_config.json` in the current directory.
+Calibration exports `sparse_attention_config.json` into `--output_dir` only when
+the measured sparsity passes validation on calibration and held-out prompts.
 `--update_checkpoint_config` also merges that configuration into `<CKPT>/config.json` in
 place, which lets `vllm_serve_sparse_attn.py` load it automatically. This option requires
 `<CKPT>` to be a local checkpoint directory; without it, merge the generated configuration
@@ -414,11 +505,25 @@ into the checkpoint manually before serving.
 
 Calibration prompts default to the **RULER dataset** via the same `RulerDatasetBuilder` the HF calibration path uses (`--calib_samples` / `--calib_max_seqlen` mirror the HF defaults of 24 / 32768), so vLLM- and PyTorch-calibrated thresholds are fit on identical data. `--prompts_file` (one prompt per line) substitutes custom calibration data.
 
-`install_vllm_skip_softmax_calibration` (called by `sparse_attn_worker.SkipSoftmaxCalibWorker` at model load) swaps calibration adapters onto each attention layer not listed in the checkpoint's existing skip-softmax `ignore` policy after validating all selected layers — eager execution is required, model and KV-cache dtypes must be fp16/bf16, and no attention Q/K/P/V fakequant may be active. During `llm.generate`, the paged Triton calibration kernel computes full dense attention — no sparsification is applied to generation, though the dense kernel's numerics differ slightly from the native backend's — while counting, per candidate threshold, how many KV tiles the skip criterion would drop. The driver then collects **raw tile counts from every TP rank** (each rank only measures its head shard), merges them, fits `scale_factor = a * exp(b * sparsity)` once per phase, and writes the same canonical `sparse_attention_config` block the HF export produces — preserving the existing skip-softmax layer policy and any exported N:M sparse-softmax groups — so the serving workflow above picks it up unchanged.
+`install_vllm_skip_softmax_calibration` (called by `sparse_attn_worker.SkipSoftmaxCalibWorker` at model load) swaps calibration adapters onto each attention layer not listed in the checkpoint's existing skip-softmax `ignore` policy after validating all selected layers. Eager execution is required, model and KV-cache dtypes must be fp16/bf16, and no attention Q/K/P/V fakequant may be active. The initial sweep computes dense attention while counting candidate tile skips. The driver merges raw counts across TP ranks and fits `scale_factor = a * exp(b * sparsity)` once per phase.
 
-Calibration and serving use the same 128-token KV-tile skip granularity and the same 128-row Q tile for prefill, so serving realizes the calibrated skip decision. One-token decode uses a 16-row Q compute tile because its padding rows cannot affect the decision. Serving autotunes only the execution schedule (`num_warps` / `num_stages`); measurement remains a single fixed launch because its counters have side effects.
+Recalibration preserves the sparse metadata resolved by vLLM, including Hub checkpoints and config overrides. With `--update_checkpoint_config`, sparse-attention policy values supplied through `hf_overrides` are also persisted in the local checkpoint. Before measuring a candidate, every layer it would enable in serving must have a calibration adapter; a selection mismatch fails before any counters or adapter settings are changed.
+
+The fit is only an initial guess. The driver next executes actual sparse serving, measures total skipped tiles divided by total eligible tiles across selected layers and TP ranks, and refines the scale separately for prefill and decode. Sparse refinement can change activations and generated tokens, so the measured ratio need not be monotone and the search may fail even if a suitable threshold exists. Only calibration prompts drive the bounded search; `--max_refinement_steps` defaults to 10 per phase. Refinement adjusts `a` at the selected target, not the entire fitted curve.
+
+Each candidate runs the full calibration set; changing thresholds can also trigger expensive Triton compilation. Runtime grows with prompt lengths, decode steps, and refinement steps. There is no resume support: an interrupted or failed run starts again from the initial sweep, although retaining the Triton cache can avoid repeated compilation. Do not tune thresholds against a failed held-out set; reserve a new held-out split if it informs further tuning.
+
+`--validation_prompts_file` is required, contains one prompt per line, and must be disjoint from the calibration prompts. Before model loading, overlap checks collapse whitespace for comparison without changing inference inputs; they do not establish semantic independence or detect shared source documents. RULER prompts are built using the serving tokenizer before loading model weights. After calibration passes, the frozen candidate is measured once on these held-out prompts. Every requested phase must pass on both splits; the default tolerance is two percentage points, and missing measurements or unequal TP-rank launch counts fail. `--decode_tokens 0` requests prefill-only calibration and validation.
+
+`sparse_attention_validation.json` retains candidate history, counts, prompt hashes, and pass/fail results. Failed validation exits nonzero without exporting a serving config or updating the checkpoint. Use a fresh output directory to avoid confusing an old export with a failed run. Successful exports preserve skip-softmax layer policy and N:M groups, and add a `validation` block to the skip-softmax group with the validated `target_sparsity`, `tolerance`, `metric`, and `scope`. At checkpoint load time, an advisory warning compares the group's `target_sparsity` with the recorded validation target. It detects target changes made before loading, but does not check edits to `a` or `b` or later runtime changes; older configs without this optional block still load. The tolerance describes measured sparsity error, not a range of validated target settings.
+
+Validation fixes the schedule to one sequence at a time, disables prefix caching and chunked prefill, and uses eager execution. Different batching, hardware, TP sizes, targets, or context distributions require separate validation. Passing this sparsity gate is not a model-quality or speedup result.
+
+Calibration and serving use the same 128-token KV-tile skip granularity and the same 128-row Q tile for prefill. One-token decode uses a 16-row Q compute tile because its padding rows cannot affect the decision. Serving autotunes only the execution schedule (`num_warps` / `num_stages`); measurement remains a single fixed launch because its counters have side effects.
 
 The reusable serving policies live in `modelopt/torch/sparsity/attention_sparsity/plugins/vllm_runtime.py`. `install_vllm_sparse_attention_from_checkpoint` installs checkpoint-driven sparse-only attention, while `install_vllm_nvfp4_attention` installs fixed NVFP4 Q/K/P/V with optional checkpoint sparsity. Both validate every selected layer before publishing any replacement implementation and return a `VllmAttentionInstallReport` with the installed layer names and backend counts.
+
+Calibration integrations reuse `refine_scales` and `summarize_validation` from `plugins/sparse_attn_calibration.py`. The runtime's `get_sparse_attention_metadata`, `enable_sparse_validation`, and `collect_sparse_validation` supply resolved metadata, candidate application, and counter collection; the example worker forwards those operations over RPC.
 
 `sparse_attn_worker.py` only invokes these APIs after vLLM loads the model. It retains `SparseAttnWorker` as the launcher's default and provides `QuantSparseAttnWorker` for the compact NVFP4 policy. Other vLLM integrations can invoke the same library APIs directly:
 
@@ -451,20 +556,105 @@ python3 examples/vllm_serve/vllm_serve_sparse_attn.py <MODEL_PATH> -tp 8 \
 
 The installer supports both FlashInfer and FlashAttention, and the worker prints the installed adapter counts. Pass `--attention-backend FLASHINFER` or `--attention-backend FLASH_ATTN` only when an explicit override is needed.
 
-This attention-only path applies a fixed dynamic block-16 NVFP4 fakequant format to Q/K/P/V. Q is dynamic; missing K/V scales default to global scale 1.0, and P defaults to amax 1.0. Existing scalar attention amax values are preserved, but this path does not calibrate or restore them itself. It does not re-quantize realquant Linear or MoE weights. An optional checkpoint `sparse_attention_config` is still honored for N:M sparse softmax; calibrated skip-softmax groups are rejected in combination with attention quantization, because quantized Q/K/P change the score distribution the skip thresholds were calibrated on.
+This attention-only path defaults to dynamic block-16 NVFP4 Q/DQ for Q/K/P/V. Each operand
+can independently use `nvfp4` or per-tensor FP8 E4M3 through `--additional-config`.
+For example, keep Q/K in NVFP4 and select FP8 for P/V:
 
-Decode uses a fixed 32-split, 128-key-tile schedule. P QDQ consumes split-local,
-unnormalized online-softmax probabilities, so changing that schedule can change
-quantized results; split count is part of the numerical contract.
+```bash
+python3 examples/vllm_serve/vllm_serve_sparse_attn.py <MODEL_PATH> -tp 8 \
+  --no-enable-prefix-caching \
+  --worker-cls sparse_attn_worker.QuantSparseAttnWorker \
+  --additional-config '{"modelopt_attn_quant":{"q_format":"nvfp4","k_format":"nvfp4","p_format":"fp8","v_format":"fp8"}}'
+```
 
-K is QDQ before its cache write, while V is written pristine. Complete 16-token V groups are finalized once in cache; an incomplete tail remains pristine and is QDQ on read. P@V therefore sees uniform fakequant values without re-quantizing the tail.
+The accepted keys are `q_format`, `k_format`, `p_format` and `v_format`; omitted keys
+default to `nvfp4`. For NVFP4, Q is dynamic, missing K/V scales default to global scale
+1.0, and P defaults to amax 1.0. For FP8, missing Q/K/V amax values default to 448 and
+P to 1.0. Existing scalar attention amax values are preserved, but this worker does not
+calibrate or restore them itself.
+
+This worker does not re-quantize realquant Linear or MoE weights. Optional checkpoint
+`sparse_attention_config` metadata is honored for N:M sparse softmax. Skip-softmax groups
+are rejected with attention quantization because Q/K/P Q/DQ changes the score distribution
+used to calibrate the skip thresholds.
+
+When P or V uses NVFP4, decode uses a fixed 32-split, 128-key-tile schedule. P Q/DQ
+consumes split-local, unnormalized online-softmax probabilities, so changing that schedule
+can change quantized results. When both P and V use FP8, decode uses the general paged Triton path.
+
+K is Q/DQ before its cache write. FP8 V is also Q/DQ before the cache write. NVFP4 V is
+written pristine: complete 16-token groups are finalized once in cache, while an incomplete
+tail remains pristine and is Q/DQ on read. This preserves consistent NVFP4 values for P@V
+without re-quantizing the tail.
 
 Supported configurations are regular decoder self-attention with FlashInfer or FlashAttention, fp16/bf16 model and KV cache, equal Q/K/V head dimensions that are multiples of 16, and DCP 1. The FlashInfer adapter preserves both NHD and HND cache strides and separates mixed decode/prefill launches so each phase keeps its own kernel contract. The default `FULL_AND_PIECEWISE` mode remains enabled for fixed N:M and attention-only NVFP4; checkpoints with calibrated decode `threshold_scale_factor` must use a non-`FULL` decode graph mode such as `--enforce-eager` because the live sequence length is not replayed as a Python scalar.
 
 Unsupported features are sliding window, ALiBi, softcap, sinks, FP8 KV cache, cross/encoder/MLA attention, KV sharing or transfer, prefix caching, speculative decoding, DBO/ubatching, and `FULL` mixed/prefill CUDA graphs.
 
+## Layer and quantizer support
+
+The available hooks depend on the vLLM layer class and selected backend. ModelOpt recipes
+enable the hooks listed below; a model is covered only where its layers use a supported
+class and implementation. Q/DQ means quantize then dequantize.
+
+| Layer / operation | vLLM layer class | Available quantizers | Limitations |
+| --- | --- | --- | --- |
+| Attention projections | `QKVParallelLinear`, `ColumnParallelLinear`, `MergedColumnParallelLinear`, `RowParallelLinear` | `input_quantizer`, `weight_quantizer` | Requires exactly `UnquantizedLinearMethod`. Other methods pass through only with these quantizers disabled, except for the Kimi MLP path below. |
+| Dense MLP and shared-expert projections | `ColumnParallelLinear`, `MergedColumnParallelLinear`, `RowParallelLinear` | `input_quantizer`, `weight_quantizer` | Same linear-method restriction. Custom projection methods require separate integration. |
+| Kimi K3 dense and shared-expert MLP projections | Parallel linear children of `KimiMLP` using `KimiK3LowLatencyLinearMethod` | `input_quantizer`, `weight_quantizer` | Requires BF16 strided 2D weights. ModelOpt bypasses fused GEMM collective shortcuts when needed. This exception does not cover Kimi custom attention projections. |
+| Expert gate/up GEMM | `FusedMoE`, `SharedFusedMoE`, `RoutedExperts` | `w13_input_quantizer`, `w13_weight_quantizer` | Use `--moe-backend triton` with exactly `UnquantizedFusedMoEMethod` and unquantized expert weights. See [expert GEMM backend requirements](#expert-gemm-backend-requirements). |
+| Expert down GEMM | `FusedMoE`, `SharedFusedMoE`, `RoutedExperts` | `w2_input_quantizer`, `w2_weight_quantizer` | Same backend and unquantized-method requirements as the gate/up GEMM above. |
+| Regular attention Q/K/V | `Attention` | `q_bmm_quantizer`, `k_bmm_quantizer`, `v_bmm_quantizer` | Hooks operands before native attention. Does not expose P inside the native fused kernel. |
+| Cross-attention and encoder attention Q/K/V | `CrossAttention`, `EncoderOnlyAttention` | `q_bmm_quantizer`, `k_bmm_quantizer`, `v_bmm_quantizer` | Registered only when the installed vLLM exposes these classes. The compact attention and sparse-attention adapters do not support these layouts. |
+| Compact attention Q/K/P/V | `Attention` with `ModelOptSparseAttentionImpl` or `ModelOptSparseFlashInferImpl` | `q_bmm_quantizer`, `k_bmm_quantizer`, `p_bmm_quantizer`, `v_bmm_quantizer` | Each operand supports NVFP4 or FP8. Requires CUDA SM8.9+, regular decoder self-attention, FP16/BF16 model and KV cache, and equal Q/K/V head dimensions divisible by 16. Unsupported: sliding-window attention, cross-layer KV sharing, FP8 KV cache, ALiBi, logits soft cap, and attention sinks. See the [compact worker restrictions](#compact-nvfp4-attention-worker). |
+| MLA query, compressed latent and positional key | `MLAAttention` | `q_bmm_quantizer`, `kv_c_bmm_quantizer`, `k_pe_bmm_quantizer` | Custom MLA/CSA implementations are not automatically covered. No P hook; the compact adapter does not support MLA. See [MLA KV-cache configuration](#fake-quantize-the-mla-kv-cache). |
+| DeepSeek V4 indexer query and key cache | `DeepseekV4Indexer` from `vllm.models.deepseek_v4.attention` | `indexer_q_quantizer`, `indexer_k_quantizer` | Applies Q/DQ after native FP8 quantization and requantizes to FP8, retaining the original FP8 rounding. MXFP4 indexer cache is rejected. |
+| GLM 5.3 Flash indexer query and key cache | `Indexer` from `vllm.models.glm5next.common.attention` or `vllm.models.glm5next.nvidia.attention` | `indexer_q_quantizer`, `indexer_k_quantizer` | Same FP8 round-trip restriction. Applied in the rotated basis used by the native indexer. |
+| GLM indexer scorer | GLM `Indexer` | `indexer_scorer_kwargs_quantizer` | Defaults off. Passes options to the scorer through `backend: scorer_kwargs`. Stock DeepGEMM supports `logits_dtype`; BF16 scorer reduction requires a compatible DeepGEMM kernel and GPU. ModelOpt does not check GPU compatibility. Additional options require a compatible custom backend. DeepSeek V4 rejects scorer controls. |
+| Expert-parallel dispatch and combine | `RoutedExperts` modular MoE path | `dispatch_quantizer`, `combine_quantizer` | Independent of expert GEMM quantizers. Combine needs an accessible modular finalize payload; padded backends require a constant global scale or MX format. `flashinfer_moe_ep_*` combine is rejected. Reduction and residual addition remain unquantized. |
+| DeepGEMM Mega-MoE dispatch and combine | `DeepseekV4MegaMoEExperts`, `KimiK3MegaMoEExperts` | `dispatch_quantizer`, `combine_quantizer` | Supports communication Q/DQ with `--moe-backend deep_gemm_mega_moe`, not expert weight/GEMM Q/DQ. Dispatch requires `VLLM_DISABLE_DSV4_MEGAMOE_SHARED_EXPERT_FUSION=1`. Combine requires a calibrated (`algorithm: max`) or constant global scale, or an MX format; only `fp8xfp4` buffer layouts are supported. |
+
+Linear and expert output quantizers are omitted from this table because they default to
+disabled. Recipes can explicitly enable `output_quantizer`, `w13_output_quantizer`
+and `w2_output_quantizer` after layer conversion.
+
+### Expert GEMM backend requirements
+
+The `w13_*` and `w2_*` quantizers on `FusedMoE`, `SharedFusedMoE` and `RoutedExperts`
+intercept the decomposed Triton expert GEMMs. All three classes require the same expert
+compute path; the layer class alone does not establish backend support.
+
+| Expert compute backend selection | Expert input/weight fakequant | Requirement or limitation |
+| --- | --- | --- |
+| `--moe-backend triton` | Supported | Requires exactly `UnquantizedFusedMoEMethod`, unquantized expert weights, and the intercepted Triton kernel entry points. |
+| `--moe-backend deep_gemm_mega_moe` | Not supported by the expert GEMM hooks | DeepSeek/Kimi construct dedicated Mega-MoE expert modules instead of the regular `RoutedExperts` path. Mega-MoE runs its existing FP8/FP4 expert kernel; ModelOpt adds separate dispatch/combine fakequant. |
+| `--moe-backend flashinfer_moe_ep_*` | Not supported by the expert GEMM hooks | The fused expert kernel is not intercepted by the Triton hooks. Dispatch Q/DQ remains available through its registered path; combine Q/DQ is rejected. |
+| Other expert compute backends | No dedicated expert GEMM fakequant integration | Their kernels are not intercepted unless execution actually falls back to the supported decomposed Triton path. |
+
+ModelOpt does not verify that the intercepted expert GEMM kernels ran, so expert input
+Q/DQ may be silently skipped. Do not rely on this path for expert activation fakequant
+with an unsupported backend.
+
+The expert compute backend is separate from the EP communication backend. DeepEP, NIXL
+or another communication backend may be used with the supported modular expert path,
+subject to the dispatch/combine restrictions above. Communication-only recipes do not
+require Triton expert GEMMs. Separately executed shared-expert MLP projections use their
+registered linear hooks rather than the routed-expert `w13_*`/`w2_*` hooks.
+
+Additional limits:
+
+- All `ReplicatedLinear` layers (including routers and some MLA latent projections),
+  normalization, embeddings and LM-head layers have no dedicated
+  runtime quantizer registration. GDN/KDA recurrent state and decay also have no dedicated
+  vLLM hooks. Projection layers that use the registered linear execution paths are covered
+  by the linear-layer support above.
+- N:M sparse softmax can combine with compact attention Q/DQ during prefill; N:M is not
+  applied during decode. Skip-softmax cannot combine with active attention Q/K/P/V Q/DQ.
+- Whole-model `FakeQuantWorker` and the sparse-attention workers are separate entry points.
+  Combining live projection/expert fakequant with sparse attention requires a combined integration.
+
 ## Known Problems
 
-1. **MCore reload does not use `MODELOPT_STATE_PATH`**; use `QUANT_FILE_PATH` and make sure `QUANT_CFG` matches the quantization recipe used for the original MCore model (otherwise quantizer keys/config won’t align).
-2. KV cache quantization export and reload is not supported in MCore yet.
-3. **Keep vLLM's torch.compile cache off** (`VLLM_DISABLE_COMPILE_CACHE=1`, which the shim sets when fakequant is requested). The cache is not keyed on the fake quant, so a graph compiled earlier for the same model without it is reused and the fake quant is silently skipped. If you run `FakeQuantWorker` without this launcher, set it yourself or pass `--enforce-eager`.
+1. **MCore reload uses export sidecars rather than `MODELOPT_STATE_PATH`**. Current exports write both `quantizer_state.pth` and `quant_recipe.yaml`; serving the export directory through this launcher auto-detects both. For a legacy export without the YAML sidecar, pass `QUANT_FILE_PATH` and set `QUANT_CFG` to match the original MCore quantization recipe.
+2. **Channel-wise activation/KV ranges remain unsupported.** MCore KV fakequant export/reload is supported through the exported quantizer recipe and ranges described above.
+3. **Keep vLLM's torch.compile cache off** (`VLLM_DISABLE_COMPILE_CACHE=1`, which the launcher sets when fakequant is requested). The cache is not keyed on the fake quant, so a graph compiled earlier for the same model without it is reused and the fake quant is silently skipped. If you run `FakeQuantWorker` without this launcher, set it yourself or pass `--enforce-eager`.

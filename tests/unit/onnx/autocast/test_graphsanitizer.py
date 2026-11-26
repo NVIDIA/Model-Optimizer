@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 from unittest.mock import Mock
 
 import numpy as np
@@ -236,6 +237,133 @@ def test_convert_fp64_initializers():
             assert init.data_type == TensorProto.FLOAT
 
 
+def test_convert_fp64_initializers_clamps_out_of_range_values():
+    """Values FP32 cannot represent must be clamped, not cast to infinity."""
+    x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [2])
+    y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [2])
+    fp64_max = np.finfo(np.float64).max
+
+    graph = helper.make_graph(
+        nodes=[
+            helper.make_node("Clip", ["X", "lower", "upper"], ["Y"], name="clip"),
+        ],
+        name="fp64_out_of_range",
+        inputs=[x],
+        outputs=[y],
+        initializer=[
+            numpy_helper.from_array(np.array([-fp64_max], np.float64), name="lower"),
+            numpy_helper.from_array(np.array([fp64_max], np.float64), name="upper"),
+        ],
+    )
+    sanitizer = GraphSanitizer(helper.make_model(graph))
+
+    assert sanitizer._convert_fp64_initializers() is True
+
+    fp32_max = np.finfo(np.float32).max
+    converted = {
+        init.name: numpy_helper.to_array(init) for init in sanitizer.model.graph.initializer
+    }
+    for name in ("lower", "upper"):
+        assert np.all(np.isfinite(converted[name])), f"{name} was cast to infinity"
+    assert converted["lower"] == -fp32_max
+    assert converted["upper"] == fp32_max
+
+
+def test_convert_fp64_initializers_preserves_infinity():
+    """An infinity the model already held is not a value FP32 cannot represent."""
+    x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [3])
+    y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [3])
+    # An oversized finite value alongside the infinities must not drag them down with it.
+    values = np.array([np.inf, -np.inf, np.finfo(np.float64).max], dtype=np.float64)
+
+    graph = helper.make_graph(
+        nodes=[helper.make_node("Mul", ["X", "mixed"], ["Y"], name="mul")],
+        name="fp64_with_infinity",
+        inputs=[x],
+        outputs=[y],
+        initializer=[numpy_helper.from_array(values, name="mixed")],
+    )
+    sanitizer = GraphSanitizer(helper.make_model(graph))
+
+    assert sanitizer._convert_fp64_initializers() is True
+
+    converted = numpy_helper.to_array(
+        next(init for init in sanitizer.model.graph.initializer if init.name == "mixed")
+    )
+    assert converted[0] == np.inf
+    assert converted[1] == -np.inf
+    assert converted[2] == np.finfo(np.float32).max
+
+
+@pytest.mark.parametrize("op_type", ["Constant", "ConstantOfShape"])
+def test_convert_fp64_nodes_clamps_out_of_range_values(op_type):
+    """A node's FP64 value attribute must be clamped the same way an initializer is."""
+    x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [2])
+    y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [2])
+    value = numpy_helper.from_array(
+        np.array([np.finfo(np.float64).max], np.float64), name="big_value"
+    )
+
+    initializer = []
+    if op_type == "ConstantOfShape":
+        producer = helper.make_node(
+            "ConstantOfShape", ["shape"], ["big"], name="big_node", value=value
+        )
+        initializer.append(numpy_helper.from_array(np.array([2], dtype=np.int64), name="shape"))
+    else:
+        producer = helper.make_node("Constant", [], ["big"], name="big_node", value=value)
+
+    graph = helper.make_graph(
+        nodes=[producer, helper.make_node("Mul", ["X", "big"], ["Y"], name="mul")],
+        name="fp64_node_out_of_range",
+        inputs=[x],
+        outputs=[y],
+        initializer=initializer,
+    )
+    sanitizer = GraphSanitizer(helper.make_model(graph))
+
+    assert sanitizer._convert_fp64_nodes() is True
+
+    converted = next(
+        numpy_helper.to_array(attr.t)
+        for node in sanitizer.model.graph.node
+        if node.name == "big_node"
+        for attr in node.attribute
+        if attr.name == "value"
+    )
+    assert np.all(np.isfinite(converted)), f"{op_type} value was cast to infinity"
+    assert converted == np.finfo(np.float32).max
+
+
+def test_convert_fp64_nodes_warning_names_the_output_tensor(caplog):
+    """The clamp warning must name the Constant's output tensor, not the node.
+
+    Regression test: the warning was built from f"{node.op_type} node {node.name}",
+    which identifies the node, not the tensor whose values are out of range -- the
+    same mistake _convert_fp64_initializers avoids by passing initializer.name.
+    """
+    x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [1])
+    y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [1])
+    value = numpy_helper.from_array(
+        np.array([np.finfo(np.float64).max], np.float64), name="big_value"
+    )
+    producer = helper.make_node("Constant", [], ["big_output"], name="big_node", value=value)
+
+    graph = helper.make_graph(
+        nodes=[producer, helper.make_node("Mul", ["X", "big_output"], ["Y"], name="mul")],
+        name="fp64_node_warning_name",
+        inputs=[x],
+        outputs=[y],
+    )
+    sanitizer = GraphSanitizer(helper.make_model(graph))
+
+    with caplog.at_level(logging.WARNING):
+        assert sanitizer._convert_fp64_nodes() is True
+
+    assert any("big_output" in record.message for record in caplog.records)
+    assert not any("big_node" in record.message for record in caplog.records)
+
+
 def test_convert_fp64_io_types():
     """Test conversion of FP64 input/output types to FP32."""
     # Create inputs and outputs with FP64 types
@@ -452,18 +580,28 @@ def test_sanitize_large_external_initializer_metadata():
     assert [node.op_type for node in sanitizer.model.graph.node] == ["Identity"]
 
 
-def test_find_custom_nodes_uses_source_model_path(tmp_path, monkeypatch):
+@pytest.mark.parametrize("is_trt_plugin", [False, True])
+@pytest.mark.parametrize("node_name", ["custom", ""])
+def test_find_custom_nodes_uses_source_model_path(tmp_path, monkeypatch, is_trt_plugin, node_name):
     x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [1])
     y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [1])
-    custom_node = helper.make_node("CustomOp", [x.name], [y.name], name="custom")
-    graph = helper.make_graph([custom_node], "custom_graph", [x], [y])
+    standard_name = "standard" if node_name else ""
+    standard_node = helper.make_node("Relu", [x.name], ["standard_out"], name=standard_name)
+    custom_node = helper.make_node("CustomOp", ["standard_out"], [y.name], name=node_name)
+    graph = helper.make_graph([standard_node, custom_node], "custom_graph", [x], [y])
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 22)])
     model_path = tmp_path / "custom.onnx"
     tensor_info = {"Y": {"dtype": TensorProto.FLOAT, "shape": [1]}}
-    get_custom_layers = Mock(return_value=([custom_node.name], tensor_info))
+    layer_name = node_name or "node_of_Y"
+    plugin_layers = [standard_name or "node_of_standard_out"]
+    if is_trt_plugin:
+        plugin_layers.append(layer_name)
+    get_custom_layers = Mock(return_value=(plugin_layers, tensor_info))
     infer_types_shapes = Mock(return_value=model)
 
-    monkeypatch.setattr(graphsanitizer, "set_trt_plugin_domain", Mock(return_value=model))
+    monkeypatch.setattr(graphsanitizer, "TRT_PYTHON_AVAILABLE", True)
+    set_trt_plugin_domain = Mock(return_value=model)
+    monkeypatch.setattr(graphsanitizer, "set_trt_plugin_domain", set_trt_plugin_domain)
     monkeypatch.setattr(graphsanitizer, "get_custom_layers", get_custom_layers)
     monkeypatch.setattr(graphsanitizer, "infer_types_shapes_tensorrt", infer_types_shapes)
 
@@ -472,6 +610,11 @@ def test_find_custom_nodes_uses_source_model_path(tmp_path, monkeypatch):
 
     get_custom_layers.assert_called_once_with(str(model_path.resolve()), [])
     infer_types_shapes.assert_called_once_with(model, [], all_tensor_info=tensor_info)
+    assert sanitizer.trt_plugin_ops == ({"CustomOp"} if is_trt_plugin else set())
+    if is_trt_plugin:
+        set_trt_plugin_domain.assert_called_once_with(model, {"CustomOp"})
+    else:
+        set_trt_plugin_domain.assert_not_called()
 
 
 def test_find_custom_nodes_without_tensorrt_says_so(monkeypatch):

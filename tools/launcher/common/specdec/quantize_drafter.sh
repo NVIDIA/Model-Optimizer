@@ -30,15 +30,14 @@ trap 'error_handler $0 $LINENO' ERR
 DRAFTER="${DRAFTER_CKPT}"
 # Training writes exported-checkpoint-<step>/ under output_dir; take the newest. Only for a
 # local directory -- anything else (an HF repo id) is passed through for the script to
-# resolve. -V sorts numerically, so checkpoint-1000 beats checkpoint-900.
+# resolve.
 if [ -d "${DRAFTER}" ] && [ ! -f "${DRAFTER}/config.json" ]; then
-    latest=$(find "${DRAFTER}" -maxdepth 1 -mindepth 1 -type d \
-        -name 'exported-checkpoint-*' -printf '%f\n' 2>/dev/null | sort -V | tail -1)
+    latest=$(latest_checkpoint "${DRAFTER}" exported-checkpoint-)
     if [ -z "${latest}" ]; then
         echo "ERROR: ${DRAFTER} is not a checkpoint and holds no exported-checkpoint-* directory."
         exit 1
     fi
-    DRAFTER="${DRAFTER}/${latest}"
+    DRAFTER="${latest}"
     echo "Auto-detected drafter: ${DRAFTER}"
 fi
 

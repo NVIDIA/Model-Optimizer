@@ -15,8 +15,8 @@
 
 """Unit tests for modelopt.recipe.loader and modelopt.recipe.loader.load_config."""
 
+import contextlib
 import json
-import os
 import re
 import sys
 import types
@@ -860,6 +860,7 @@ _MINIMAL_BODIES: dict[RecipeType, dict] = {
     RecipeType.SPECULATIVE_EAGLE: {},  # body sections have field defaults
     RecipeType.SPECULATIVE_DFLASH: {},
     RecipeType.SPECULATIVE_MEDUSA: {},
+    RecipeType.SPECULATIVE_EXTERNAL: {},
 }
 
 
@@ -2041,13 +2042,8 @@ def test_import_circular_via_path_aliases_raises(tmp_path):
         f"  algorithm: max\n"
         f"  quant_cfg: []\n"
     )
-    cwd = os.getcwd()
-    os.chdir(tmp_path)
-    try:
-        with pytest.raises(ValueError, match="Circular import"):
-            load_recipe(recipe_file)
-    finally:
-        os.chdir(cwd)
+    with contextlib.chdir(tmp_path), pytest.raises(ValueError, match="Circular import"):
+        load_recipe(recipe_file)
 
 
 def test_import_cross_file_same_name_no_conflict(tmp_path):
@@ -2444,7 +2440,8 @@ def test_load_recipe_autoquantize_rejects_options_for_methods_without_options(tm
         + "    num_path_nodes: 2\n"
     )
 
-    with pytest.raises(ValueError, match=rf"auto_quantize_method='{method}'.*no method_options"):
+    expected = "no method_options" if method == "gradient" else "only the 'context_quant_level'"
+    with pytest.raises(ValueError, match=rf"auto_quantize_method='{method}'.*{expected}"):
         load_recipe(recipe_file)
 
 
@@ -2486,6 +2483,35 @@ def test_load_recipe_autoquantize_damage_bound_without_bit_budget(tmp_path):
     assert aq.constraints.effective_bits == 4.8
     assert "effective_bits" not in aq.constraints.model_fields_set
     assert aq.method_options == {"max_predicted_damage": 0.05}
+
+
+@pytest.mark.parametrize(
+    ("body", "match"),
+    [
+        (_AQ_MINIMAL_BODY + "  finalize_algorithm:\n    method: gptqq\n", "gptqq"),
+        (
+            _AQ_MINIMAL_BODY
+            + "  finalize_algorithm:\n    method: gptq\n    layerwise:\n"
+            + "      enable: true\n      export_dir: out\n",
+            "export_dir",
+        ),
+        (
+            _AQ_MINIMAL_BODY.replace(
+                "  constraints:\n    effective_bits: 4.8\n", "  constraints: {}\n"
+            )
+            + "  auto_quantize_method: aumann_shapley\n"
+            + "  method_options:\n    max_predicted_damage: 0.05\n"
+            + "  finalize_algorithm: gptq\n",
+            "max_predicted_damage",
+        ),
+    ],
+)
+def test_load_recipe_autoquantize_refuses_unusable_finalize_algorithm(tmp_path, body, match):
+    recipe_file = tmp_path / "aq_finalize.yml"
+    recipe_file.write_text(body)
+
+    with pytest.raises(ValueError, match=match):
+        load_recipe(recipe_file)
 
 
 def test_load_recipe_autoquantize_damage_bound_survives_override_round_trip(tmp_path):

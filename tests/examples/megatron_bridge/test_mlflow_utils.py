@@ -532,7 +532,7 @@ def test_the_distill_script_defers_to_megatron_bridge():
     source = _DISTILL_SCRIPT.read_text()
 
     assert "**logger_kwargs(args, DISTILL)," in source
-    assert "try:\n        distill(config)\n    finally:" in source
+    assert "try:\n        distill(config, **distill_kwargs)\n    finally:" in source
     # The marker is read before training and handed back, so a resumed run that saved
     # nothing cannot stamp the checkpoint it resumed from.
     assert "saved_before = checkpoint_marker(args, DISTILL)" in source

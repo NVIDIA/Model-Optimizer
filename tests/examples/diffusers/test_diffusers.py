@@ -13,18 +13,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 import os
 from pathlib import Path
 from typing import NamedTuple
 
 import pytest
+import torch
 from _test_utils.examples.models import FLUX_SCHNELL_PATH, SD3_PATH, SDXL_PATH
 from _test_utils.examples.run_command import run_example_command
 from _test_utils.torch.misc import minimum_sm
+from safetensors.torch import load_file
 
 # Calibrate from local prompts: the default Hub datasets (OpenVid-1M for Wan) are slow to load
 # and add a network dependency without adding coverage.
 CALIB_PROMPTS_FILE = Path(__file__).parent / "calib_prompts.txt"
+
+# Run the example scripts in this process: ~20s of startup saved per step (see conftest).
+pytestmark = pytest.mark.usefixtures("in_process_examples")
 
 
 def assert_hf_ckpt_exported(hf_ckpt_dir: Path) -> None:
@@ -35,6 +41,25 @@ def assert_hf_ckpt_exported(hf_ckpt_dir: Path) -> None:
 
     weight_files = list(hf_ckpt_dir.rglob("*.safetensors")) + list(hf_ckpt_dir.rglob("*.bin"))
     assert len(weight_files) > 0, f"No weight files (.safetensors or .bin) found in {hf_ckpt_dir}"
+
+
+def assert_vae_conv3d_nvfp4_packed(hf_ckpt_dir: Path) -> None:
+    """Check that the exported VAE holds packed NVFP4 Conv3d weights with all their scales."""
+    vae_dir = hf_ckpt_dir / "vae"
+    with open(vae_dir / "config.json") as file:
+        quant_config = json.load(file)["quantization_config"]
+    assert quant_config["config_groups"]["group_0"]["targets"] == ["Conv3d"]
+
+    weights = {}
+    for path in vae_dir.glob("*.safetensors"):
+        weights.update(load_file(str(path)))
+    packed = [
+        key[: -len(".weight")] for key, value in weights.items() if value.dtype == torch.uint8
+    ]
+    assert packed, f"No packed NVFP4 weights in {vae_dir}"
+    for prefix in packed:
+        for scale in ("weight_scale", "weight_scale_2", "input_scale"):
+            assert f"{prefix}.{scale}" in weights, f"{prefix}.{scale} missing from {vae_dir}"
 
 
 class DiffuserModel(NamedTuple):
@@ -288,7 +313,7 @@ WAN22_MODELS = [
         id="wan22_5b_vae_fp8_max",
     ),
     pytest.param(
-        Wan22Model("wan2.2-t2v-5b", "vae", "fp4", "max", "default"),
+        Wan22Model("wan2.2-t2v-5b", "vae", "fp4", "max", "default", hf_export=True),
         marks=minimum_sm(89),
         id="wan22_5b_vae_fp4_max",
     ),
@@ -314,6 +339,8 @@ def test_wan22_quantization(wan_model: Wan22Model, tiny_wan22_path: str, tmp_pat
     )
     if wan_model.hf_export:
         assert_hf_ckpt_exported(hf_ckpt_dir)
+        if wan_model.backbone == "vae":
+            assert_vae_conv3d_nvfp4_packed(hf_ckpt_dir)
     wan_model.restore(tiny_wan22_path, tmp_path)
 
 
@@ -336,6 +363,7 @@ def test_wan22_quantization(wan_model: Wan22Model, tiny_wan22_path: str, tmp_pat
         "sdxl_1.0_torch_compile",
     ],
 )
+@pytest.mark.filterwarnings("ignore:.*env= given; running this step as a subprocess")
 def test_diffusion_trt_torch(
     model_name: str,
     model_path: str,
@@ -356,7 +384,9 @@ def test_diffusion_trt_torch(
     if torch_compile:
         cmd_args.append("--torch-compile")
         # The script compiles with mode="max-autotune"; benchmarking Triton GEMM/conv templates is
-        # a large share of the run on these tiny models and covers nothing in the example.
+        # a large share of the run on these tiny models and covers nothing in the example. Passing
+        # env= also keeps this step in a subprocess, where the Inductor settings and cudagraphs
+        # belong rather than in the shared pytest process.
         env = {
             **os.environ,
             "TORCHINDUCTOR_MAX_AUTOTUNE_GEMM_BACKENDS": "ATEN",

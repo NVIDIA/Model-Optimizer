@@ -76,6 +76,7 @@ from modelopt.recipe.presets import (
     QUANT_CFG_CHOICES,
     RecipeSupersededAction,
 )
+from modelopt.torch.export import ensure_local_checkpoint
 from modelopt.torch.utils import print_args, print_rank_0, warn_rank_0
 from modelopt.torch.utils.dataset_utils import get_supported_datasets
 from modelopt.torch.utils.mlflow import Tool, masked_args, resolved_recipe_texts
@@ -152,6 +153,15 @@ def get_args() -> argparse.Namespace:
     parser.add_argument("--pp_size", type=int, default=1, help="Pipeline parallel size")
     parser.add_argument("--ep_size", type=int, default=1, help="Expert parallel size")
     parser.add_argument("--cp_size", type=int, default=1, help="Context parallel size")
+    parser.add_argument(
+        "--dsa_kernel_backend",
+        choices=["none", "tilelang", "cudnn"],
+        default=None,
+        help=(
+            "Fused kernels for DeepSeek sparse attention (e.g. GLM-5.x). The unfused fallback "
+            "builds dense [seq, seq] scores per head, which does not fit at long sequence lengths."
+        ),
+    )
 
     # Quantization arguments
     parser.add_argument(
@@ -197,6 +207,11 @@ def get_args() -> argparse.Namespace:
             "(deprecated: use --recipe) Disable input (activation) quantization, i.e. "
             "weight-only quantization."
         ),
+    )
+    parser.add_argument(
+        "--output_qdq_weight",
+        action="store_true",
+        help="Save floating QDQ weights with ModelOpt state for QAD, instead of latent weights.",
     )
     parser.add_argument(
         "--compress",
@@ -261,12 +276,13 @@ def get_args() -> argparse.Namespace:
     args = parser.parse_args()
     resolve_mlflow_args(args, parser, QUANTIZE)
 
+    if args.output_qdq_weight and (args.compress or args.lora_rank):
+        parser.error("--output_qdq_weight requires uncompressed, adapter-free weights.")
+
     if args.lora_rank < 0:
         parser.error("--lora_rank must be non-negative")
     if args.lora_rank and args.compress:
         parser.error("--lora_rank requires fake quantization; cannot be combined with --compress")
-
-    print_args(masked_args(args))
 
     # Flipped by main() once the Megatron checkpoint is on disk. The MLflow provenance
     # pointer is gated on it rather than on --export_megatron_path existing, which proves
@@ -322,18 +338,23 @@ def get_quant_config(args: argparse.Namespace) -> dict:
 
 
 def main(args: argparse.Namespace):
+    # --hf_model_name_or_path stays as given. Later steps read the local copy of the whole
+    # checkpoint in local_checkpoint_path; hub_model_id is the Hub ID, or None for a local path.
+    args.hub_model_id, args.local_checkpoint_path = ensure_local_checkpoint(
+        args.hf_model_name_or_path
+    )
     trust_remote_code = is_safe_repo(
-        trust_remote_code=args.trust_remote_code, hf_path=args.hf_model_name_or_path
+        trust_remote_code=args.trust_remote_code, hf_path=args.local_checkpoint_path
     )
 
     moe_grouped_gemm = use_moe_grouped_gemm(
-        args.hf_model_name_or_path,
+        args.local_checkpoint_path,
         trust_remote_code=trust_remote_code,
         force_sequential=args.no_moe_grouped_gemm,
     )
 
     bridge, _provider, model, unwrapped_model, tokenizer = load_mbridge_model_from_hf(
-        hf_model_name_or_path=args.hf_model_name_or_path,
+        hf_model_name_or_path=args.local_checkpoint_path,
         trust_remote_code=trust_remote_code,
         moe_grouped_gemm=moe_grouped_gemm,
         provider_overrides={
@@ -345,6 +366,11 @@ def main(args: argparse.Namespace):
             "pipeline_dtype": torch.bfloat16,
             "seq_length": args.seq_length,
             "gradient_accumulation_fusion": False,  # not supported
+            **(
+                {"dsa_kernel_backend": args.dsa_kernel_backend}
+                if args.dsa_kernel_backend is not None
+                else {}
+            ),
         },
         init_model_parallel=True,
     )
@@ -433,7 +459,7 @@ def main(args: argparse.Namespace):
         # VLMs: drive the full VLM forward on image-text pairs so the language model's quantizers
         # see vision-conditioned activations (we still quantize the LM only).
         processor = AutoProcessor.from_pretrained(
-            args.hf_model_name_or_path, trust_remote_code=trust_remote_code
+            args.local_checkpoint_path, trust_remote_code=trust_remote_code
         )
         forward_loop = get_megatron_vlm_calibration_forward_loop(
             unwrapped_model,  # full VLM (vision encoder + projector + language model)
@@ -450,6 +476,9 @@ def main(args: argparse.Namespace):
         unwrapped_model.calibration_mode = False
     else:
         mtq.quantize(unwrapped_model, mtq_config, forward_loop)
+
+    if args.output_qdq_weight:
+        mtq.initialize_qdq_weights(unwrapped_model)
 
     if args.lora_rank:
         mtq.enable_quant_lora(
@@ -477,7 +506,8 @@ def main(args: argparse.Namespace):
     bridge.save_megatron_model(
         model,
         args.export_megatron_path,
-        hf_tokenizer_path=args.hf_model_name_or_path,
+        # Recorded in the checkpoint's config: the Hub ID stays valid on other hosts.
+        hf_tokenizer_path=args.hub_model_id or args.local_checkpoint_path,
         hf_tokenizer_kwargs={"trust_remote_code": trust_remote_code},
     )
     args.checkpoint_exported = True
@@ -517,9 +547,10 @@ def main(args: argparse.Namespace):
 
 
 if __name__ == "__main__":
-    dist.setup()
     args = get_args()
+    dist.setup()
     try:
+        print_args(masked_args(args))
         # Entered inside the try: opening the run is fatal by design, and the peers of a rank
         # that exits without dist.abort() stay blocked on the first collective.
         with mlflow_run(args, QUANTIZE):

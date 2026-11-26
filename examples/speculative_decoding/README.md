@@ -19,6 +19,7 @@ This example focuses on training with Hugging Face. To train with Megatron‑LM,
 | Online Training | Train draft model alongside base model in GPU memory | \[[Link](#training-draft-model-with-online-base-model)\] |
 | Offline Training | Train draft model using pre-computed hidden states | \[[Link](#training-draft-model-with-offline-base-model)\] |
 | Streaming Training | Train draft on hidden states streamed from a live vLLM serve (no disk dump) | \[[Link](#training-draft-model-with-streaming-base-model)\] |
+| External Draft Training | Train a standalone pretrained LM as the draft, not a grafted head | \[[Link](#training-a-standalone-external-draft-model)\] |
 | After Training | Evaluation, export and deployment | \[[Link](#model-validation)\] |
 | Advanced Usage | Data synthesis, vocab compression, and configuration | \[[Link](#advanced-usage)\] |
 | Support Matrix | Supported models for speculative decoding training | \[[Link](#support-matrix)\] |
@@ -85,6 +86,14 @@ For small base models that fit in GPU memory, we can collocate them with draft m
 
 All default training settings are in `eagle3.yaml`. You can adjust them by editing the YAML file or by specifying command-line overrides with OmegaConf dotlist arguments.
 
+To enable uniform hidden-state mixing, add `eagle.eagle_mix_hidden_states=true` and
+`eagle.eagle_mix_hidden_states_mode=uniform_layer_sample`. Each token samples a complete hidden vector
+from the original input and aligned outputs of prior training-time-test rounds.
+The mode defaults to `sparse_replace`, preserving the existing mixing behavior when
+only `eagle_mix_hidden_states` is enabled.
+Megatron EAGLE supports the same mode: set `eagle_mix_hidden_states=True` and
+`eagle_mix_hidden_states_mode="uniform_layer_sample"` in the `EagleConfig` passed to `mtsp.convert`.
+
 To enable context parallelism for long-context training, add `training.cp_size=<N>`.
 The saved modelopt checkpoint is similar in architecture to HF models. It can be further optimized through **ModelOpt**, e.g., PTQ and QAT.
 
@@ -92,9 +101,14 @@ The saved modelopt checkpoint is similar in architecture to HF models. It can be
 
 For large models, you can export intermediate hidden states to disk and train only the draft model. This significantly reduces GPU memory requirements, but requires several to tens of terabytes of disk storage depending on dataset size.
 
-### Dumpping Hidden States to Disk
+Offline samples are shuffled reproducibly before applying `data.sample_size`, using
+`training.data_seed` if set, otherwise `training.seed`. Keep the file set, seed, and
+`data.sample_size` unchanged when resuming. Unreadable or incomplete dumps raise an error
+identifying the file; they are not replaced with another sample.
 
-We support two backends for generating base model hidden states. For better effciency, it is recommended to use TRT-LLM:
+### Dumping Hidden States to Disk
+
+We support two backends for generating base model hidden states. For better efficiency, it is recommended to use TRT-LLM:
 
 ```bash
 python collect_hidden_states/compute_hidden_states_trtllm.py \
@@ -132,6 +146,47 @@ Once we finish dumping hidden states, launch offline training pointing to the hi
 
 For large base models, you can stream hidden states from a live `vllm serve` instead of dumping them to disk: a co-located server produces the base-model hidden states on the fly and sends them to the trainer over NIXL RDMA, scaling to multiple nodes (dedicated serve replicas + DDP trainers). See the launcher examples, e.g. [Kimi-K2.5 streaming EAGLE3](../../tools/launcher/examples/moonshotai/Kimi-K2.5/hf_streaming_eagle3_multi_node.yaml) and [streaming DFlash](../../tools/launcher/examples/moonshotai/Kimi-K2.5/hf_streaming_dflash_multi_node.yaml).
 
+Streaming input accepts `conversations` or `messages` as a list or a JSON-encoded list.
+Prefer JSON-encoded `tools` and conversations containing `tool_calls`: datasets 3.x/4.x
+can fill missing nested keys with nulls, changing the rendered prompt. `tools` must
+decode to a list of objects, and `builtin_tools` to a list of strings; both also
+accept native lists. Per-row `reasoning_effort` and `model_identity` must be strings.
+Nulls and empty strings in these optional fields are treated as absent; `tools=[]`
+is preserved and uses the tokenizer's native template selection, including `tool_use`.
+
+Other per-row variables, such as `enable_thinking=false`, go in `chat_template_kwargs`
+(an object or JSON-encoded object). It also accepts `reasoning_effort`, `model_identity`
+and `builtin_tools`, with the same normalization; nonempty duplicates at the top level
+are rejected. Tokenizer control arguments, including `tools`, `chat_template`,
+`add_generation_prompt` and tokenization options, are rejected inside this object.
+Include the source conversation's template inputs so training uses the same tokenization.
+Malformed rows and template rendering failures are resampled, with one warning per
+reason per dataset worker. Missing templates, template syntax errors and loss-mask errors still raise.
+
+## Training a Standalone (External) Draft Model
+
+The modes above graft a draft head onto the target. The `external` mode instead
+trains an ordinary pretrained causal LM as the draft: it keeps its own embeddings
+and lm_head, the target is never modified, and the result is a plain HF checkpoint.
+
+Dump the target's top-k deployment policy once, then train against it:
+
+```bash
+python collect_hidden_states/compute_sparse_policy_hf.py \
+  --model $BASE_MODEL --input-data $CONVERSATIONS --output-dir $POLICY_DIR \
+  --top-k 20 --top-p 0.95 --answer-only-loss
+
+torchrun --nproc_per_node 8 main.py \
+  --config ../../modelopt_recipes/general/speculative_decoding/external_draft.yaml \
+  model.model_name_or_path=$BASE_MODEL \
+  draft_model_name_or_path=$DRAFT_MODEL \
+  data.sparse_data_path=$POLICY_DIR \
+  training.output_dir=$OUTPUT_DIR
+```
+
+See [doc/external_draft.md](doc/external_draft.md) for the recipe parameters, the
+dense hidden-state alternative, the objectives, and the cross-tokenizer vocabulary swap.
+
 ## Model Validation
 
 For online training checkpoints, we can run in-framework evaluation on MT-bench:
@@ -148,7 +203,9 @@ python scripts/ar_validate.py --model_path $ONLINE_CKPT
 python scripts/export_hf_checkpoint.py --model_path $OUTPUT_DIR --export_path $EXPORT_PATH
 ```
 
-This exports the model from a ModelOpt checkpoint to a deployment-compatible format.
+This exports the model from a ModelOpt checkpoint to a deployment-compatible format. It
+applies to the grafted-head modes above; an external draft needs no export pass, since its
+training output is already a plain HF checkpoint.
 
 ## Deployment
 
@@ -187,7 +244,7 @@ Please refer to [TRT-LLM Doc: Speculative Decoding](https://nvidia.github.io/Ten
 
 Please refer to [VLLM Doc: Speculative Decoding](https://docs.vllm.ai/en/latest/features/spec_decode/) for detailed usage.
 
-Optionally, you can convert the exported checkpoint to contain target model information, which is accepted by vLLM to simplify depployment:
+Optionally, you can convert the exported checkpoint to contain target model information, which is accepted by vLLM to simplify deployment:
 
 ```bash
 python scripts/convert_to_vllm_ckpt.py --input <exported_ckpt> --verifier <target_model> --output <output_dir>
@@ -370,6 +427,17 @@ trainer.save_model("<output_dir>")
 ```
 
 See `main.py` for the full example including tokenizer setup, dataset loading, and checkpoint handling.
+
+### Native MTP Boosting
+
+Native multi-token prediction (MTP) boosting fine-tunes a model's existing MTP
+module using target-model supervision. Only the MTP module is trained. LK lambda
+is the default loss; set `mtp_loss_type="soft_target_ce"` to use cross-entropy.
+
+The [Python API](../../modelopt/torch/speculative/mtp/adapter.py) currently requires
+a custom model adapter. When training from offline hidden-state data with Hugging
+Face Trainer, set `remove_unused_columns=False` in `TrainingArguments` so the
+collator receives the hidden-state features.
 
 ## Support Matrix
 

@@ -75,12 +75,13 @@ def convert_to_mixed_precision(
     calibration_data: str | None = None,
     custom_rule: NodeRuleBase | None = None,
     init_conversion_max_bytes: int | None = None,
-    providers: list[str] = ["cpu"],
-    trt_plugins: list[str] = [],
-    trt_plugins_precision: list[str] = [],
+    providers: list[str] | None = None,
+    trt_plugins: list[str] | None = None,
+    trt_plugins_precision: list[str] | None = None,
     max_depth_of_reduction: int | None = None,
     opset: int | None = None,
     use_standalone_type_inference: bool = False,
+    calibrate_per_node: bool = False,
 ) -> onnx.ModelProto:
     """Convert model to mixed precision.
 
@@ -108,10 +109,14 @@ def convert_to_mixed_precision(
         use_standalone_type_inference: If True, use standalone type inference implementation instead of ONNX's
                                   infer_shapes. This is a workaround (WAR) when only type inference is
                                   needed without shape inference. Default: False.
+        calibrate_per_node: Whether to run calibration node by node to reduce peak memory.
 
     Returns:
         onnx.ModelProto: The converted mixed precision model.
     """
+    providers = ["cpu"] if providers is None else list(providers)
+    trt_plugins = [] if trt_plugins is None else trt_plugins
+    trt_plugins_precision = [] if trt_plugins_precision is None else trt_plugins_precision
     # Load and process model
     model = onnx.load(onnx_path, load_external_data=False)
     assert low_precision_type in ["fp16", "bf16"], "low_precision_type must be either fp16 or bf16"
@@ -165,8 +170,8 @@ def convert_to_mixed_precision(
     )
     value_info_map, initializer_map, node_to_init_map = utils.setup_mappings(model)
 
-    # Automatically add 'trt' to list of providers if custom ops are detected
-    if "trt" not in providers and graph_sanitizer.custom_ops:
+    # Only confirmed TensorRT plugins require the TensorRT execution provider.
+    if "trt" not in providers and graph_sanitizer.trt_plugin_ops:
         providers.insert(0, "trt")
 
     # Initialize classifiers and converters
@@ -203,7 +208,7 @@ def convert_to_mixed_precision(
     ref_outputs_dict = None
     if (data_max is not None and data_max != np.inf) or graph_sanitizer.custom_ops:
         ref_runner = ReferenceRunner(model, providers, trt_plugins)
-        ref_outputs_dict = ref_runner.run(calibration_data)
+        ref_outputs_dict = ref_runner.run(calibration_data, calibrate_per_node=calibrate_per_node)
 
     # Run conversion
     low_precision_nodes, high_precision_nodes = node_classifier.run(ref_outputs_dict)

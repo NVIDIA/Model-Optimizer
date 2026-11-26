@@ -6,7 +6,6 @@ From the launcher directory:
 
 ```bash
 cd Model-Optimizer/tools/launcher
-uv pip install -e . pytest
 uv run pytest -v
 ```
 
@@ -37,8 +36,7 @@ launcher:
       working-directory: tools/launcher
       run: |
         curl -LsSf https://astral.sh/uv/install.sh | sh
-        uv venv .venv && uv pip install -e . pytest
-        uv run pytest -v
+        uv run python3 -m pytest -v
 ```
 
 The launcher job is a required check — PRs cannot merge if tests fail.

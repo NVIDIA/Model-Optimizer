@@ -15,6 +15,8 @@
 
 """GPU/distributed tests for ``modelopt.torch.utils.distributed``."""
 
+import os
+import pickle
 from functools import partial
 
 import pytest
@@ -25,7 +27,14 @@ from _test_utils.torch.transformers_models import get_tiny_llama
 from torch.distributed.checkpoint.state_dict import StateDictOptions, set_model_state_dict
 from torch.distributed.tensor import DTensor
 
-from modelopt.torch.utils.distributed import fsdp2_wrap
+from modelopt.torch.nas.traced_hp import TracedHp
+from modelopt.torch.utils.distributed import (
+    allgather,
+    broadcast,
+    fsdp2_wrap,
+    gather_bytes,
+    gather_state_dicts,
+)
 
 VOCAB_SIZE = 32
 N_EXPERTS = 4
@@ -129,3 +138,81 @@ def test_fsdp2_wrap_moves_ignored_params_to_device(dist_workers, cpu_offload):
     dist_workers.run(
         partial(_test_fsdp2_wrap_moves_ignored_params_to_device, cpu_offload=cpu_offload)
     )
+
+
+def _test_broadcast_allgather_objects(rank, size):
+    hp = TracedHp([1, 2, 4]) if rank == 0 else None
+    out = broadcast([True, {"latency": 1.5}, hp], src=0)
+    assert out[0] is True
+    assert out[1] == {"latency": 1.5}
+    assert out[2].choices == [1, 2, 4]
+    assert allgather({"rank": rank}) == [{"rank": r} for r in range(size)]
+
+
+def test_broadcast_allgather_objects(dist_workers):
+    dist_workers.run(_test_broadcast_allgather_objects)
+
+
+def _test_gather_bytes(rank, size):
+    data = bytes([rank + 1]) * (5 + 3 * rank) if rank else b""
+    out = gather_bytes(data, dst=1, group=None, chunk_bytes=4)
+    if rank == 1:
+        assert out == [
+            bytearray(b"" if r == 0 else bytes([r + 1]) * (5 + 3 * r)) for r in range(size)
+        ]
+    else:
+        assert out is None
+
+
+def test_gather_bytes(need_2_gpus, dist_workers):
+    dist_workers.run(_test_gather_bytes)
+
+
+class _Gadget:
+    def __init__(self, marker):
+        self.marker = marker
+
+    def __reduce__(self):
+        return (os.mkdir, (self.marker,))
+
+
+def _test_gather_state_dicts(rank, size):
+    out = list(gather_state_dicts({f"w{rank}": torch.full((2,), float(rank))}, dst=0))
+    if rank == 0:
+        assert [list(d) for d in out] == [[f"w{r}"] for r in range(size)]
+        assert torch.equal(out[1]["w1"], torch.ones(2))
+    else:
+        assert out == []
+
+
+def test_gather_state_dicts(need_2_gpus, dist_workers):
+    dist_workers.run(_test_gather_state_dicts)
+
+
+def _test_gather_state_dicts_rejects_gadget(rank, size, marker, force_no_weights_only):
+    if force_no_weights_only:
+        os.environ["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] = "1"
+    # A non-root peer sends a pickle gadget; the root must refuse it without running it.
+    state = {"w": _Gadget(marker)} if rank == 1 else {"w": torch.zeros(1)}
+    gathered = gather_state_dicts(state, dst=0)
+    if rank == 0:
+        with pytest.raises(pickle.UnpicklingError):
+            list(gathered)
+        assert not os.path.exists(marker)
+    else:
+        assert list(gathered) == []
+
+
+@pytest.mark.parametrize("force_no_weights_only", [False, True])
+def test_gather_state_dicts_rejects_gadget(
+    need_2_gpus, dist_workers, tmp_path, force_no_weights_only
+):
+    marker = str(tmp_path / "gadget_ran")
+    dist_workers.run(
+        partial(
+            _test_gather_state_dicts_rejects_gadget,
+            marker=marker,
+            force_no_weights_only=force_no_weights_only,
+        )
+    )
+    assert not os.path.exists(marker)

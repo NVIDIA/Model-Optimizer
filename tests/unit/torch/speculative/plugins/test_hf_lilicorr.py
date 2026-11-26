@@ -38,7 +38,7 @@ import modelopt.torch.speculative as mtsp
 from modelopt.torch.speculative.config import DFLASH_DEFAULT_CFG
 from modelopt.torch.speculative.plugins.hf_dflash import HFDFlashModel
 from modelopt.torch.speculative.plugins.hf_lilicorr import HFLiLiCorrModel
-from modelopt.torch.speculative.plugins.modeling_dflash import DFlashModule
+from modelopt.torch.speculative.plugins.modeling_dflash import DFlashBaseModelOutput, DFlashModule
 from modelopt.torch.speculative.plugins.modeling_lilicorr import LiLiCorrModule
 
 BLOCK_SIZE = 4
@@ -269,7 +269,7 @@ class TestLiLiCorrForward:
         assert out.loss.dim() == 0
         assert torch.isfinite(out.loss)
 
-        metrics = out.lilicorr_metrics
+        metrics = out.draft_metrics
         for key in (
             "origin_loss",
             "lilicorr_loss",
@@ -285,15 +285,41 @@ class TestLiLiCorrForward:
         for name, expected in VARIANTS[variant].items():
             assert metrics[f"lilicorr_{name}"] == expected
 
+    def test_weight_metrics_ignore_the_global_default_dtype(self):
+        """The reported weights are the configured ones, whatever ``set_default_dtype`` is.
+
+        They are built by ``torch.full``, which takes the global default unless told
+        otherwise: under float16 a configured 1e-8 would report as 0 while the objective
+        still trains with it. The model is built first and the default changed only around
+        the forward, as a script that sets it once at import would leave things.
+
+        Only these four are pinned. The rest of the dict, and the loss itself, follow the
+        dtype the step computes in, which this test does not constrain.
+        """
+        model = _converted(variant="base")
+        model.train()
+        model.dflash_lilicorr_w_cal = 1e-8
+        batch = _make_batch(model.dflash_config.vocab_size)
+        names = ["lilicorr_w_ce", "lilicorr_w_margin", "lilicorr_w_pen", "lilicorr_w_cal"]
+        previous = torch.get_default_dtype()
+        try:
+            for default in (torch.float16, torch.float64):
+                torch.set_default_dtype(default)
+                metrics = model(**batch).draft_metrics
+                assert [metrics[n].dtype for n in names] == [torch.float32] * 4, default
+                assert metrics["lilicorr_w_cal"].item() == pytest.approx(1e-8, rel=1e-6)
+        finally:
+            torch.set_default_dtype(previous)
+
     @pytest.mark.parametrize("variant", list(VARIANTS))
     def test_loss_is_exactly_origin_plus_lilicorr(self, variant):
         """The parity check the training recipe relies on: no outer multiplier."""
         model = _converted(variant=variant)
         model.train()
         out = model(**_make_batch(model.dflash_config.vocab_size))
-        metrics = out.lilicorr_metrics
+        metrics = out.draft_metrics
         assert out.loss.item() == pytest.approx(
-            metrics["origin_loss"] + metrics["lilicorr_loss"], abs=1e-5
+            (metrics["origin_loss"] + metrics["lilicorr_loss"]).item(), abs=1e-5
         )
 
     def test_hinge_only_active_in_the_margin_variant(self):
@@ -301,20 +327,20 @@ class TestLiLiCorrForward:
         base = _converted(variant="base")
         base.train()
         assert (
-            base(**_make_batch(base.dflash_config.vocab_size)).lilicorr_metrics["lilicorr_margin"]
+            base(**_make_batch(base.dflash_config.vocab_size)).draft_metrics["lilicorr_margin"]
             == 0.0
         )
 
         margin = _converted(variant="margin")
         margin.train()
-        metrics = margin(**_make_batch(margin.dflash_config.vocab_size)).lilicorr_metrics
+        metrics = margin(**_make_batch(margin.dflash_config.vocab_size)).draft_metrics
         # The hinge is relu(margin - gap) on an untrained head, so it is active.
         assert metrics["lilicorr_margin"] > 0.0
 
     def test_penalty_term_is_active(self):
         model = _converted()
         model.train()
-        metrics = model(**_make_batch(model.dflash_config.vocab_size)).lilicorr_metrics
+        metrics = model(**_make_batch(model.dflash_config.vocab_size)).draft_metrics
         assert metrics["lilicorr_penalty"] > 0.0
 
     @pytest.mark.parametrize("w_cal", [0.0, 0.5])
@@ -324,14 +350,16 @@ class TestLiLiCorrForward:
         # term has supervised slots to be positive on.
         model = _converted(topk=VOCAB_SIZE, dflash_lilicorr_w_cal=w_cal)
         model.train()
-        metrics = model(**_make_batch(model.dflash_config.vocab_size)).lilicorr_metrics
+        metrics = model(**_make_batch(model.dflash_config.vocab_size)).draft_metrics
         assert metrics["lilicorr_w_cal"] == w_cal
-        assert (metrics["lilicorr_calibration"] > 0.0) is (w_cal > 0.0)
+        assert bool(metrics["lilicorr_calibration"] > 0.0) is (w_cal > 0.0)
         weights = VARIANTS["base"]
-        assert metrics["lilicorr_loss"] == pytest.approx(
-            weights["w_ce"] * metrics["lilicorr_ce"]
-            + weights["w_pen"] * metrics["lilicorr_penalty"]
-            + w_cal * metrics["lilicorr_calibration"],
+        assert metrics["lilicorr_loss"].item() == pytest.approx(
+            (
+                weights["w_ce"] * metrics["lilicorr_ce"]
+                + weights["w_pen"] * metrics["lilicorr_penalty"]
+                + w_cal * metrics["lilicorr_calibration"]
+            ).item(),
             abs=1e-5,
         )
 
@@ -347,7 +375,9 @@ class TestLiLiCorrForward:
         inputs = {
             "candidate_ids": candidate_ids,
             "anchor_positions": torch.tensor([[0, BLOCK_SIZE]]),
-            "target_logits": target_logits,
+            "base_outputs": DFlashBaseModelOutput(
+                target_hidden=torch.zeros(1, SEQ_LEN, 1), logits=target_logits
+            ),
         }
         at_target = model._candidate_target_logits(**inputs, requested_by="test")
 
@@ -421,9 +451,9 @@ class TestLiLiCorrForward:
 
         assert offline_out.loss.item() == pytest.approx(online_out.loss.item(), abs=1e-5)
         for term in ("lilicorr_penalty", "lilicorr_calibration"):
-            assert online_out.lilicorr_metrics[term] > 0.0
-            assert offline_out.lilicorr_metrics[term] == pytest.approx(
-                online_out.lilicorr_metrics[term], abs=1e-5
+            assert online_out.draft_metrics[term] > 0.0
+            assert offline_out.draft_metrics[term].item() == pytest.approx(
+                online_out.draft_metrics[term].item(), abs=1e-5
             )
 
     @pytest.mark.parametrize(
@@ -447,8 +477,8 @@ class TestLiLiCorrForward:
         out = model(**_make_batch(model.dflash_config.vocab_size))
 
         assert torch.isfinite(out.loss), degenerate
-        for name, value in out.lilicorr_metrics.items():
-            assert math.isfinite(value), f"{name} is {value} ({degenerate})"
+        for name, value in out.draft_metrics.items():
+            assert torch.isfinite(value), f"{name} is {value} ({degenerate})"
 
     def test_gradient_reaches_head_and_drafter_body(self):
         """Co-training: the lattice terms must reach the backbone, not only the head.
@@ -490,14 +520,14 @@ class TestLiLiCorrForward:
         """
         wide = _converted(topk=VOCAB_SIZE)
         wide.train()
-        metrics = wide(**_make_batch(wide.dflash_config.vocab_size)).lilicorr_metrics
+        metrics = wide(**_make_batch(wide.dflash_config.vocab_size)).draft_metrics
         assert metrics["lilicorr_slot_gt_in_lattice"] == 1.0
         assert metrics["lilicorr_oracle_prefix"] == float(BLOCK_SIZE - 1)
         assert metrics["lilicorr_zero_prefix_rate"] == 0.0
 
         narrow = _converted(topk=CANDIDATE_TOPK)
         narrow.train()
-        metrics = narrow(**_make_batch(narrow.dflash_config.vocab_size)).lilicorr_metrics
+        metrics = narrow(**_make_batch(narrow.dflash_config.vocab_size)).draft_metrics
         assert metrics["lilicorr_slot_gt_in_lattice"] < 1.0
         assert metrics["lilicorr_zero_prefix_rate"] > 0.0
 
@@ -529,7 +559,7 @@ class TestLiLiCorrForward:
         model.eval()
         batch = _make_batch(model.dflash_config.vocab_size)
         out = model(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"])
-        assert not hasattr(out, "lilicorr_metrics") or out.get("lilicorr_metrics") is None
+        assert not hasattr(out, "draft_metrics") or out.get("draft_metrics") is None
 
     def test_pseudo_speculative_generate_still_runs(self):
         """AR validation falls back to the backbone; it must not raise."""
@@ -656,7 +686,7 @@ class TestLiLiCorrOptimization:
             out = model(**batch)
             out.loss.backward()
             optimizer.step()
-            losses.append(out.lilicorr_metrics["lilicorr_loss"])
+            losses.append(out.draft_metrics["lilicorr_loss"].item())
 
         assert all(math.isfinite(loss) for loss in losses), losses
         # A trend, not two endpoints. The DFlash forward draws its own masks, so successive

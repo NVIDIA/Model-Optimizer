@@ -84,7 +84,7 @@ Step 3: Configure YAML files
 Update the main model config YAML:
 
 - Set `descriptor` to match the name used in `@ModelDescriptorFactory.register_decorator("your_model_name")`
-- See example: [llama_3_1_8b_instruct.yaml](../../../../tests/gpu/torch/puzzletron/resources/configs/llama_3_1_8b_instruct/llama_3_1_8b_instruct.yaml)
+- See example: [Llama-3.1-8B-Instruct.yaml](../../../../tests/gpu/torch/puzzletron/resources/configs/meta-llama/Llama-3.1-8B-Instruct/Llama-3.1-8B-Instruct.yaml)
 
 Update pruning YAML files (`ffn_pruning.yaml`, `expert_pruning.yaml`, etc.):
 
@@ -92,7 +92,7 @@ Update pruning YAML files (`ffn_pruning.yaml`, `expert_pruning.yaml`, etc.):
 - Set `layer_descriptor._target_` to your layer descriptor class
 - Set `hook_class` to the activation hook for scoring
 - Set `target_layer` in `activation_hooks_kwargs` to the layer name for hook attachment
-- See examples in [configs/llama_3_1_8b_instruct/pruning/](../../../../tests/gpu/torch/puzzletron/resources/configs/llama_3_1_8b_instruct/pruning/)
+- See examples in [configs/meta-llama/Llama-3.1-8B-Instruct/pruning/](../../../../tests/gpu/torch/puzzletron/resources/configs/meta-llama/Llama-3.1-8B-Instruct/pruning/)
 
 ## End-to-end example
 

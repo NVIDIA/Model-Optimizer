@@ -52,18 +52,17 @@
 
 """Translate ModelOpt CLI flags to environment variables, then delegate to vLLM.
 
-Run this example directly with python3. When fakequant settings are present, the
-launcher selects FakeQuantWorker unless --worker-cls explicitly overrides it.
-Without fakequant settings, the launcher delegates to stock vLLM.
+Run this example directly with python3. When fakequant settings or local export
+sidecars are present, the launcher selects FakeQuantWorker unless --worker-cls
+explicitly overrides it. Otherwise it delegates to stock vLLM.
 """
 
 import os
 import sys
 from pathlib import Path
 
-import vllm
-from packaging import version
 from vllm.entrypoints.cli.main import main as vllm_main
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm_mlflow_utils import MLFLOW_ENV_VARS, add_mlflow_args, resolve_mlflow_args
 
 
@@ -72,13 +71,6 @@ def _is_missing_entrypoint(error: ModuleNotFoundError, entrypoint: str) -> bool:
     return missing_module is not None and (
         missing_module == entrypoint or entrypoint.startswith(f"{missing_module}.")
     )
-
-
-vllm_version = version.parse(vllm.__version__)
-if vllm_version <= version.parse("0.11.0"):
-    from vllm.utils import FlexibleArgumentParser
-else:
-    from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 
 # Env vars to copy from the driver to Ray workers (must match fakequant_worker / vllm_ptq_utils).
@@ -168,7 +160,8 @@ def _add_fakequant_args(parser) -> None:
         "--modelopt-quant-file-path",
         default=os.environ.get("QUANT_FILE_PATH"),
         help=(
-            "Path to quantizer_state.pth in a Megatron (MCore) vLLM fakequant export "
+            "Path to quantizer_state.pth in a Megatron (MCore) vLLM fakequant export. "
+            "Auto-detected from a local model directory with its recipe YAML if omitted "
             "[env: QUANT_FILE_PATH]"
         ),
     )
@@ -176,14 +169,16 @@ def _add_fakequant_args(parser) -> None:
         "--modelopt-state-path",
         default=os.environ.get("MODELOPT_STATE_PATH"),
         help=(
-            "Path to vllm_fq_modelopt_state.pth in an HF vLLM fakequant export "
-            "[env: MODELOPT_STATE_PATH]"
+            "Path to full ModelOpt state (vllm_fq_modelopt_state.pth) in an HF "
+            "vLLM fakequant export. Auto-detected from a local model directory "
+            "if omitted [env: MODELOPT_STATE_PATH]"
         ),
     )
     g.add_argument(
         "--modelopt-recipe-path",
         default=os.environ.get("RECIPE_PATH"),
-        help="Path to a ModelOpt PTQ recipe YAML [env: RECIPE_PATH]",
+        help="Path to a PTQ recipe YAML or exported quant_recipe.yaml. "
+        "Auto-detected from a local model directory when omitted [env: RECIPE_PATH]",
     )
     g.add_argument(
         "--modelopt-quant-dataset",
@@ -212,6 +207,33 @@ def _fakequant_requested(modelopt_args) -> bool:
         or modelopt_args.modelopt_state_path
         or modelopt_args.modelopt_recipe_path
     )
+
+
+def _autodetect_fakequant_paths(args) -> None:
+    """Use local export sidecars when no quantization settings were provided."""
+    manual_ptq_requested = any(
+        (
+            args.modelopt_quant_cfg,
+            args.modelopt_kv_quant_cfg,
+            args.modelopt_quant_file_path,
+            args.modelopt_recipe_path,
+            args.modelopt_state_path,
+        )
+    )
+    if manual_ptq_requested:
+        return
+
+    model_dir = Path(args.model)
+    state_path = model_dir / "vllm_fq_modelopt_state.pth"
+    if state_path.is_file():
+        args.modelopt_state_path = str(state_path)
+        return
+
+    quant_file_path = model_dir / "quantizer_state.pth"
+    recipe_path = model_dir / "quant_recipe.yaml"
+    if quant_file_path.is_file() and recipe_path.is_file():
+        args.modelopt_quant_file_path = str(quant_file_path)
+        args.modelopt_recipe_path = str(recipe_path)
 
 
 def _apply_fakequant_env(args, rest_argv: list) -> None:
@@ -317,12 +339,13 @@ def main():
     # Settled before the engine starts, so an unusable tracking URI fails here rather than
     # in a worker that has already loaded the weights.
     modelopt_args.model = _find_serve_model(rest_argv) or "unknown-model"
+    _autodetect_fakequant_paths(modelopt_args)
     use_fakequant = _fakequant_requested(modelopt_args)
     if use_fakequant:
         # vLLM's compile cache is not keyed on serve-time fake quantization.
         os.environ.setdefault("VLLM_DISABLE_COMPILE_CACHE", "1")
-        # MLflow names the default experiment from these effective settings.
         _apply_fakequant_env(modelopt_args, rest_argv)
+    # MLflow names the default experiment from these effective settings.
     resolve_mlflow_args(modelopt_args, modelopt_parser)
     if use_fakequant:
         # Fakequant only actually runs inside FakeQuantWorker; default to it here so

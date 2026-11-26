@@ -26,6 +26,7 @@ training objective, and the export format against the SGLang/vLLM
 
 import json
 from copy import deepcopy
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -312,7 +313,7 @@ class TestDFlash2Forward:
         out = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
         # Carried out on the forward output, not left on a private attribute, so the
         # trainer can log them; and kept as tensors to avoid a per-step CPU-GPU sync.
-        metrics = out["selector_metrics"]
+        metrics = out["draft_metrics"]
         for key in ("selector_accuracy", "selector_coverage"):
             assert torch.is_tensor(metrics[key])
             assert 0.0 <= metrics[key].item() <= 1.0
@@ -352,23 +353,37 @@ class TestDFlash2Forward:
     def test_overfits_a_single_batch(self):
         """A few steps on one batch drive backbone and selector accuracy up.
 
-        Guards the target/predecessor alignment: a misaligned selector objective still
-        produces a finite decreasing loss, but its accuracy does not reach 1.
+        Guards the selector's target alignment: with the gold token off by a position the
+        loss still falls, but the backbone's top-k rarely holds that token, so coverage
+        stays low.
         """
-        model = get_tiny_llama(num_hidden_layers=4)
+        # float32: CPU bf16 matmuls are emulated (~8x slower); this tiny model does not need bf16
+        model = get_tiny_llama(num_hidden_layers=4, dtype=torch.float32)
         mtsp.convert(model, [("dflash", _get_dflash2_config())])
+        # fp32: CPUs without AVX-512 have no fast bf16 matmul, and the draft keeps Qwen3's
+        # default 22016-wide MLP.
+        model.float()
         model.train()
 
         input_ids, attention_mask, labels = _make_batch(model.dflash_config.vocab_size)
         optimizer = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=5e-3)
-        for _ in range(60):
+        for _ in range(30):  # both accuracies pass 0.9 by step ~21
             out = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
             optimizer.zero_grad()
             out.loss.backward()
             optimizer.step()
 
         assert out.train_acc[0][0] > 0.9
-        assert out["selector_metrics"]["selector_accuracy"].item() > 0.9
+        assert out["draft_metrics"]["selector_accuracy"].item() > 0.9
+        assert out["draft_metrics"]["selector_coverage"].item() > 0.9
+
+        # Candidate selection is a topk over draft logits; check it in bf16, the training dtype.
+        model.to(torch.bfloat16)
+        torch.manual_seed(0)
+        with torch.no_grad():
+            out = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+        assert out["draft_metrics"]["selector_accuracy"].item() > 0.9
+        assert out["draft_metrics"]["selector_coverage"].item() > 0.9
 
 
 class TestCandidateSelectorAlignment:
@@ -383,9 +398,11 @@ class TestCandidateSelectorAlignment:
             torch.nn.init.normal_(selector.successor_codebook, std=0.5)
         return selector
 
-    def _selector_terms(self, selector, target_ids, candidate_ids):
+    def _selector_terms(self, selector, target_ids, candidate_ids, loss_weights=None):
         """Drive HFDFlash2Model._selector_loss with a hand-built candidate set."""
         b, length, k = candidate_ids.shape
+        supervised = torch.ones(b, length, dtype=torch.double)
+        weights = supervised if loss_weights is None else loss_weights
         model = HFDFlash2Model.__new__(HFDFlash2Model)
         model.dflash_module = type("_M", (), {"candidate_selector": selector})()
         logits = torch.zeros(b, length, 32, dtype=torch.double)
@@ -396,9 +413,13 @@ class TestCandidateSelectorAlignment:
             model,
             logits,
             target_ids,
-            torch.randn(b, length, 8, dtype=torch.double),
+            torch.randn(
+                b, length, 8, generator=torch.Generator().manual_seed(1), dtype=torch.double
+            ),
             torch.zeros(b, length, dtype=torch.long),
-            torch.ones(b, length, dtype=torch.double),
+            supervised,
+            weights,
+            weights.sum(),
         )
 
     def test_a_miss_carries_no_selector_gradient(self):
@@ -438,6 +459,26 @@ class TestCandidateSelectorAlignment:
         selector.zero_grad()
         loss.backward()
         assert selector.successor_codebook.grad.abs().sum() > 0.0
+
+    def test_positions_weigh_like_the_backbone_and_misses_stay_in_the_denominator(self):
+        """The term is the backbone-weighted mean over every supervised position.
+
+        A miss adds nothing to the numerator but keeps its weight in the denominator, so
+        the term does not grow as backbone recall drops.
+        """
+        selector = self._selector(vocab=32, top_k=2)
+        candidates = torch.tensor([[[5, 6], [5, 6], [5, 6]]])
+        targets = torch.tensor([[5, 6, 9]])  # two covered positions, one miss
+        weights = torch.tensor([[1.0, 3.0, 2.0]], dtype=torch.double)
+
+        loss, _, _ = self._selector_terms(selector, targets, candidates, weights)
+        per_position = [
+            self._selector_terms(selector, targets, candidates, torch.eye(3)[i : i + 1].double())[0]
+            for i in range(3)
+        ]
+        assert float(per_position[2]) == 0.0
+        expected = sum(w * term for w, term in zip(weights[0], per_position)) / weights.sum()
+        torch.testing.assert_close(loss, expected)
 
     def test_greedy_path_position_zero_is_seeded_by_the_anchor(self):
         """``greedy_path`` position 0 scores against the anchor, i.e. block offset 1.
@@ -525,6 +566,59 @@ class TestDFlash2BlockObjective:
         """1 - q(gold) is a weighted mean of probabilities, so it cannot leave [0, 1]."""
         loss = self._loss(dflash_lk_loss_type="tv", dflash_selector_loss_alpha=0.0)
         assert 0.0 <= loss <= 1.0
+
+    @pytest.mark.parametrize("loss_type", ["ce", "tv", "lambda"])
+    def test_a_step_with_nothing_to_train_is_gated(self, monkeypatch, loss_type):
+        """Every objective takes the zero loss when the position weights sum to <= 1.
+
+        The one label sits three positions after the anchor, so its decay weight is < 1.
+        """
+        config = _get_dflash2_config(selector_loss_alpha=0.0)
+        config.update(
+            dflash_lk_loss_type=loss_type,
+            dflash_loss_objective="decay",
+            dflash_loss_decay_factor=4.0,
+        )
+        model = get_tiny_llama(num_hidden_layers=4)
+        mtsp.convert(model, [("dflash", config)])
+        model.float().train()
+        monkeypatch.setattr(
+            model,
+            "_sample_anchor_positions",
+            lambda *_: (torch.tensor([[1]]), torch.tensor([[True]])),
+        )
+        input_ids = _make_batch(model.dflash_config.vocab_size)[0][:1]
+        loss_mask = torch.zeros(1, SEQ_LEN)
+        loss_mask[0, 4] = 1.0
+        out = model(
+            input_ids=input_ids, attention_mask=torch.ones_like(input_ids), loss_mask=loss_mask
+        )
+        assert out.loss.item() == 0.0
+
+    @pytest.mark.parametrize(
+        ("loss_type", "distill", "ce_grad"),
+        [("ce", False, True), ("tv", False, True), ("lambda", False, True), ("ce", True, False)],
+        ids=["ce", "tv", "lambda", "kd"],
+    )
+    def test_cross_entropy_gradient_follows_the_objective(self, loss_type, distill, ce_grad):
+        """The per-token CE keeps its graph exactly when the objective backpropagates through it.
+
+        D-PACE reads it first, under no_grad. A tv or lambda objective computed on that would
+        train the backbone through the selector alone; KD would hold a vocab-wide graph unused.
+        """
+        config = _get_dflash2_config()
+        config.update(
+            dflash_lk_loss_type=loss_type,
+            dflash_self_logit_distillation=distill,
+            dflash_loss_objective="dpace",
+        )
+        model = get_tiny_llama(num_hidden_layers=4)
+        mtsp.convert(model, [("dflash", config)])
+        model.float().train()
+        input_ids, attention_mask, labels = _make_batch(model.dflash_config.vocab_size)
+        with patch.object(model, "_compute_loss", wraps=model._compute_loss) as compute_loss:
+            model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+        assert compute_loss.call_args.args[0].ce("final").requires_grad is ce_grad
 
     @pytest.mark.parametrize("loss_type", ["tv", "lambda"])
     def test_distillation_conflict_is_rejected(self, loss_type):

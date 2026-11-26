@@ -21,8 +21,6 @@ Supported adapters:
   * specdec_multilingual_prompt: OpenAI-style text prompts from NVIDIA's dataset.
 """
 
-from __future__ import annotations
-
 import argparse
 import hashlib
 import json
@@ -32,12 +30,9 @@ import shutil
 import subprocess
 import tempfile
 from collections import Counter
+from collections.abc import Iterator
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    from collections.abc import Iterator
-
+from typing import Any
 
 THINKING_SUFFIX = (
     "\n\nAnswer using the following format:\n\n<think>\nYour reasoning grounded in the visual input.\n"

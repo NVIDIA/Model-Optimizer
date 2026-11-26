@@ -14,12 +14,17 @@
 # limitations under the License.
 
 import json
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
 import torch
+from _test_utils.torch.distributed.utils import bounded_collectives
+from _test_utils.torch.transformers_models import get_tiny_tokenizer
+from pydantic import ValidationError, model_validator
 from torch.utils.data import DataLoader
 
+from modelopt.torch.opt.config import ModeloptBaseConfig
 from modelopt.torch.utils import dataset_utils
 from modelopt.torch.utils.dataset_utils import (
     DATASET_COMBOS,
@@ -33,6 +38,7 @@ from modelopt.torch.utils.dataset_utils import (
     get_max_batch_size,
     prepare_messages_for_chat_template,
 )
+from modelopt.torch.utils.distributed import DistributionPlan, set_distribution_plan
 
 
 def test_prepare_messages_for_chat_template():
@@ -57,6 +63,33 @@ def test_prepare_messages_for_chat_template():
         )
         is messages
     )
+
+
+@pytest.mark.parametrize("include_labels", [False, True])
+def test_calibration_padding_avoids_masked_gradient_rows(monkeypatch, include_labels):
+    tokenizer = get_tiny_tokenizer()
+    monkeypatch.setattr(
+        dataset_utils, "get_dataset_samples", lambda *args, **kwargs: ["a", "a b c"]
+    )
+    batch = next(
+        iter(
+            get_dataset_dataloader(
+                tokenizer=tokenizer,
+                batch_size=2,
+                num_samples=2,
+                include_labels=include_labels,
+                device="cpu",
+            )
+        )
+    )
+    mask = batch["attention_mask"].bool()
+    assert tokenizer.padding_side == "left"
+    if include_labels:
+        causal_mask = torch.ones(mask.shape[-1], mask.shape[-1], dtype=torch.bool).tril()
+        assert (causal_mask & mask[:, None, :]).any(dim=-1).all()
+        assert torch.equal(batch["labels"][~mask], torch.full_like(batch["labels"][~mask], -100))
+    else:
+        assert not mask[0, 0] and mask[0, -1]
 
 
 def setup_test_data():
@@ -263,17 +296,19 @@ def test_disable_use_cache_with_existing_attr(prev_value):
 
     with _disable_use_cache(model):
         assert model.config.use_cache is False
+        model.config.use_cache = not prev_value
 
     assert model.config.use_cache is prev_value
 
 
 def test_disable_use_cache_without_existing_attr():
-    """Config that lacks `use_cache`: set to False inside, attribute removed on exit (no leak)."""
+    """Step-3.5 reads a missing cache flag directly; do not leak it after calibration."""
     model = torch.nn.Linear(4, 4)
     model.config = _Config()
+    model.config.model_type = "step3p5"
     assert not hasattr(model.config, "use_cache")
 
-    with _disable_use_cache(model):
+    with _disable_use_cache(model, for_layerwise_capture=True):
         assert model.config.use_cache is False
 
     assert not hasattr(model.config, "use_cache")
@@ -299,9 +334,11 @@ def test_disable_use_cache_with_nested_text_config_without_existing_attr():
     """Nested text config `use_cache` is removed if it was added by the context."""
     model = torch.nn.Linear(4, 4)
     model.config = _Config()
+    model.config.model_type = "step3p7"
     model.config.text_config = _Config()
+    model.config.text_config.model_type = "step3p5"
 
-    with _disable_use_cache(model):
+    with _disable_use_cache(model, for_layerwise_capture=True):
         assert model.config.use_cache is False
         assert model.config.text_config.use_cache is False
 
@@ -318,7 +355,8 @@ def test_iter_use_cache_configs_deduplicates_text_config_alias():
     assert list(_iter_use_cache_configs(model)) == [model.config]
 
 
-def test_forward_loop_runs_under_disabled_use_cache():
+@pytest.mark.parametrize("has_cache_flag", [True, False])
+def test_forward_loop_runs_under_disabled_use_cache(has_cache_flag):
     """`_forward_loop` runs forward on every batch and restores `use_cache` on exit."""
     seen_use_cache: list[bool] = []
 
@@ -326,7 +364,8 @@ def test_forward_loop_runs_under_disabled_use_cache():
         def __init__(self):
             super().__init__()
             self.config = _Config()
-            self.config.use_cache = True
+            if has_cache_flag:
+                self.config.use_cache = True
 
         def forward(self, **kwargs):
             seen_use_cache.append(self.config.use_cache)
@@ -342,23 +381,89 @@ def test_forward_loop_runs_under_disabled_use_cache():
     _forward_loop(model, loader)
 
     assert seen_use_cache == [False, False, False]
-    assert model.config.use_cache is True
+    if has_cache_flag:
+        assert model.config.use_cache is True
+    else:
+        assert not hasattr(model.config, "use_cache")
 
 
-def test_disable_use_cache_restores_on_exception():
+@pytest.mark.parametrize("world_size", [None, 1, 2], ids=["no-plan", "one-rank", "two-ranks"])
+def test_forward_loop_raises_out_of_memory_for_a_model_over_several_ranks(world_size):
+    """A model distributed over several ranks can run collectives in its forward, so a rank must not
+    retry a smaller batch after running out of memory: it would run more forwards than its peers.
+    Any other model splits the batch, as before."""
+    batch_sizes = []
+
+    class _Model(torch.nn.Module):
+        def forward(self, input_ids):
+            batch_sizes.append(input_ids.shape[0])
+            if input_ids.shape[0] > 2:
+                raise torch.cuda.OutOfMemoryError
+
+    model = _Model()
+    if world_size is not None:
+        set_distribution_plan(model, DistributionPlan(world_size, dense="fsdp"))
+    loader = DataLoader([{"input_ids": torch.zeros(8, dtype=torch.long)}] * 4, batch_size=4)
+
+    if world_size == 2:
+        with pytest.raises(torch.cuda.OutOfMemoryError):
+            _forward_loop(model, loader)
+        assert batch_sizes == [4]
+    else:
+        _forward_loop(model, loader)
+        assert batch_sizes == [4, 2, 2]
+
+
+@pytest.mark.parametrize("prev_value", [True, False])
+def test_disable_use_cache_restores_on_exception(prev_value):
     """Restore must run even if the with-block raises."""
     model = torch.nn.Linear(4, 4)
     model.config = _Config()
-    model.config.use_cache = True
+    model.config.use_cache = prev_value
 
     with pytest.raises(RuntimeError, match="boom"), _disable_use_cache(model):
         assert model.config.use_cache is False
+        model.config.use_cache = not prev_value
         raise RuntimeError("boom")
 
+    assert model.config.use_cache is prev_value
+
+
+class _ReadOnlyCacheConfig:
+    @property
+    def use_cache(self):
+        return True
+
+
+class _ValidatedCacheConfig(ModeloptBaseConfig):
+    use_cache: bool = True
+
+    @model_validator(mode="after")
+    def require_cache(self):
+        if not self.use_cache:
+            raise ValueError("cache required")
+        return self
+
+
+@pytest.mark.parametrize(
+    ("config_cls", "error"),
+    [(_ReadOnlyCacheConfig, AttributeError), (_ValidatedCacheConfig, ValidationError)],
+)
+def test_disable_use_cache_restores_on_setup_error(config_cls, error):
+    model = torch.nn.Linear(4, 4)
+    model.config = _Config()
+    model.config.use_cache = True
+    model.config.text_config = config_cls()
+
+    with pytest.raises(error), _disable_use_cache(model):
+        pytest.fail("A setup error should prevent entering the context")
+
     assert model.config.use_cache is True
+    assert model.config.text_config.use_cache is True
 
 
-def test_get_max_batch_size_oom_retry_shrinks_input():
+@pytest.mark.parametrize("custom_probe", [False, True])
+def test_get_max_batch_size_oom_retry_shrinks_input(custom_probe):
     """On OOM, target_input must be re-expanded to the halved batch size.
 
     Regression test: previously target_input was built once and never shrunk,
@@ -378,9 +483,16 @@ def test_get_max_batch_size_oom_retry_shrinks_input():
             raise torch.cuda.OutOfMemoryError
 
     model = Mock(spec=torch.nn.Module)
+    model.config = _Config()
+
+    def forward_step(m, x):
+        m.config.use_cache = True
+        fake_call(x)
+
     # get_max_batch_size calls the module (model(...)) so FSDP2 hooks fire, not model.forward,
     # so route the mock's __call__ via side_effect.
-    model.side_effect = fake_call
+    if not custom_probe:
+        model.side_effect = fake_call
     model.__class__.__name__ = "DummyModel"  # not enc/dec
 
     free_before = 1000
@@ -400,12 +512,76 @@ def test_get_max_batch_size_oom_retry_shrinks_input():
             model,
             max_sample_length=seq_len,
             sample_input_single_batch=sample_input,
+            forward_step=forward_step if custom_probe else None,
         )
 
     # Model calls: probe(1), retry-at-target(10), retry-after-halve(5)
     assert seen_batch_sizes == [1, 10, 5]
     # Final batch is 5 -> regulated to 4 (5 // 4 * 4 = 4).
     assert result == 4
+    assert not hasattr(model.config, "use_cache")
+
+
+class _BatchSizeProbe(torch.nn.Module):
+    """Records the batch size of every forward."""
+
+    def __init__(self):
+        super().__init__()
+        self.batch_sizes = []
+
+    def forward(self, x):
+        self.batch_sizes.append(x.shape[0])
+
+
+def _batch_size_job(rank, world_size, planned):
+    model = _BatchSizeProbe()
+    if planned:
+        set_distribution_plan(model, DistributionPlan(world_size))
+    # A sample takes 100 bytes: rank 0's GPU has room for 4 of them, rank 1's for 10 (regulated to 8).
+    free = [400, 1000][rank]
+    # What one measurement reads: the rank's own GPU, or every visible one.
+    gpus = 1 if planned else 4
+    measured = []
+
+    def mem_get_info(device):
+        measured.append(device)
+        return (free if len(measured) <= gpus else free - 100, 0)
+
+    with (
+        # A rank left waiting in the reduction gives up in seconds.
+        bounded_collectives(),
+        patch("torch.cuda.empty_cache"),
+        patch(
+            "torch.cuda.get_device_properties",
+            return_value=SimpleNamespace(total_memory=10**12),
+        ),
+        patch("torch.cuda.device_count", return_value=4),
+        # A launcher that shows each rank one GPU: every rank computes on cuda:0.
+        patch("torch.cuda.current_device", return_value=0),
+        patch("torch.cuda.mem_get_info", side_effect=mem_get_info),
+        patch("torch.cuda.max_memory_allocated", return_value=0),
+    ):
+        batch_size = get_max_batch_size(
+            model, max_sample_length=8, sample_input_single_batch=torch.ones((1, 8))
+        )
+
+    if planned:
+        assert measured == [torch.device("cuda", 0)] * 2  # the GPU it computes on, not LOCAL_RANK
+        # One probe: an OOM retry would run more forwards on some ranks.
+        assert model.batch_sizes == [1]
+        assert batch_size == 4  # rank 0's
+    else:
+        assert measured == list(range(4)) * 2  # every visible GPU, as in a single process
+        assert batch_size == [4, 8][rank]  # its own
+
+
+@pytest.mark.parametrize("planned", [True, False], ids=["planned", "no-plan"])
+def test_get_max_batch_size_in_a_distributed_run(cpu_dist_workers, planned):
+    """Every rank must run the same number of calibration steps, so ranks agree on one batch size
+    for a model whose plan distributes it over them: the smallest any rank's GPU allows. A model
+    with no plan recorded, such as a Megatron model, is measured by each rank as a single process
+    measures it, and is not refused."""
+    cpu_dist_workers.run(_batch_size_job, planned=planned)
 
 
 def test_get_dataset_samples_with_unsupported_dataset(make_toy_hf_dataset):
@@ -1035,6 +1211,30 @@ class TestVLMShardedIterable:
         counts = self._counts(total=64, world=4, delivered=57)
         assert counts == [16, 16, 16, 16], counts
 
+    def test_accept_drops_rejected_items_and_pads_like_a_short_stream(self):
+        """With the stream capped at ``per_rank * world`` (as the loaders do), a rejected item is
+        never yielded and its rank pads instead, so every rank still yields ``per_rank`` items."""
+        from modelopt.torch.utils.vlm_dataset_utils import (
+            _HFDatasetsIterableWrapper,
+            _ShardedIterable,
+        )
+
+        base = _HFDatasetsIterableWrapper(list(range(20)), num_samples=20)
+        rejected = {5, 9}  # both on rank 1's stride (1, 5, 9, 13, 17)
+        shards = []
+        for r in range(4):
+            shard = _ShardedIterable(
+                base, rank=r, world=4, per_rank=5, accept=lambda x: None if x in rejected else x
+            )
+            if r == 1:
+                with pytest.warns(UserWarning, match="3 of 5 usable samples for rank 1"):
+                    shards.append(list(shard))
+            else:
+                shards.append(list(shard))
+        assert [len(s) for s in shards] == [5, 5, 5, 5]
+        assert not rejected & {x for s in shards for x in s}
+        assert shards[1] == [1, 13, 17, 17, 17]
+
     def test_stream_shorter_than_world_is_rejected(self):
         """Fewer samples than ranks would leave some ranks with nothing to forward."""
         from modelopt.torch.utils.vlm_dataset_utils import (
@@ -1045,3 +1245,38 @@ class TestVLMShardedIterable:
         base = _HFDatasetsIterableWrapper([], num_samples=0)
         with pytest.raises(RuntimeError, match="no calibration samples"):
             list(_ShardedIterable(base, rank=0, world=2, per_rank=1))
+
+
+def test_vlm_collate_inserts_image_token_a_text_only_template_drops(monkeypatch):
+    """A chat template that cannot render image parts must still leave one image placeholder."""
+    from PIL import Image
+
+    from modelopt.torch.utils import vlm_dataset_utils
+
+    example = {
+        "messages": [
+            {"role": "user", "content": [{"type": "image"}, {"type": "text", "text": "What?"}]}
+        ],
+        "image": Image.new("RGB", (8, 8)),
+    }
+    monkeypatch.setattr(vlm_dataset_utils, "_get_vlm_dataset", lambda *a, **k: [example])
+
+    class _Tokenizer:
+        def apply_chat_template(self, messages, **kwargs):
+            return messages[0]["content"] + "\n"  # str + list: what a text-only template does
+
+    seen = {}
+
+    class _Processor:
+        image_token = "<image>"
+        tokenizer = _Tokenizer()
+
+        def __call__(self, text, images, **kwargs):
+            seen["text"] = text
+            return {"input_ids": torch.zeros(1, 1, dtype=torch.long)}
+
+    loader = vlm_dataset_utils.get_vlm_dataset_dataloader(
+        dataset_name="scienceqa", processor=_Processor(), num_samples=1
+    )
+    next(iter(loader))
+    assert seen["text"] == ["<image>\nWhat?"]

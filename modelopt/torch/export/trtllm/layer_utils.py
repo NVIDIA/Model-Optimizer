@@ -26,7 +26,7 @@ import torch.nn as nn
 try:
     from transformers.activations import ACT2FN
 except Exception:
-    warn("Cannot find transformers package. Hugginface modules cannot be exported.")
+    warn("Cannot find transformers package. Hugging Face modules cannot be exported.")
 
 from modelopt.torch.models import is_moe
 from modelopt.torch.utils import distributed as dist

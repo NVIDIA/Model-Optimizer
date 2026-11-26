@@ -485,8 +485,10 @@ class FakeQuantMethod:
                     quantized_tensor, requires_grad=original_weight.requires_grad
                 )
             layer.weight = quantized_tensor
-            output = self.quant_method.apply(layer, x, bias)
-            layer.weight = original_weight
+            try:
+                output = self.quant_method.apply(layer, x, bias)
+            finally:
+                layer.weight = original_weight
         else:
             output = self.quant_method.apply(layer, x, bias)
         output = layer.output_quantizer(output)
@@ -505,12 +507,12 @@ def create_parallel_state():
     return ParallelState(dp_group, tp_group, ep_group)
 
 
-def _check_prequantized_quantizers_disabled(module: torch.nn.Module, names) -> None:
-    """Raise if a quantizer is enabled on a layer that is only supported as pass-through.
+def _supports_fake_quant_linear(module: torch.nn.Module) -> bool:
+    return type(module.quant_method) is vllm_linear.UnquantizedLinearMethod
 
-    Such a layer runs a vLLM method other than the plain unquantized one, typically because the
-    checkpoint is pre-quantized (e.g. FP8), so there is no high-precision weight to fake-quantize.
-    """
+
+def _check_unsupported_quantizers_disabled(module: torch.nn.Module, names) -> None:
+    """Raise if a pass-through layer has any enabled quantizers."""
     enabled = [name for name in names if getattr(module, name).is_enabled]
     if enabled:
         layer = (
@@ -519,32 +521,55 @@ def _check_prequantized_quantizers_disabled(module: torch.nn.Module, names) -> N
             or type(module).__name__
         )
         raise RuntimeError(
-            f"{layer} uses vLLM's {type(module.quant_method).__name__} (e.g. a pre-quantized"
-            f" checkpoint), which cannot be fake-quantized ({', '.join(enabled)} enabled). Use a"
-            " recipe that leaves this layer unquantized (e.g. KV cache only) or an unquantized"
-            " checkpoint."
+            f"{layer} uses vLLM's {type(module.quant_method).__name__}, which does not"
+            f" support ModelOpt fake quantization on this layer ({', '.join(enabled)} enabled)."
+            " Use a recipe that disables these quantizers or add validated method support."
         )
 
 
 class _VLLMParallelLinear(QuantModule):
     _QUANTIZER_NAMES = ("input_quantizer", "weight_quantizer", "output_quantizer")
+    # The parallel kind tells max_calibrate which amax to sync across TP ranks. Subclasses set it;
+    # _setup turns it off on layers that are not TP shards.
+    _is_column_parallel = False
+    _is_row_parallel = False
 
     def _setup(self):
         self.input_quantizer = TensorQuantizer(QuantLinearConvBase.default_quant_desc_input)
         self.weight_quantizer = TensorQuantizer(QuantLinearConvBase.default_quant_desc_weight)
         self.output_quantizer = TensorQuantizer(QuantLinearConvBase.default_quant_desc_output)
         self.output_quantizer.disable()
-        # Layers vLLM runs with another method (e.g. a pre-quantized FP8 checkpoint) pass through.
-        self._prequantized = type(self.quant_method) is not vllm_linear.UnquantizedLinearMethod
+        # Method support is explicit; storage dtype alone does not establish compatibility. A
+        # model's conversion hook marks the linears whose own method it supports (Kimi-K3's MLP).
+        supported_by_model = self.__dict__.pop("_fake_quant_supported_by_model", False)
+        self._fake_quant_supported = _supports_fake_quant_linear(self) or supported_by_model
         self.fake_quant_method = FakeQuantMethod(self.quant_method)
-        self.parallel_state = create_parallel_state()
+        parallel_state = create_parallel_state()
+        weight = getattr(self, "weight", None)
+        if (
+            getattr(self, "tp_size", 1) > 1
+            and isinstance(weight, torch.Tensor)
+            and weight.dim() == 2
+        ):
+            # A TP shard: max_calibrate syncs its amax across TP by quantizer axis. Drop vLLM's EP
+            # group, like Megatron's non-expert linears: it spans the TP ranks, so its blind max
+            # would mix the per-channel or per-block amax of the shards.
+            parallel_state = ParallelState(
+                parallel_state.data_parallel_group.group,
+                parallel_state.tensor_parallel_group.group,
+            )
+        else:
+            # Replicas (disable_tp, e.g. a data-parallel vision encoder that may not run on every
+            # rank) and non-2-D weights (KDA conv1d) are not TP shards: no TP sync.
+            self._is_row_parallel = self._is_column_parallel = False
+        self.parallel_state = parallel_state
 
     def iter_weights_for_calibration(self):
-        if not self._prequantized:
+        if self._fake_quant_supported:
             yield from super().iter_weights_for_calibration()
 
     def fold_weight(self, keep_attrs: bool = False):
-        if not self._prequantized:
+        if self._fake_quant_supported:
             super().fold_weight(keep_attrs)
 
     def _sync_input_pre_quant_scale_to_weight(self) -> None:
@@ -563,17 +588,18 @@ class _VLLMParallelLinear(QuantModule):
         self._sync_input_pre_quant_scale_to_weight()
 
     def forward(self, input_):
-        if self._prequantized:
-            _check_prequantized_quantizers_disabled(self, self._QUANTIZER_NAMES)
+        if not self._fake_quant_supported:
+            _check_unsupported_quantizers_disabled(self, self._QUANTIZER_NAMES)
             return super().forward(input_)
         # This context manager will conflict with torch.compile
         # with replace_function(self, "quant_method", self.fake_quant_method):
         # Manually replace quant_method instead
-        self._quant_method = self.quant_method
+        original_quant_method = self.quant_method
         self.quant_method = self.fake_quant_method
-        output = super().forward(input_)
-        self.quant_method = self._quant_method
-        return output
+        try:
+            return super().forward(input_)
+        finally:
+            self.quant_method = original_quant_method
 
 
 def post_restore_vllm_parallel_linears(model: torch.nn.Module) -> None:
@@ -589,23 +615,25 @@ def post_restore_vllm_parallel_linears(model: torch.nn.Module) -> None:
 
 @QuantModuleRegistry.register({vllm_linear.RowParallelLinear: "vllm_RowParallelLinear"})
 class _QuantVLLMRowParallelLinear(_VLLMParallelLinear):
-    pass
+    _is_row_parallel = True
 
 
 @QuantModuleRegistry.register({vllm_linear.ColumnParallelLinear: "vllm_ColumnParallelLinear"})
 class _QuantVLLMColumnParallelLinear(_VLLMParallelLinear):
-    pass
+    _is_column_parallel = True
 
 
+# vLLM's merged and QKV layers use ColumnParallelLinear's forward, so the registry gives them the
+# class above, which is registered first. Subclassing it keeps them the same if that order changes.
 @QuantModuleRegistry.register(
     {vllm_linear.MergedColumnParallelLinear: "vllm_MergedColumnParallelLinear"}
 )
-class _QuantVLLMMergedColumnParallelLinear(_VLLMParallelLinear):
+class _QuantVLLMMergedColumnParallelLinear(_QuantVLLMColumnParallelLinear):
     pass
 
 
 @QuantModuleRegistry.register({vllm_linear.QKVParallelLinear: "vllm_QKVParallelLinear"})
-class _QuantVLLMQKVParallelLinear(_VLLMParallelLinear):
+class _QuantVLLMQKVParallelLinear(_QuantVLLMColumnParallelLinear):
     pass
 
 
@@ -722,7 +750,7 @@ class _QuantFusedMoEBase(QuantModule):
         Patching is process-wide: safe for the LIFO nesting vLLM does, but not thread-safe.
         """
         if self._prequantized:
-            _check_prequantized_quantizers_disabled(self, self._QUANTIZER_NAMES)
+            _check_unsupported_quantizers_disabled(self, self._QUANTIZER_NAMES)
         if self._prequantized or not any(
             getattr(self, name).is_enabled for name in self._QUANTIZER_NAMES
         ):
