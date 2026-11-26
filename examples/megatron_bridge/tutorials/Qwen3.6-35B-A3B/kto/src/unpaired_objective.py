@@ -83,10 +83,13 @@ class KTOLossFn(DPOLossFn):
 
 
 def _mismatch_batch(batch, pad_id, max_length=32768):
-    """Pair each prompt with another response to compute the batch KL estimate z.
+    """Borrow the previous response in the batch to estimate the shared level z.
 
-    The mismatched prompt-response pairs are used only to estimate KL.
-    KTO still trains on each response with its original prompt and label.
+    Each looping example borrows the correct response from its own row.
+    In the experiment, the two prompts in each row differed, so these picks
+    always used a response written for a different prompt. Prompts can
+    still repeat across rows.
+    The KTO loss uses each response with its original prompt and label.
     """
     ids, token_mask = (batch["input_ids"], batch["token_mask"])
     prompts, responses = ([], [])
@@ -97,6 +100,7 @@ def _mismatch_batch(batch, pad_id, max_length=32768):
         responses.append(ids[i, cut:length])
     sequences, masks = ([], [])
     for i, prompt in enumerate(prompts):
+        # TODO: Choose a donor response with a different tokenized prompt when possible.
         response = responses[(i - 1) % len(responses)]
         available = max_length - len(prompt)
         # Truncate only the temporary KL examples, preserving their prompts.
