@@ -324,6 +324,7 @@ def quantize_rtn(
             quantized_weights=gemm_weights_quantized,
             attributes=dq_node_attributes,
             layer_info=layer_info,
+            column_major=use_column_major,
         )
 
         # Add transpose nodes for column-major if needed

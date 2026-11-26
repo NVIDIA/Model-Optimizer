@@ -274,6 +274,47 @@ def test_awq_lite_gemm_trans_b_zero_point(tmp_path, layers_8bit, use_column_majo
     assert np.abs(y - ref).max() / np.abs(ref).max() < 0.1
 
 
+@pytest.mark.parametrize(
+    ("calibration_method", "use_zero_point"),
+    [("awq_lite", True), ("awq_lite", False), ("awq_clip", False), ("rtn_dq", False)],
+)
+@pytest.mark.parametrize("layers_8bit", [None, "gemm"])
+def test_column_major_gemm_no_trans_b(tmp_path, calibration_method, use_zero_point, layers_8bit):
+    # Gemm(transB=0) keeps its weight as [K, N], so the column-major transpose stores it as
+    # [N, K] and an 8-bit per-channel scale (one per N) belongs on axis 0. The weight is square
+    # with columns of very different ranges, so the wrong axis still loads but gives wrong
+    # outputs. A Relu feeds the Gemm so AWQ Lite's pre-quant scale has a node to attach to.
+    rng = np.random.default_rng(0)
+    w = (rng.standard_normal((32, 32)) * np.logspace(-1, 1, 32)[None, :]).astype(np.float32)
+    x = np.abs(rng.standard_normal((16, 32))).astype(np.float32)
+    gx = gs.Variable("x", dtype=np.float32, shape=x.shape)
+    gh = gs.Variable("h", dtype=np.float32, shape=x.shape)
+    gy = gs.Variable("y", dtype=np.float32, shape=(16, 32))
+    relu = gs.Node("Relu", "relu", inputs=[gx], outputs=[gh])
+    gemm = gs.Node(
+        "Gemm", "gemm", inputs=[gh, gs.Constant("w", w)], outputs=[gy], attrs={"transB": 0}
+    )
+    onnx_path = os.path.join(tmp_path, "gemm.onnx")
+    graph = gs.Graph([relu, gemm], inputs=[gx], outputs=[gy], opset=21)
+    save_onnx(gs.export_onnx(graph), onnx_path)
+
+    model = quantize_int4(
+        onnx_path,
+        calibration_method,
+        [{"x": x}],
+        block_size=8,
+        use_zero_point=use_zero_point,
+        enable_mixed_quant=layers_8bit is not None,
+        layers_8bit=layers_8bit,
+        use_external_data_format=False,
+        use_column_major=True,
+    )
+    session = ort.InferenceSession(model.SerializeToString(), providers=["CPUExecutionProvider"])
+    y = session.run(None, {"x": x})[0].astype(np.float32)
+    ref = x @ w
+    assert np.abs(y - ref).max() / np.abs(ref).max() < 0.1
+
+
 @pytest.mark.parametrize("calibration_method", ["awq_clip", "rtn_dq"])
 @pytest.mark.parametrize("op", ["Gemm", "MatMul"])
 def test_column_major_shared_weight(tmp_path, calibration_method, op):
@@ -545,7 +586,8 @@ def test_awq_no_temp_file_leak(tmp_path, monkeypatch, calibration_method, use_ex
 
 def test_column_major_transpose_skips_other_dq_nodes():
     # Only the weights this export stored transposed get a Transpose. Other DQ nodes already in
-    # the graph, here two unnamed ones, keep feeding their own MatMul unchanged.
+    # the graph, here two unnamed ones, keep feeding their own MatMul unchanged, and the new
+    # Transpose output does not reuse an existing tensor name.
     rng = np.random.default_rng(0)
     x = rng.standard_normal((4, 8)).astype(np.float32)
     w = rng.integers(-7, 8, (8, 8)).astype(np.int8)
@@ -564,7 +606,9 @@ def test_column_major_transpose_skips_other_dq_nodes():
                 outputs=[dq_out],
             )
         )
-        outputs.append(gs.Variable(f"y{i}", dtype=np.float32, shape=(4, 8)))
+        # The first output takes the name the new Transpose would default to.
+        y_name = f"{qdq_utils._dq_out_name('w')}_transposed_back" if i == 0 else f"y{i}"
+        outputs.append(gs.Variable(y_name, dtype=np.float32, shape=(4, 8)))
         nodes.append(gs.Node("MatMul", f"mm{i}", inputs=[gx, dq_out], outputs=[outputs[-1]]))
         refs.append(x * k)
     # A weight quantized by this export and stored transposed (column-major).
@@ -585,11 +629,13 @@ def test_column_major_transpose_skips_other_dq_nodes():
     qdq_utils.insert_transpose_nodes_for_column_major(graph, ["w"])
 
     assert sum(node.op == "Transpose" for node in graph.nodes) == 1
+    model = gs.export_onnx(graph)
+    model.ir_version = 10
     options = ort.SessionOptions()
     # Keep ORT from fusing DQ + MatMul into an integer MatMul that quantizes x.
     options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
     session = ort.InferenceSession(
-        gs.export_onnx(graph).SerializeToString(),
+        model.SerializeToString(),
         sess_options=options,
         providers=["CPUExecutionProvider"],
     )

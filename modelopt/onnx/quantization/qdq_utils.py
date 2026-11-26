@@ -376,8 +376,8 @@ def insert_dq_nodes(
         layer_info: Optional dictionary mapping tensor names to precision (old format) or
             to layer configuration dict (new format with precision, block_size, axis).
         transposed_weights: Weights of a ``Gemm`` with ``transB=1``, stored as ``[N, K]`` (or as
-            ``[K, N]`` after the column-major transpose). Their per-channel DQ axis follows that
-            stored layout.
+            ``[K, N]`` after the column-major transpose). Other weights are stored as ``[K, N]``
+            (or ``[N, K]``). The per-channel DQ axis follows the stored layout.
         column_major: Whether ``apply_column_major_transformation`` was applied to the weights.
     """
     logger.debug(f"Inserting DQ nodes for {len(scales)} weights")
@@ -430,15 +430,13 @@ def insert_dq_nodes(
             if len(blocked_axes) == 1:
                 attrs["axis"] = blocked_axes[0]
         validate_scale_shape_for_per_channel_nodes(scale, attrs, num_bits)
-        if (
-            attrs is not None
-            and "block_size" not in attrs
-            and transposed_weights
-            and name in transposed_weights
-        ):
-            # One scale per output channel (N): axis 0 of [N, K], or 1 after the column-major
-            # transpose. Blocked weights get their axis from the shapes above.
-            attrs["axis"] = 1 if column_major else 0
+        is_transposed = bool(transposed_weights) and name in transposed_weights
+        if attrs is not None and "block_size" not in attrs and (is_transposed or column_major):
+            # One scale per output channel (N). The stored weight is [K, N] (MatMul,
+            # Gemm transB=0) or [N, K] (Gemm transB=1), and the column-major transpose swaps
+            # it, so N is axis 1 when both or neither apply and axis 0 otherwise. Blocked
+            # weights get their axis from the shapes above.
+            attrs["axis"] = 1 if is_transposed == column_major else 0
         _insert_helper(
             name,
             quantized_weights[name],
@@ -1191,6 +1189,15 @@ def insert_transpose_nodes_for_column_major(
     dq_outputs = None if weight_names is None else {_dq_out_name(w) for w in weight_names}
     # One Transpose per DQ output tensor, shared by every MatMul/Gemm(transB=0) that reads it.
     transposed_outputs: dict[str, gs.Variable] = {}
+    # New tensor and node names must not shadow anything already in the graph.
+    used_names = set(graph.tensors().keys()) | {n.name for n in graph.nodes if n.name}
+
+    def _unique_name(base: str) -> str:
+        name, i = base, 1
+        while name in used_names:
+            name, i = f"{base}_{i}", i + 1
+        used_names.add(name)
+        return name
 
     for node in graph.nodes:
         if node.op in ["MatMul", "Gemm"]:
@@ -1238,7 +1245,7 @@ def insert_transpose_nodes_for_column_major(
 
                 # Create output variable for the transpose node
                 transpose_out = gs.Variable(
-                    f"{weight_input.name}_transposed_back",
+                    _unique_name(f"{weight_input.name}_transposed_back"),
                     dtype=weight_dtype,
                     shape=transposed_weight_shape,
                 )
@@ -1246,7 +1253,7 @@ def insert_transpose_nodes_for_column_major(
                 # Create transpose node: (B^T)^T = B
                 transpose_node = gs.Node(
                     op="Transpose",
-                    name=f"{weight_input.name}_transpose_back",
+                    name=_unique_name(f"{weight_input.name}_transpose_back"),
                     inputs=[weight_input],
                     outputs=[transpose_out],
                     attrs={"perm": perm},
