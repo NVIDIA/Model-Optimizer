@@ -477,6 +477,47 @@ def test_get_weight_scale_matches_reference(ci, co):
     np.testing.assert_allclose(scale, _reference_weight_scale(weight, block_size))
 
 
+def _reference_weight_scale_nd(weight: np.ndarray, block_size: int) -> np.ndarray:
+    """Same per-block-max scale as _reference_weight_scale, generalized to rank > 2.
+
+    Blocks `block_size` consecutive entries along axis 0 only; any further
+    axes (e.g. a batched MatMul's extra dimension) are carried through
+    untouched, matching what get_weight_scale now does for such initializers.
+    """
+    ci = weight.shape[0]
+    n_blocks = -(-ci // block_size)
+    pad_width = [(0, n_blocks * block_size - ci)] + [(0, 0)] * (weight.ndim - 1)
+    padded = np.pad(weight, pad_width)
+    scale = np.zeros_like(padded)
+    for b in range(n_blocks):
+        block = padded[b * block_size : (b + 1) * block_size]
+        amax = np.abs(block).max(axis=0, keepdims=True)
+        scale[b * block_size : (b + 1) * block_size] = np.abs(block) / (
+            amax + np.finfo(amax.dtype).tiny
+        )
+    return scale[:ci].mean(1)
+
+
+def test_get_weight_scale_rank3_batched_matmul():
+    """A batched MatMul initializer (rank 3) must only split its leading axis.
+
+    Regression test: the reshape used to assume a 2D weight and reshape
+    straight to (n_blocks, block_size, org_shape[1]), which raises when the
+    weight carries an extra trailing axis, since the element count no longer
+    matches (e.g. a (4, 4, 4) weight with block_size=2 tried to fit 64
+    elements into a (2, 2, 4) buffer).
+    """
+    rng = np.random.RandomState(2)
+    ci, mid, co = 4, 4, 4
+    block_size = 2
+    weight = rng.randn(ci, mid, co)
+
+    scale = get_weight_scale(weight.copy(), block_size)
+
+    assert scale.shape == (ci, co)
+    np.testing.assert_allclose(scale, _reference_weight_scale_nd(weight, block_size))
+
+
 def _reference_subgraph_w_mean(weight: np.ndarray, block_size: int) -> np.ndarray:
     """Per-block-max mean using consecutive, non-overlapping row blocks, 1e-6 damping."""
     ci, co = weight.shape

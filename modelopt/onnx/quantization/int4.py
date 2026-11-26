@@ -760,7 +760,9 @@ def get_weight_scale(weight, block_size=None):
         # Blocks are `block_size` consecutive rows; splitting dim 0 into
         # (n_blocks, block_size) keeps each block's rows together, unlike
         # reshape(block_size, -1), which interleaves rows from different blocks.
-        weight = weight.reshape(org_shape[0] // block_size, block_size, org_shape[1])
+        # A batched MatMul initializer carries extra trailing axes beyond the
+        # output-channel one, so only the leading axis is split here.
+        weight = weight.reshape(org_shape[0] // block_size, block_size, *org_shape[1:])
         weight_abs_amax = weight.__abs__().max(axis=1, keepdims=True)
         scale = weight.__abs__() / (weight_abs_amax + np.finfo(weight_abs_amax.dtype).tiny)
         scale = scale.reshape(org_shape)
@@ -962,7 +964,9 @@ def get_x_w_mean_for_subgraph(
     # Blocks are `block_size` consecutive rows; splitting dim 0 into
     # (n_blocks, block_size) keeps each block's rows together, unlike
     # reshape(block_size, -1), which interleaves rows from different blocks.
-    w_concatenated = w_concatenated.reshape(org_shape[0] // block_size, block_size, org_shape[1])
+    # A batched MatMul initializer carries extra trailing axes beyond the
+    # output-channel one, so only the leading axis is split here.
+    w_concatenated = w_concatenated.reshape(org_shape[0] // block_size, block_size, *org_shape[1:])
     div_by = np.amax(np.abs(w_concatenated), axis=1, keepdims=True)
     div_by = div_by + 1e-6  # damping factor 1e-6 is taken from AutoAWQ
     w_concatenated = np.abs(w_concatenated) / div_by
