@@ -67,6 +67,8 @@ NVFP4 export → evaluation
 
 We fine-tune the QAD baseline with quantization active. KTO learns from response likelihoods, encouraging correct answers and discouraging looping responses. No separate SFT cross-entropy or teacher-logit loss is added.
 
+KTO fine-tuning took about 21 minutes on one node with four NVIDIA GB300 GPUs, totaling 1.4 GPU-hours.
+
 For a batch of *B* labeled responses, the implemented loss is:
 
 $$
