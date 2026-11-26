@@ -52,6 +52,7 @@ Changelog
 - Fixed a KV-cache length mismatch that could interrupt layerwise GPTQ calibration of Hugging Face models such as Qwen3 in ModelOpt 0.48.0.
 - With ``mto.enable_huggingface_checkpointing()`` and transformers before 5.21, ``save_pretrained`` no longer fails on Hugging Face MoE models with quantized fused experts, and ``from_pretrained`` restores them. A Qwen3-VL-MoE checkpoint does not load on those versions, so save and restore the live model with ``mto.save`` and ``mto.restore`` instead.
 - For dense Qwen3.5 checkpoints with an LM-head size mismatch in TensorRT-LLM 1.3.0, use ``model_type/qwen3_5/auto_quantize/w4a8_awq_beta_fp8_at_6p0bits-decoder_only`` to keep the output head unquantized and outside the 6-bit decoder budget. Rerun from the original weights and omit ``--auto_quantize_checkpoint`` or give it a fresh path.
+- ``moe_calib_experts_ratio`` (``--moe_calib_experts_ratio`` in ``examples/hf_ptq``) was ignored on Hugging Face MoE models whose experts transformers fuses, such as Mixtral, Qwen3-MoE and DeepSeek-V3; it now routes their calibration tokens to that share of the experts. It warns when the model has no MoE block it applies to.
 
 *ONNX*
 
