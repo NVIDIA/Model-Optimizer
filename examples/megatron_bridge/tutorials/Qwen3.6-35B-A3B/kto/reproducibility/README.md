@@ -25,7 +25,17 @@ Median response lengths were 2,957 tokens for correct responses and 4,853 tokens
 
 See [experiment_environment.yaml](../config/experiment_environment.yaml) for the software versions used in training and evaluation. Use [kto.yaml](../config/kto.yaml) to configure KTO training.
 
-Set the paths in [run_kto.sh](run_kto.sh). For `PRETRAINED_CHECKPOINT`, use the Megatron QAD iteration directory, such as `iter_0000500`. Keep the model weights, saved ModelOpt quantization state, and original QAD `run_config.yaml` together in that directory. The [Qwen checkpoint helper](../src/qwen36_checkpoint.py) loads the language model and checks that quantization is active.
+On the host, copy the pinned NeMo RL source (revision `19244a094`) from the release image.
+
+```bash
+container=$(docker create nvcr.io/nvidia/nemo-rl:v0.7.0)
+docker cp "$container:/opt/nemo-rl" ./nemo-rl
+docker rm "$container"
+```
+
+Mount `./nemo-rl` into `nvcr.io/nvidia/nemo:26.08.00` and set `NEMO_RL_SOURCE` in `run_kto.sh` to the mounted path. The launcher imports NeMo RL and reads `dpo.yaml` from that tree while using the training image’s Megatron Bridge and Core packages.
+
+Set the remaining paths in [run_kto.sh](run_kto.sh). For `PRETRAINED_CHECKPOINT`, use the Megatron QAD iteration directory, such as `iter_0000500`. Keep the model weights, saved ModelOpt quantization state, and original QAD `run_config.yaml` together in that directory. The [Qwen checkpoint helper](../src/qwen36_checkpoint.py) loads the language model and checks that quantization is active.
 
 Run the launcher from the parent tutorial directory.
 
