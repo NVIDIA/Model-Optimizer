@@ -1035,6 +1035,7 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
                 name, quantizers = self._first_proj_attr, first_weight_qs
             self._down_proj_linear = not self._down_proj_linear
             if getattr(quantizers[idx], "_local_repair_active", False):
+                # Keep native helper lookup late-bound for repair_formats instrumentation.
                 from ..repair_formats import repair_linear
 
                 output = repair_linear(quantizers[idx], input, bias)
@@ -1078,6 +1079,7 @@ class _QuantFusedExperts(_QuantFunctionalMixin):
                 input = self._quantize_grouped_input(input, offs, input_quantizer)
                 self._down_proj_linear = not self._down_proj_linear
                 if any(getattr(q, "_local_repair_active", False) for q in quantizers):
+                    # Keep native helper lookup late-bound for repair_formats instrumentation.
                     from ..repair_formats import repair_grouped_linear
 
                     output = repair_grouped_linear(
