@@ -48,17 +48,28 @@ _CASE_FIELDS = {
 _RESERVED_ENGINE_FIELDS = {"model", "model_path", "tensor_parallel_size", "tp_size"}
 
 
+class _LocatedYAMLError(yaml.YAMLError):
+    def __init__(self, reason, node):
+        super().__init__(reason)
+        self.problem_mark = node.start_mark
+
+
 class _UniqueKeyLoader(yaml.SafeLoader):
+    def construct_object(self, node, deep=False):
+        try:
+            return super().construct_object(node, deep=deep)
+        except (ValueError, TypeError, LookupError, ArithmeticError, AttributeError):
+            # PyYAML's native scalar constructors can echo the value, e.g. invalid !!int.
+            raise _LocatedYAMLError("invalid YAML value", node) from None
+
     def flatten_mapping(self, node):
         # Aliases can revisit a node whose inherited keys have already been flattened.
         if getattr(node, "_modelopt_flattened", False):
             return
         # PyYAML also flattens inline merge sources without calling construct_mapping on them.
-        # Report only key and line: interpolating a Mark would quote the source snippet,
-        # which can carry values such as tokens into the collection error.
         merges = [key for key, _ in node.value if key.tag == "tag:yaml.org,2002:merge"]
         if len(merges) > 1:
-            raise ValueError(f"Duplicate YAML merge key at line {merges[1].start_mark.line + 1}")
+            raise _LocatedYAMLError("Duplicate YAML merge key", merges[1])
         keys = set()
         for key_node, _ in node.value:
             if key_node.tag == "tag:yaml.org,2002:merge":
@@ -66,14 +77,10 @@ class _UniqueKeyLoader(yaml.SafeLoader):
             key = self.construct_object(key_node, deep=False)
             try:
                 if key in keys:
-                    raise ValueError(
-                        f"Duplicate YAML key {key!r} at line {key_node.start_mark.line + 1}"
-                    )
+                    raise _LocatedYAMLError("Duplicate YAML key", key_node)
                 keys.add(key)
-            except TypeError as exc:
-                raise ValueError(
-                    f"Invalid YAML key at line {key_node.start_mark.line + 1}"
-                ) from exc
+            except TypeError:
+                raise _LocatedYAMLError("Invalid YAML key", key_node) from None
         super().flatten_mapping(node)
         node._modelopt_flattened = True
 
@@ -95,15 +102,13 @@ def _positive_int(value, name):
 def _read_yaml(path):
     try:
         with Path(path).open(encoding="utf-8") as source:
-            return _mapping(yaml.load(source, Loader=_UniqueKeyLoader), str(path))
-    except yaml.YAMLError as exc:
-        # Marks quote the source line and scalar errors may echo the value, both of which
-        # can carry credentials: report only the location and drop the exception chain.
+            data = yaml.load(source, Loader=_UniqueKeyLoader)
+    except (yaml.YAMLError, ValueError) as exc:
+        reason = str(exc) if isinstance(exc, _LocatedYAMLError) else "invalid YAML"
         mark = getattr(exc, "problem_mark", None) or getattr(exc, "context_mark", None)
-        where = f" at line {mark.line + 1}" if mark is not None else ""
-        raise ValueError(f"{path}: invalid YAML{where}") from None
-    except ValueError as exc:
-        raise ValueError(f"{path}: {exc}") from None
+        where = f" at line {mark.line + 1}, column {mark.column + 1}" if mark else ""
+        raise ValueError(f"{path}: {reason}{where}") from None
+    return _mapping(data, str(path))
 
 
 def _parameter_maps(config, name):

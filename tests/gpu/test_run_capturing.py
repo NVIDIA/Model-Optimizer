@@ -98,6 +98,7 @@ if pid == 0:
     os.setsid()
     if sys.argv[3] == "close":
         os.close(1)
+        os.close(2)
     pathlib.Path(sys.argv[1]).write_text(str(os.getpid()))
     time.sleep(60)
     os._exit(0)
@@ -126,9 +127,9 @@ if sys.argv[2] == "timeout":
         try:
             if pid_file.exists():
                 pid = int(pid_file.read_text())
-                with contextlib.suppress(ProcessLookupError):
-                    os.kill(pid, signal.SIGKILL)
                 with contextlib.suppress(ChildProcessError):
-                    os.waitpid(pid, 0)
+                    if os.waitpid(pid, os.WNOHANG) == (0, 0):
+                        os.kill(pid, signal.SIGKILL)
+                        os.waitpid(pid, 0)
         finally:
             assert libc.prctl(36, previous.value, 0, 0, 0) == 0

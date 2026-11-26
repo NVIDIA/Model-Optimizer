@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import traceback
+
 import pytest
 from _test_utils.deploy_config import (
     engine_tp_kwargs,
@@ -110,11 +112,12 @@ def test_yaml_merge_keys(tmp_path, mapping, expected_tp):
         assert load_deploy_config(config)["run"]["tensor_parallel_size"] == expected_tp
 
 
-@pytest.mark.parametrize("variant", ["malformed-scalar", "duplicate-key"])
+@pytest.mark.parametrize("variant", ["invalid-integer", "malformed-scalar", "duplicate-key"])
 def test_yaml_errors_report_location_not_values(tmp_path, variant):
     secret = "placeholder-private-authorization"
     bodies = {
         "malformed-scalar": f'run:\n  hf_token: "{secret}" {{unclosed\n',
+        "invalid-integer": f"backends:\n  vllm:\n    engine_kwargs:\n      hf_token: !!int {secret}\n",
         "duplicate-key": f'run:\n  backend: vllm\n  hf_token: "{secret}"\n  hf_token: "{secret}"\n',
     }
     config = tmp_path / "run.yaml"
@@ -124,4 +127,5 @@ def test_yaml_errors_report_location_not_values(tmp_path, variant):
     message = str(error.value)
     assert secret not in message
     assert str(config) in message
-    assert "line" in message
+    assert secret not in "".join(traceback.format_exception(error.value))
+    assert "line" in message and "column" in message
