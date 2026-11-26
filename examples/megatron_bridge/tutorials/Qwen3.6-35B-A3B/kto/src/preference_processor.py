@@ -50,14 +50,20 @@ def preference_processor(datum_dict, task_data_spec, tokenizer, max_seq_length, 
 
     Raises:
         AssertionError: A prompt and response exceed max_seq_length.
+        ValueError: A response is blank or produces no tokens.
     """
     output: dict[str, Any] = {}
     # NeMo RL's chosen/rejected fields carry independent labels; prompts need not match.
     for branch in ["chosen", "rejected"]:
         prompt = datum_dict.get(branch + "_prompt_serialized", datum_dict["prompt_serialized"])
         prefix = tokenizer.encode(prompt, add_special_tokens=False)
-        response = datum_dict[branch + "_serialized"]
+        response_field = branch + "_serialized"
+        response = datum_dict[response_field]
         ids = tokenizer.encode(response, add_special_tokens=False)
+        # Reject blank responses and responses with no tokens before adding EOS.
+        # KTO needs response content to learn from, even when a correct answer gets EOS.
+        if not response.strip() or not ids:
+            raise ValueError(f"Row {idx} has an empty {response_field}")
         if branch == "chosen":
             ids.append(tokenizer.eos_token_id)
         assert len(prefix) + len(ids) <= max_seq_length, "Response exceeds training sequence limit"
