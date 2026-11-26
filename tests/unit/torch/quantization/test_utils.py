@@ -23,6 +23,8 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import fully_shard
 from torch.distributed.tensor import DTensor, Replicate, Shard, distribute_tensor
 
+import modelopt.torch.quantization as mtq
+from modelopt.torch.quantization.repair import IQRepairPolicy
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.utils import (
@@ -1170,3 +1172,52 @@ def test_writable_nested_fsdp_requires_same_sharding_mesh(cpu_dist_workers, roll
         cpu_dist_workers.run(_nested_fsdp_mesh_mismatch_job, rollback, hsdp_prefix)
     finally:
         cpu_dist_workers.job_timeout, cpu_dist_workers.failure_grace = timeout, grace
+
+
+def _fsdp2_iq_repair_flags_job(rank, size):
+    mesh = init_device_mesh("cpu", (size,))
+    boundary = torch.nn.Sequential(torch.nn.Linear(256, 4), torch.nn.Linear(4, 4))
+    mtq.quantize(
+        boundary,
+        {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {
+                    "quantizer_name": "0.weight_quantizer",
+                    "cfg": {"num_bits": "iq1_m", "backend": "ggml"},
+                },
+            ],
+            "algorithm": None,
+        },
+    )
+    inputs = torch.randn(2, 256, requires_grad=True)
+    expected = boundary(inputs).detach()
+    fully_shard(boundary, mesh=mesh, reshard_after_forward=True)
+    policy = IQRepairPolicy()
+    try:
+        with fsdp2_weight_access_and_writeback_context(boundary, boundary, writeback=False):
+            fields = policy.prepare(boundary)
+        with fsdp2_weight_access_and_writeback_context(boundary, boundary, writeback=False):
+            boundary(inputs).square().mean().backward()
+            assert all(parameter.grad is None for parameter in boundary.parameters())
+            assert any(
+                field.grad is not None and field.grad.count_nonzero() for field in fields
+            )
+        assert all(not parameter.requires_grad for parameter in boundary.parameters())
+        policy.close()
+        assert all(parameter.requires_grad for parameter in boundary.parameters())
+        boundary.zero_grad(set_to_none=True)
+        ordinary = boundary(inputs)
+        torch.testing.assert_close(ordinary, expected, rtol=0, atol=0)
+        ordinary.square().mean().backward()
+        assert all(
+            parameter.grad is not None and parameter.grad.to_local().count_nonzero()
+            for parameter in boundary.parameters()
+        )
+    finally:
+        policy.close()
+
+
+
+def test_fsdp2_iq_repair_preserves_gradient_flags(cpu_dist_workers):
+    cpu_dist_workers.run(_fsdp2_iq_repair_flags_job)
