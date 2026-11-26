@@ -81,7 +81,7 @@ def test_run_capturing_does_not_block_on_a_survivor_holding_the_pipe(monkeypatch
 @pytest.mark.parametrize("timeout", [None, 0.5], ids=["normal-exit", "timeout"])
 @pytest.mark.timeout(15)
 def test_run_capturing_escaped_worker(monkeypatch, tmp_path, timeout, escaped):
-    # Adopt the escaped grandchild so teardown can reap it, including in minimal CI containers.
+    # The supervisor normally reaps the worker. Adopt it here if the supervisor fails first.
     libc = ctypes.CDLL(None, use_errno=True)
     previous = ctypes.c_int()
     assert libc.prctl(37, ctypes.byref(previous), 0, 0, 0) == 0  # PR_GET_CHILD_SUBREAPER
@@ -133,3 +133,12 @@ if sys.argv[2] == "timeout":
                         os.waitpid(pid, 0)
         finally:
             assert libc.prctl(36, previous.value, 0, 0, 0) == 0
+
+
+def test_run_capturing_missing_executable(tmp_path):
+    executable = str(tmp_path / "missing-command")
+    with pytest.raises(FileNotFoundError) as error:
+        run_command._run_capturing(
+            [executable], tmp_path, os.environ.copy(), cleanup_process_group=True
+        )
+    assert error.value.filename == executable

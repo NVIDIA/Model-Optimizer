@@ -16,6 +16,7 @@
 
 import contextlib
 import ctypes
+import errno
 import os
 import select
 import signal
@@ -53,7 +54,7 @@ def _supervise(control, grace, command):
     try:
         child = subprocess.Popen(command, start_new_session=True)
     except OSError as exc:
-        control.sendall(f"errno {exc.errno}".encode())
+        control.sendall(f"errno {exc.errno or errno.EIO}".encode())
         return
 
     try:
@@ -68,7 +69,7 @@ def _supervise(control, grace, command):
         deadline = time.monotonic() + grace
         with contextlib.suppress(ProcessLookupError):
             os.killpg(child.pid, signal.SIGKILL)
-        code = child.wait(timeout=grace)
+        code = child.wait(timeout=max(0, deadline - time.monotonic()))
         escaped = _reap_workers(child.pid, deadline)
     if not escaped:
         control.sendall(str(code).encode())
