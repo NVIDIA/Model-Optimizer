@@ -13,12 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Enable FlashAttention 2 for Qwen3.6 on GB300 in NeMo 26.08.
+"""Enable FlashAttention 2 for Qwen3.6 on GB300 in NeMo 26.08.00.
 
 Transformer Engine 2.17.1 excludes GB300 (SM103) from FlashAttention 2 for
 head dimensions above 192. Qwen3.6 uses 256, and the unfused fallback ran
 out of GPU memory. This patch lets Transformer Engine select FlashAttention 2
 to reduce memory use.
+
+The GB300 QAD retest on NeMo 26.10 RC8 used automatic attention selection.
+Transformer Engine selected native FusedAttention and ran without this patch.
 """
 
 import torch

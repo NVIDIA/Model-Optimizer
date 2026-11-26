@@ -33,7 +33,7 @@ from nemo_rl.algorithms.utils import get_tokenizer
 from nemo_rl.distributed.virtual_cluster import init_ray
 from omegaconf import OmegaConf
 from preference_processor import preference_processor
-from qwen36_checkpoint import register_qwen36_worker, validate_checkpoint
+from qwen36_checkpoint import register_qwen36_worker
 from unpaired_objective import install
 
 
@@ -58,10 +58,9 @@ def main():
         resolve=True,
         throw_on_missing=True,
     )
-    # NeMo RL passes this checkpoint config to its training workers.
+    # Ray workers need an absolute path to the starting checkpoint.
     checkpoint = cfg["checkpointing"]["pretrained_checkpoint"]
-    # Check for saved ModelOpt state and give the workers an absolute path.
-    checkpoint["path"] = str(validate_checkpoint(Path(checkpoint["path"])))
+    checkpoint["path"] = str(Path(checkpoint["path"]).resolve(strict=True))
     # NeMo RL expects the full Qwen VLM, so use a custom worker to load the language-only QAD checkpoint.
     register_qwen36_worker()
 

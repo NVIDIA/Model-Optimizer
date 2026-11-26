@@ -4,7 +4,7 @@
 
 ## KTO training
 
-We fine-tuned the QAD model with KTO to reduce reasoning loops. We ran training in NeMo RL with expert parallelism of four (EP=4) so it fit on one GB300 node with four GPUs. Export the trained QAKTO model using the parent’s [NVFP4 export procedure](../../README.md#4-export).
+We fine-tuned the QAD baseline in NeMo RL on one four-GPU GB300 node. The parent tutorial saves the checkpoint with eight-way expert parallelism (EP=8), and Megatron redistributes its expert weights when loading at EP=4. Export the trained QAKTO model using the parent’s [NVFP4 export procedure](../../README.md#4-export).
 
 ### Collect KTO training responses
 
@@ -19,17 +19,17 @@ Follow [training.example.jsonl](data/training.example.jsonl): each row holds cor
 
 ### Run KTO training
 
-See [experiment_environment.yaml](../config/experiment_environment.yaml) for the software versions used in training and evaluation. Use [kto.yaml](../config/kto.yaml) to configure KTO training. Set the paths in [run_kto.sh](run_kto.sh), then run from the parent tutorial directory:
+See [experiment_environment.yaml](../config/experiment_environment.yaml) for the software versions used in training and evaluation. Use [kto.yaml](../config/kto.yaml) to configure KTO training.
+
+Set the paths in [run_kto.sh](run_kto.sh). For `PRETRAINED_CHECKPOINT`, use the Megatron QAD iteration directory, such as `iter_0000500`. Keep the model weights, saved ModelOpt quantization state, and original QAD `run_config.yaml` together in that directory. The [Qwen checkpoint helper](../src/qwen36_checkpoint.py) loads the language model and checks that quantization is active.
+
+Run the launcher from the parent tutorial directory.
 
 ```bash
 bash kto/reproducibility/run_kto.sh
 ```
 
-Set `PRETRAINED_CHECKPOINT` to the Megatron QAD checkpoint directory for the starting step (for example, `iter_0000500`). It must contain the model weights and saved ModelOpt quantization state. The launcher uses the [Qwen checkpoint helper](../src/qwen36_checkpoint.py) to load the language model and check that quantization is active.
-
-If Megatron Bridge needs a separate architecture config, place a matching `run_config.yaml` in the checkpoint directory alongside the weights.
-
-The original GB300 run on NeMo 26.08 needed the [SM103 attention patch](../src/sm103_attention.py). Use automatic attention selection with NeMo 26.10 RC8 or later. The RC8 QAD retest ran without the patch.
+On GB300 with NeMo 26.08.00, `run_kto.sh` starts a worker that enables FlashAttention 2 to reduce memory use and splits large FusedAdam groups to avoid running out of tensor handles. The worker leaves both fixes off in NeMo 26.10 RC8. In that version, Transformer Engine can choose fused attention automatically, and FusedAdam splits large updates itself. [Attention fix](../src/sm103_attention.py) · [Optimizer fix](../src/te_optimizer_groups.py)
 
 ## Evaluation
 

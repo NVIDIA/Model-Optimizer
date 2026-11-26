@@ -31,8 +31,8 @@ from types import MethodType
 
 import nemo_rl.models.policy.workers.megatron_policy_worker as policy_worker
 import ray
-from megatron.bridge.training.post_training.checkpointing import has_modelopt_state
 from megatron.core import dist_checkpointing
+from megatron.core.dist_checkpointing.dict_utils import dict_list_map_outplace
 from megatron.core.dist_checkpointing.mapping import ShardedBase, ShardedTensorFactory
 from megatron.core.dist_checkpointing.validation import StrictHandling
 from megatron.core.utils import unwrap_model
@@ -42,21 +42,14 @@ from nemo_rl.modelopt.models.policy.workers.megatron_quant_policy_worker import 
 )
 from nemo_rl.models.policy.utils import POLICY_WORKER_OVERRIDES
 from sm103_attention import enable_sm103_flash
+from te_optimizer_groups import bound_fused_adam_groups
 from torch.distributed.checkpoint import FileSystemReader
 
 from modelopt.torch.quantization.nn.modules.tensor_quantizer import TensorQuantizer
 
-__all__ = ["register_qwen36_worker", "validate_checkpoint"]
+__all__ = ["register_qwen36_worker"]
 
 _BASE_WORKER = "nemo_rl.models.policy.workers.megatron_policy_worker.MegatronPolicyWorker"
-
-
-def validate_checkpoint(path: Path) -> Path:
-    """Return the absolute path to a Megatron iteration with saved quantization state."""
-    path = path.resolve(strict=True)
-    if not has_modelopt_state(str(path)):
-        raise ValueError(f"Expected saved ModelOpt quantization state in {path}")
-    return path
 
 
 def register_qwen36_worker() -> None:
@@ -76,18 +69,12 @@ def _without_language_prefix(value):
         build = value.build_fn
 
         def build_without_prefix(*args, **kwargs):
-            return _without_language_prefix(build(*args, **kwargs))
+            return dict_list_map_outplace(_without_language_prefix, build(*args, **kwargs))
 
         # Grouped expert weights can create their sharded tensor keys lazily.
         return replace(value, build_fn=build_without_prefix)
     if isinstance(value, ShardedBase):
         return replace(value, key=value.key.removeprefix("language_model."))
-    if isinstance(value, dict):
-        return {key: _without_language_prefix(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_without_language_prefix(item) for item in value]
-    if isinstance(value, tuple):
-        return tuple(_without_language_prefix(item) for item in value)
     return value
 
 
@@ -105,35 +92,24 @@ def _adapt_checkpoint_load(checkpoint: Path) -> None:
     def load(state, checkpoint_dir, sharded_strategy=None, **kwargs):
         if Path(checkpoint_dir).resolve() == checkpoint:
             if strip_prefix:
-                state = _without_language_prefix(state)
+                state = dict_list_map_outplace(_without_language_prefix, state)
             kwargs["strict"] = StrictHandling.RAISE_UNEXPECTED
         return original(state, checkpoint_dir, sharded_strategy, **kwargs)
 
     dist_checkpointing.load = load
 
 
-def _expand_text_positions(module, args, kwargs):
-    """Provide the three rotary position axes Qwen expects.
-
-    The full VLM wrapper normally computes time, height, and width positions
-    from the tokens and any image or video grid. Here NeMo RL calls the language
-    model directly with text positions, so repeat each position on all three axes.
-    """
-    positions = kwargs.get("position_ids", args[1] if len(args) > 1 else None)
-    if positions is not None and positions.ndim == 2:
-        positions = positions.unsqueeze(0).expand(3, -1, -1)
-        if "position_ids" in kwargs:
-            kwargs = {**kwargs, "position_ids": positions}
-        else:
-            args = (args[0], positions, *args[2:])
+def _expand_text_positions(_module, args, kwargs):
+    """Repeat each text position across the three rotary axes Qwen expects."""
+    positions = kwargs["position_ids"]
+    kwargs["position_ids"] = positions.unsqueeze(0).expand(3, -1, -1)
     return args, kwargs
 
 
 def _provide_language_model(provider, *args, **kwargs):
     """Build Qwen's language model and adapt its rotary positions for text batches."""
     model = provider.provide_language_model(*args, **kwargs)
-    if model.position_embedding_type == "mrope":
-        model.register_forward_pre_hook(_expand_text_positions, with_kwargs=True)
+    model.register_forward_pre_hook(_expand_text_positions, with_kwargs=True)
     return model
 
 
@@ -178,8 +154,10 @@ class Qwen36QuantPolicyWorker(MegatronQuantPolicyWorker.__ray_actor_class__):
         original = policy_worker.setup_model_and_optimizer
 
         def setup(policy_cfg, megatron_cfg, *args, **kwargs):
-            # Apply the original GB300 attention workaround before building the model.
+            # Let Transformer Engine select FlashAttention 2 for Qwen3.6 on GB300.
             enable_sm103_flash()
+            # Split FusedAdam groups to avoid exhausting Transformer Engine's tensor handles.
+            bound_fused_adam_groups()
             provider = megatron_cfg.model
             provider.provide = MethodType(_provide_language_model, provider)
             provider.transformer_layer_spec = _language_layer_spec
