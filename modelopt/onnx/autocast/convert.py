@@ -172,7 +172,7 @@ def convert_to_mixed_precision(
 
     # Only confirmed TensorRT plugins require the TensorRT execution provider.
     if "trt" not in providers and graph_sanitizer.trt_plugin_ops:
-        providers.insert(0, "trt")
+        providers = ["trt", *providers]
 
     # Initialize classifiers and converters
     node_classifier = NodeClassifier(
