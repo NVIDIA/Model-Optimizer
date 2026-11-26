@@ -16,6 +16,7 @@
 """Tests for shared streaming checkpoint-cast utilities."""
 
 import os
+import stat
 import sys
 
 import pytest
@@ -33,6 +34,13 @@ from modelopt.torch.export.shard_cast_utils import (
     validate_aux_files,
 )
 from modelopt.torch.quantization.qtensor import MXFP4QTensor, NVFP4QTensor
+
+
+@pytest.fixture(autouse=True)
+def _hub_cache_elsewhere(tmp_path, monkeypatch):
+    """Keep the test's files out of the configured Hugging Face cache, whatever the environment
+    sets; a test that needs a cache sets its own."""
+    monkeypatch.setattr("huggingface_hub.constants.HF_HUB_CACHE", str(tmp_path / "hf-hub-cache"))
 
 
 def test_mxfp4_to_nvfp4_lossless_cast_preserves_dequantized_values():
@@ -128,7 +136,8 @@ def test_copy_aux_files_accepts_huggingface_snapshot_blobs(tmp_path, monkeypatch
         payload.write_text(name)
         (repository / "blobs" / name).symlink_to(os.path.relpath(payload, repository / "blobs"))
         (snapshot / name).symlink_to(f"../../blobs/{name}")
-    shared["tiktoken.model"].chmod(0o444)  # as the hub keeps them; vocab.json's stays writable
+    shared["tiktoken.model"].chmod(0o400)  # as the hub keeps them in a private cache; vocab.json's
+    # stays writable
 
     assert resolve_checkpoint_file(snapshot, "tokenizer.json") == blob.resolve()
     validate_aux_files(snapshot)
@@ -139,6 +148,9 @@ def test_copy_aux_files_accepts_huggingface_snapshot_blobs(tmp_path, monkeypatch
 
     assert not (tmp_path / "outside").exists()
     assert not (output / "tokenizer.json").is_symlink()
+    (output / ".new-file").touch()
+    new_file_mode = stat.S_IMODE((output / ".new-file").stat().st_mode)
+    assert stat.S_IMODE((output / "tiktoken.model").stat().st_mode) == new_file_mode
     # Copies, never links: every output file is writable, and editing it leaves the cache unchanged.
     for name, source in {"tokenizer.json": blob, **shared}.items():
         assert (output / name).read_text() == name
