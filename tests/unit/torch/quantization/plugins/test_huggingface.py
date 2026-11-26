@@ -560,3 +560,57 @@ def test_initialize_qdq_weights_hf_roundtrip(tmp_path, num_bits, gptq):
         parameter.grad = torch.ones_like(parameter)
     optimizer.step()
     torch.testing.assert_close(restored(inputs).logits, before, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("sequential", [False, True])
+def test_gpt_oss_experts_reconfiguration_and_failed_forward_cleanup(sequential):
+    set_seed(17)
+    model = get_tiny_gpt_oss(num_hidden_layers=1, hidden_size=32, intermediate_size=48)
+    experts = model.model.layers[0].mlp.experts
+    cfg = {"num_bits": 8}
+    mtq.quantize(
+        experts,
+        {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {
+                    "quantizer_name": "*weight_quantizer",
+                    "cfg": [cfg, cfg] if sequential else cfg,
+                    "enable": True,
+                },
+            ],
+            "algorithm": None,
+        },
+    )
+    quantizers = [experts.gate_up_proj_weight_quantizer, experts.down_proj_weight_quantizer]
+    seen = []
+    hooks = [
+        q.register_forward_hook(lambda module, _args, _output: seen.append(id(module)))
+        for q in quantizers
+    ]
+    inputs = torch.randn(4, 32, dtype=experts.gate_up_proj.dtype)
+    routing = {
+        "router_indices": torch.tensor([[0], [1], [0], [1]]),
+        "routing_weights": torch.ones(4, 1, dtype=inputs.dtype),
+    }
+    try:
+        expected = experts(inputs, **routing).detach()
+        assert set(seen) == {id(q) for q in quantizers}
+        with pytest.raises(RuntimeError):
+            experts(inputs[:, :-1], **routing)
+        assert not experts._enable_weight_quantization and not experts._down_proj_mul
+        assert all(not hasattr(q, "_cached_quant_val") for q in experts.modules())
+        yielded = list(experts.iter_weights_for_calibration())
+        for name, (weight, quantizer) in zip(("gate_up_proj", "down_proj"), yielded, strict=True):
+            assert weight.shape == experts._parameters[name].transpose(-1, -2).shape
+            assert (
+                weight.untyped_storage().data_ptr()
+                == experts._parameters[name].untyped_storage().data_ptr()
+            )
+            assert quantizer is getattr(experts, name + "_weight_quantizer")
+        seen.clear()
+        torch.testing.assert_close(experts(inputs, **routing), expected, rtol=0, atol=0)
+        assert set(seen) == {id(q) for q in quantizers}
+    finally:
+        for hook in hooks:
+            hook.remove()
