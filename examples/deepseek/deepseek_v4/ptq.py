@@ -128,11 +128,6 @@ def _ds_fp8_block_size(weight: torch.Tensor, scale: torch.Tensor) -> int:
     for attr in ("fp8_block_size", "block_size"):
         blk = getattr(deekseep_v4_model, attr, None)
         if isinstance(blk, int) and blk > 0 and scale.shape == _fp8_scale_shape(weight, blk):
-            if blk not in _DS_FP8_BLOCK_SIZES:
-                raise ValueError(
-                    f"Unsupported DeepSeek-V4 {attr}={blk}; "
-                    f"supported FP8 block sizes are {_DS_FP8_BLOCK_SIZES}"
-                )
             return blk
     fits = [b for b in _DS_FP8_BLOCK_SIZES if scale.shape == _fp8_scale_shape(weight, b)]
     assert len(fits) == 1, (
@@ -175,7 +170,10 @@ def _dequantize_linear_weight(linear_module) -> torch.Tensor:
             block_sizes=[block_size],
         )
     if w.dtype == torch.float8_e4m3fn:
-        return dequantize_fp8_ue8m0_to_bf16(w, w.scale, block=_ds_fp8_block_size(w, w.scale))
+        # Checkpoint scales are validated once by load_deepseek_v4 and remain frozen.
+        return dequantize_fp8_ue8m0_to_bf16(
+            w, w.scale, block=_ds_fp8_block_size(w, w.scale), validate_scales=False
+        )
     return w
 
 
@@ -293,6 +291,11 @@ def load_deepseek_v4(
                 f"checkpoint key mismatch while loading {ckpt}: "
                 f"missing={missing}, unexpected={unexpected}"
             )
+        # Validate once here rather than synchronizing CUDA on every expert forward.
+        for name, weight in model.named_parameters():
+            if weight.dtype == torch.float8_e4m3fn:
+                if (weight.scale.contiguous().view(torch.uint8) == 255).any():
+                    raise ValueError(f"Native checkpoint scales for {name} contain NaN codes")
         print(f"[rank {rank}] loaded")
     # Match generate.py: default device to this rank's CUDA so that any
     # torch.empty(...) / torch.zeros(...) inside the V4 forward (TileLang

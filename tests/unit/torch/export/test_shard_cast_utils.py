@@ -15,6 +15,7 @@
 
 """Tests for shared streaming checkpoint-cast utilities."""
 
+import math
 import os
 import sys
 
@@ -38,7 +39,7 @@ from modelopt.torch.export.shard_cast_utils import (
 from modelopt.torch.quantization.qtensor import MXFP4QTensor, NVFP4QTensor
 
 
-@pytest.mark.parametrize("block", [32, 128])
+@pytest.mark.parametrize("block", [32, 64, 128])
 def test_native_fp8_roundtrip_partial_zero_and_scale_boundary_blocks(block, tmp_path):
     """Native FP8-representable BF16 values survive encode/decode, including edge blocks."""
     exponents = torch.tensor([-127, -8, -1, 0, 8, 119])
@@ -72,12 +73,33 @@ def test_native_fp8_roundtrip_partial_zero_and_scale_boundary_blocks(block, tmp_
     torch.testing.assert_close(above_scales[:-1], (expected_scales[:-1] + 1)[:, None].expand(-1, 2))
 
 
-@pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])
-def test_native_fp8_export_rejects_nonfinite_weights(value):
+@pytest.mark.parametrize(
+    "value",
+    [
+        float("nan"),
+        float("inf"),
+        -float("inf"),
+        torch.finfo(torch.bfloat16).max,
+        -torch.finfo(torch.bfloat16).max,
+        math.ldexp(248.0, 120),
+        -math.ldexp(248.0, 120),
+    ],
+)
+def test_native_fp8_export_rejects_weights_that_cannot_decode_to_finite_bf16(value):
     weight = torch.zeros(2, 3, dtype=torch.bfloat16)
     weight[0, 0] = value
     with pytest.raises(ValueError):
         quantize_bf16_to_fp8_ue8m0(weight)
+
+
+def test_native_fp8_export_just_below_bf16_overflow_boundary():
+    weight = torch.tensor([[math.ldexp(247.0, 120), -math.ldexp(247.0, 120)]], dtype=torch.bfloat16)
+    encoded, scales = quantize_bf16_to_fp8_ue8m0(weight)
+    restored = dequantize_fp8_ue8m0_to_bf16(encoded, scales)
+    expected = torch.tensor(
+        [[math.ldexp(240.0, 120), -math.ldexp(240.0, 120)]], dtype=torch.bfloat16
+    )
+    torch.testing.assert_close(restored, expected, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize(
@@ -85,7 +107,7 @@ def test_native_fp8_export_rejects_nonfinite_weights(value):
     [
         ((1, 32, 32), torch.bfloat16, 32),
         ((32, 32), torch.float32, 32),
-        ((32, 32), torch.bfloat16, 16),
+        ((32, 32), torch.bfloat16, 0),
         ((0, 32), torch.bfloat16, 32),
     ],
 )

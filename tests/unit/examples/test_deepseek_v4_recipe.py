@@ -35,6 +35,7 @@ from pathlib import Path
 
 import pytest
 import torch
+from safetensors.torch import save_file
 
 _SCRIPT = Path(__file__).resolve().parents[3] / "examples" / "deepseek" / "deepseek_v4" / "ptq.py"
 _SPEC = importlib.util.spec_from_file_location("deepseek_v4_ptq", _SCRIPT)
@@ -223,21 +224,11 @@ def test_block_size_without_globals_picks_the_unique_known_size(monkeypatch, sha
     assert dsv4_ptq._ds_fp8_block_size(*_fp8_pair(*shape, block)) == block
 
 
-@pytest.mark.parametrize(
-    ("module_globals", "shape", "scale_shape", "error"),
-    [
-        ({"block_size": 128}, (256, 256), (3, 5), AssertionError),
-        ({"block_size": 64}, (256, 256), (4, 4), ValueError),
-        ({"fp8_block_size": 64, "block_size": 128}, (32, 32), (1, 1), ValueError),
-    ],
-)
-def test_block_size_rejects_unsupported_configurations(
-    monkeypatch, module_globals, shape, scale_shape, error
-):
-    monkeypatch.setattr(dsv4_ptq, "deekseep_v4_model", types.SimpleNamespace(**module_globals))
-    weight = torch.zeros(shape, dtype=torch.float8_e4m3fn)
-    with pytest.raises(error):
-        dsv4_ptq._ds_fp8_block_size(weight, torch.zeros(scale_shape, dtype=torch.uint8))
+def test_block_size_rejects_shapes_no_known_block_explains(monkeypatch):
+    monkeypatch.setattr(dsv4_ptq, "deekseep_v4_model", types.SimpleNamespace(block_size=128))
+    weight = torch.zeros(256, 256, dtype=torch.float8_e4m3fn)
+    with pytest.raises(AssertionError, match="cannot infer FP8 block size"):
+        dsv4_ptq._ds_fp8_block_size(weight, torch.zeros(3, 5, dtype=torch.uint8))
 
 
 def test_block_size_rejects_shapes_several_known_blocks_explain(monkeypatch):
@@ -247,7 +238,7 @@ def test_block_size_rejects_shapes_several_known_blocks_explain(monkeypatch):
         dsv4_ptq._ds_fp8_block_size(*_fp8_pair(32, 32, 32))
 
 
-@pytest.mark.parametrize("block", [32, 128])
+@pytest.mark.parametrize("block", [32, 64, 128])
 def test_fp8_dequant_crops_partial_blocks(monkeypatch, block):
     """Each element is scaled by its own block's UE8M0 exponent, including the partial
     trailing blocks that the ceil-div scale shape allocates."""
@@ -296,14 +287,14 @@ def load_with(monkeypatch, tmp_path):
     monkeypatch.setattr(torch, "set_default_dtype", lambda _dtype: None)
     monkeypatch.setattr(torch, "set_default_device", lambda _device: None)
 
-    def _load(transformer_cls, tokenizer):
+    def _load(transformer_cls, tokenizer, model_path="unused", dummy_weights=True):
         monkeypatch.setattr(
             dsv4_ptq,
             "deekseep_v4_model",
             types.SimpleNamespace(ModelArgs=_ModelArgs, Transformer=transformer_cls),
         )
         return dsv4_ptq.load_deepseek_v4(
-            str(config), "unused", batch_size=4, dummy_weights=True, tokenizer=tokenizer
+            str(config), model_path, batch_size=4, dummy_weights=dummy_weights, tokenizer=tokenizer
         )
 
     return _load
@@ -324,6 +315,38 @@ def test_tokenizer_aware_transformer_receives_the_tokenizer(load_with):
 def test_tokenizer_aware_transformer_requires_a_tokenizer(load_with):
     with pytest.raises(AssertionError, match="requires a tokenizer"):
         load_with(_TokenizerAwareTransformer, tokenizer=None)
+
+
+@pytest.mark.parametrize("scale_dtype", [torch.uint8, torch.float8_e8m0fnu])
+@pytest.mark.parametrize("scale_code", [127, 255])
+def test_load_validates_native_fp8_checkpoint_scales(load_with, tmp_path, scale_dtype, scale_code):
+    class FP8Transformer(torch.nn.Module):
+        def __init__(self, args):
+            super().__init__()
+            self.proj = torch.nn.Module()
+            self.proj.weight = torch.nn.Parameter(
+                torch.ones(129, 3, device="cpu").to(torch.float8_e4m3fn), requires_grad=False
+            )
+            self.proj.scale = torch.nn.Parameter(
+                torch.zeros(2, 1, device="cpu", dtype=torch.uint8).view(scale_dtype),
+                requires_grad=False,
+            )
+            self.proj.weight.scale = self.proj.scale
+
+    source = FP8Transformer(None)
+    source.proj.scale.view(torch.uint8).fill_(scale_code)
+    save_file(source.state_dict(), tmp_path / "model0-mp1.safetensors")
+    if scale_code == 255:
+        with pytest.raises(ValueError):
+            load_with(FP8Transformer, None, model_path=str(tmp_path), dummy_weights=False)
+    else:
+        model = load_with(FP8Transformer, None, model_path=str(tmp_path), dummy_weights=False)
+        torch.testing.assert_close(
+            dsv4_ptq._dequantize_linear_weight(model.proj),
+            source.proj.weight.to(torch.bfloat16),
+            rtol=0,
+            atol=0,
+        )
 
 
 # --- forward output: V4-Pro's logits vs V4.1-Flash's ``(output_ids, logits, main_hidden)`` --

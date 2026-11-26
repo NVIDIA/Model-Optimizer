@@ -34,3 +34,11 @@ def test_native_fp8_roundtrip_uses_tensor_device(device_index):
         restored = dequantize_fp8_ue8m0_to_bf16(encoded, scales.cpu())
         assert torch.cuda.current_device() == 0
     torch.testing.assert_close(restored, weight, rtol=0, atol=0)
+    # Prevalidated checkpoint scales must also decode without a host synchronization.
+    with torch.cuda.device(weight.device):
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=torch.cuda.Stream(device=weight.device)):
+            captured = dequantize_fp8_ue8m0_to_bf16(encoded, scales, validate_scales=False)
+        captured.zero_()
+        graph.replay()
+    torch.testing.assert_close(captured, weight, rtol=0, atol=0)
