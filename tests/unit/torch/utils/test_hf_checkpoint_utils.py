@@ -1024,6 +1024,13 @@ def test_copy_non_model_files_follows_hub_snapshot_links_into_blobs(tmp_path, mo
     # Writable, so a tokenizer.save_pretrained() into the export can replace it.
     assert (tmp_path / "export" / "tokenizer.json").stat().st_mode & stat.S_IWUSR
 
+    # A checkpoint outside the cache may not reach into it.
+    plain = tmp_path / "plain-checkpoint"
+    plain.mkdir()
+    (plain / "tokenizer.json").symlink_to(cache / "blobs" / "ab" / xet_hash)
+    with pytest.warns(UserWarning, match="Skipping tokenizer.json: .* outside the checkpoint"):
+        assert hf_checkpoint_utils.copy_non_model_files(plain, tmp_path / "plain-export") == []
+
     # Outside HF_HUB_CACHE a snapshot may still use its repo's blobs/, but not the shared store.
     monkeypatch.setattr("huggingface_hub.constants.HF_HUB_CACHE", str(tmp_path / "elsewhere"))
     (snapshot / "vocab.json").unlink()  # refused above; its warning would go unmatched here
