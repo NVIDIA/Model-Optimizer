@@ -177,7 +177,7 @@ Missing-final-answer counts were lower on all seven benchmarks, falling from 38 
 
 #### AA-Omniscience abstention rate
 
-We count a response as an abstention when its final answer is non-empty and the judge labels it `NOT_ATTEMPTED`. This category can include uncertain guesses. Following the [evaluation guide](https://github.com/NVIDIA/Model-Optimizer/blob/c8559d2b4e547960db1713640d3d54bb9b7c8280/docs/source/announcements/evaluating_models_efficiently_during_optimization_experiments/index.rst#abstention-ratio), the abstention rate is `abstentions / (all responses − correct responses)`. Incorrect, partial and missing answers stay in the denominator.
+We count a response as an abstention when its final answer is non-empty and the judge labels it `NOT_ATTEMPTED`. This category can include uncertain guesses. Following the [evaluation guide](https://github.com/NVIDIA/Model-Optimizer/blob/e26d65712e3688e3c07d20d2c0fb411f6ea2b65e/docs/source/announcements/evaluating_models_efficiently_during_optimization_experiments/index.rst#abstention-ratio), the abstention rate is `abstentions / (all responses − correct responses)`. Incorrect, partial and missing answers stay in the denominator.
 
 | Measure | QAD baseline | QAKTO | Difference [95% CI], pp | QAKTO higher, p |
 | --- | --- | --- | --- | --- |

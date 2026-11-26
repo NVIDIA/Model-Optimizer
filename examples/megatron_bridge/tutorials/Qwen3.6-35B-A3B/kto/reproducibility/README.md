@@ -47,8 +47,17 @@ On GB300 with NeMo 26.08.00, `run_kto.sh` starts a worker that enables FlashAtte
 
 ## Evaluation
 
-We run benchmarks and collect results using the [QAD tutorial’s evaluation setup and configs](../../evaluation/README.md), with presence penalty zero for both models. We compare the models using the paired analysis described in [Evaluating Models Efficiently During Optimization Experiments](https://github.com/NVIDIA/Model-Optimizer/blob/c8559d2b4e547960db1713640d3d54bb9b7c8280/docs/source/announcements/evaluating_models_efficiently_during_optimization_experiments/index.rst).
+We run benchmarks and collect results using the [QAD tutorial’s evaluation setup and configs](../../evaluation/README.md), with presence penalty zero for both models. We compare the models using the paired analysis described in [Evaluating Models Efficiently During Optimization Experiments](https://github.com/NVIDIA/Model-Optimizer/blob/e26d65712e3688e3c07d20d2c0fb411f6ea2b65e/docs/source/announcements/evaluating_models_efficiently_during_optimization_experiments/index.rst).
 
 IFBench and MMMU-Pro used 16 matched launches per model, up from eight in the parent tutorial. Each launch used `num_repeats: 1`. The extra runs made the accuracy comparison more precise and helped us check for regressions.
 
 For tau2-bench Telecom, override `agent_args.presence_penalty` from 1.5 to 0 for both models.
+
+## Reproducibility limits
+
+The checkpoints used for the reported results, generated responses, and per-response evaluation
+records are stored outside the public ModelOpt repository. This tutorial includes the training
+and evaluation recipes and summary results.
+
+Reproducing the custom tau2-bench Telecom cap-hit row requires the separate runner and its
+per-attempt logs. Both are outside the public repository.
