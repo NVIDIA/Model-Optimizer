@@ -85,9 +85,9 @@ See [Reproducibility](reproducibility/README.md) for data collection, training, 
 
 ### Evaluation data
 
-| Benchmark | Questions, subtasks, or tasks × repetitions | Responses or conversations per model |
+| Benchmark | Questions, subtasks, or tasks × repetitions | Results per model |
 | --- | --- | --- |
-| SciCode, 294 subtasks | 294 × 8 | 2,352 |
+| SciCode, full set | 338 × 8 | 2,704 |
 | AA-Omniscience | 600 × 10 | 6,000 |
 | GPQA Diamond | 198 × 16 | 3,168 |
 | IFBench | 300 × 16 | 4,800 |
@@ -135,6 +135,8 @@ At p < 0.05 per comparison, these exploratory tests rule out a 1 pp accuracy los
 #### Cap-hit rates
 
 A cap hit reaches the output-token limit; it screens for potential loops without confirming repetition. Rates count responses, except tau2-bench Telecom counts conversations with a capped agent turn.
+
+For SciCode, we evaluated all 338 subtasks with each problem’s prerequisite steps in place. After scoring, we used the [44/11 split](reproducibility/data/subtask_split.yaml) to exclude the 44 training subtasks for the 294-subtask row and select the 11 held-out error-prone subtasks for the 11-subtask row. Both rows use the same eight runs per model.
 
 | Benchmark | QAD baseline | QAKTO | Difference [95% CI], pp | QAKTO lower, p | QAKTO higher, p (context) |
 | --- | --- | --- | --- | --- | --- |
