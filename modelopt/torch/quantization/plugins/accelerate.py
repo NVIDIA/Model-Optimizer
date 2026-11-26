@@ -82,6 +82,35 @@ def _managed_tensors(module, include_buffers=True, recurse=False):
                 yield name, tensor
 
 
+def _offloaded_tensor_backings(module):
+    """Return resident CPU parameter and buffer backings without paging disk weights."""
+    backings = {}
+    for owner in module.modules():
+        hook = _get_offload_hook(getattr(owner, "_hf_hook", None))
+        if hook is None:
+            continue
+        weights_map, prefix = _weights_map_and_prefix(hook)
+        resident = None
+        children = (
+            owner.named_modules(remove_duplicate=False) if hook.place_submodules else (("", owner),)
+        )
+        for path, child in children:
+            for name, tensor in chain(
+                child._parameters.items(), child._buffers.items() if hook.offload_buffers else ()
+            ):
+                if tensor is None or not tensor.is_meta:
+                    continue
+                if resident is None:
+                    resident = _resident_weights_map(weights_map)
+                tensor = resident.get(prefix + (f"{path}." if path else "") + name)
+                if isinstance(tensor, torch.Tensor) and tensor.device.type == "cpu":
+                    if backings.setdefault((child, name), tensor) is not tensor:
+                        raise ValueError(
+                            "Accelerate hooks have conflicting backings for one tensor"
+                        )
+    return backings
+
+
 def _needs_materialize(module, hook):
     parameters = list(module.parameters(recurse=hook.place_submodules))
     # A resident parameter may contain caller edits; native onload would overwrite them.

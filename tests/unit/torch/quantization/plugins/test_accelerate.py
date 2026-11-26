@@ -30,6 +30,7 @@ from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 from modelopt.torch.quantization.nn import QuantLinearConvBase, TensorQuantizer
 from modelopt.torch.quantization.nn.modules.quant_linear import RealQuantLinear
 from modelopt.torch.quantization.qtensor import INT4QTensor, QTensorWrapper
+from modelopt.torch.quantization.repair import plan_iq_repair
 from modelopt.torch.quantization.utils.core_utils import enable_weight_access_and_writeback
 
 try:
@@ -1279,3 +1280,101 @@ def test_weight_access_rollback_checks_backing_aliases_before_body(alias_kind):
             raise RuntimeError("body failed")
     torch.testing.assert_close(backing, original, rtol=0, atol=0)
     assert "scratch" not in weights
+
+
+@pytest.mark.parametrize(
+    "mapping_mode",
+    [
+        "shared_userdict",
+        "independent_userdict",
+        "unknown",
+        "custom_userdict",
+        "custom_dict",
+        "conflicting_hooks",
+        "same_backing_hooks",
+    ],
+)
+def test_iq_plan_checks_resident_offload_mapping_backings(mapping_mode, monkeypatch):
+    model = nn.ModuleList([nn.Linear(256, 2, bias=False) for _ in range(2)])
+    mtq.quantize(
+        model,
+        {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {
+                    "quantizer_name": "*weight_quantizer",
+                    "cfg": {"num_bits": "iq1_m", "backend": "ggml"},
+                },
+            ],
+            "algorithm": None,
+        },
+    )
+
+    class LazyWeights(Mapping):
+        def __getitem__(self, key):
+            pytest.fail("Ownership inspection read an unknown lazy backing")
+
+        def __iter__(self):
+            return iter(("weight",))
+
+        def __len__(self):
+            return 1
+
+    class RedirectedWeights(UserDict):
+        def __getitem__(self, key):
+            return self.data["cpu." + key]
+
+        def __contains__(self, key):
+            return "cpu." + key in self.data
+
+    class RedirectedDict(dict):
+        def __getitem__(self, key):
+            return super().__getitem__("cpu." + key)
+
+        def __contains__(self, key):
+            return super().__contains__("cpu." + key)
+
+    shared = model[0].weight.detach()
+    mappings = [UserDict(owner.state_dict()) for owner in model]
+    if mapping_mode == "same_backing_hooks":
+        for weights in mappings:
+            weights["weight"] = weights["weight"].double()
+    if mapping_mode in ("conflicting_hooks", "same_backing_hooks"):
+        parent_weights = {
+            f"{index}.{name}": value.clone() if mapping_mode == "conflicting_hooks" else value
+            for index, weights in enumerate(mappings)
+            for name, value in weights.items()
+        }
+        add_hook_to_module(
+            model,
+            AlignDevicesHook(
+                execution_device="cpu",
+                offload=True,
+                place_submodules=True,
+                weights_map=parent_weights,
+            ),
+        )
+    for owner, weights in zip(model, mappings, strict=True):
+        if mapping_mode == "shared_userdict":
+            weights["weight"] = shared
+        if mapping_mode in ("custom_userdict", "custom_dict"):
+            mapping_class = (
+                RedirectedWeights if mapping_mode == "custom_userdict" else RedirectedDict
+            )
+            weights = mapping_class(
+                {"cpu." + name: value.double() for name, value in weights.items()}
+            )
+        add_hook_to_module(
+            owner,
+            AlignDevicesHook(
+                execution_device="cpu",
+                offload=True,
+                weights_map=LazyWeights() if mapping_mode == "unknown" else weights,
+            ),
+        )
+    if mapping_mode in ("independent_userdict", "same_backing_hooks"):
+        plan_iq_repair([model[0]], root_model=model)
+    else:
+        with pytest.raises(ValueError):
+            plan_iq_repair([model[0]], root_model=model)
+
