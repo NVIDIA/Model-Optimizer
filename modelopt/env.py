@@ -35,6 +35,7 @@ __all__ = [
     "fsdp2_export",
     "fsdp_size",
     "nvfp4_triton_sweep",
+    "rejmem_consumer",
     "skip_weight_quant_check",
     "tegrouped_compile_weight_loop",
 ]
@@ -125,3 +126,14 @@ def tegrouped_compile_weight_loop() -> bool:
     ``torch.compile``.
     """
     return _flag("MODELOPT_TEGROUPED_COMPILE_WEIGHT_LOOP", False)
+
+
+# Speculative decoding
+
+
+def rejmem_consumer() -> bool:
+    """``MODELOPT_REJMEM_CONSUMER``: feed rejected drafts to vLLM's DFlash drafter; off by default.
+
+    Read by ``modelopt.torch.speculative.plugins.rejmem.vllm_consumer`` inside vLLM workers.
+    """
+    return _flag("MODELOPT_REJMEM_CONSUMER", False)
