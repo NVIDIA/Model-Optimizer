@@ -53,7 +53,7 @@ def _make_component(snapshot, files, index=None):
 
 def _valid_tensors(**scale_overrides):
     scales = {
-        "weight_scale": torch.ones(4, 2),
+        "weight_scale": torch.ones(4, 4).to(torch.float8_e4m3fn),
         "weight_scale_2": torch.ones(1),
         "input_scale": torch.ones(1),
     }
@@ -65,7 +65,9 @@ def _valid_tensors(**scale_overrides):
 
 
 def test_static_nvfp4_accepts_valid_scales(tmp_path):
-    component = _make_component(tmp_path / "snapshot", {"model.safetensors": _valid_tensors()})
+    component = _make_component(
+        tmp_path / "snapshot", {"diffusion_pytorch_model.safetensors": _valid_tensors()}
+    )
     _check_static_nvfp4(component.parent, tmp_path)
     evidence = json.loads((tmp_path / "static-activation-scales.json").read_text())
     assert evidence["packed_modules"] == [_WEIGHT[: -len(".weight")]]
@@ -76,12 +78,12 @@ def test_static_nvfp4_accepts_valid_scales(tmp_path):
 @pytest.mark.parametrize(
     "bad_scale",
     [
-        {"weight_scale": torch.full((4, 2), torch.nan)},
-        {"weight_scale": torch.zeros(4, 2, 3)},  # wrong rank for a 2D weight
+        {"weight_scale": torch.full((4, 4), torch.nan).to(torch.float8_e4m3fn)},
+        {"weight_scale": torch.ones(4, 1)},  # too few blocks per output row
         {"weight_scale_2": torch.ones(4)},  # global scale must be a single scalar
         {"input_scale": torch.zeros(1)},  # nonpositive
     ],
-    ids=["nan", "misranked", "non-scalar-global", "zero"],
+    ids=["nan", "wrong-block-count", "non-scalar-global", "zero"],
 )
 def test_static_nvfp4_rejects_invalid_scales(tmp_path, bad_scale):
     component = _make_component(
@@ -91,16 +93,20 @@ def test_static_nvfp4_rejects_invalid_scales(tmp_path, bad_scale):
         _check_static_nvfp4(component.parent, tmp_path)
 
 
-def test_static_nvfp4_ignores_unreferenced_shards(tmp_path):
+@pytest.mark.parametrize("indexed", [True, False], ids=["indexed", "unsharded"])
+def test_static_nvfp4_ignores_unreferenced_shards(tmp_path, indexed):
+    weights = (
+        "model-00001-of-00002.safetensors" if indexed else "diffusion_pytorch_model.safetensors"
+    )
     active = {_WEIGHT: torch.zeros(4, 32, dtype=torch.uint8)}
     scales_only = {name: value for name, value in _valid_tensors().items() if name != _WEIGHT}
     component = _make_component(
         tmp_path / "snapshot",
         {
-            "model-00001-of-00002.safetensors": active,
+            weights: active,
             "model-00002-of-00002.safetensors": scales_only,
         },
-        index={_WEIGHT: "model-00001-of-00002.safetensors"},
+        index={_WEIGHT: weights} if indexed else None,
     )
     with pytest.raises(AssertionError, match="missing scales"):
         _check_static_nvfp4(component.parent, tmp_path)

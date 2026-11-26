@@ -205,13 +205,16 @@ class ModelDeployer:
         # Resource checks cover tensor_parallel_size ranks only; rank-multiplying fields
         # (pipeline/context/data parallelism) would bypass them on this single-node harness.
         topology_fields = {
-            "vllm": {"pipeline_parallel_size", "data_parallel_size"},
+            "vllm": {
+                "pipeline_parallel_size",
+                "data_parallel_size",
+                "prefill_context_parallel_size",
+            },
             "sglang": {"pp_size", "dp_size", "nnodes"},
             "trtllm": {
                 "pipeline_parallel_size",
                 "context_parallel_size",
                 "moe_cluster_parallel_size",
-                "gpus_per_node",
             },
         }.get(backend, set())
         if unsupported := {
