@@ -790,8 +790,9 @@ def test_copy_non_model_files_copies_everything_the_export_does_not_own(tmp_path
     assert exported == {*expected, *export_files}
     assert os.access(export_dir / "super_v3_reasoning_parser.py", os.X_OK)  # a helper still runs
     if sys.platform != "win32":  # Windows keeps only a read-only flag, not POSIX modes
-        # A local file keeps its mode, so an owner-only one stays private.
-        assert stat.S_IMODE((export_dir / "chat_template.jinja").stat().st_mode) == 0o600
+        # A copy is a new file of the export's, so an owner-only source takes the export's mode.
+        copied_mode = stat.S_IMODE((export_dir / "chat_template.jinja").stat().st_mode)
+        assert copied_mode == _new_file_mode(export_dir)
 
 
 def test_copy_non_model_files_skips_an_export_inside_the_source(tmp_path):
@@ -828,7 +829,7 @@ def test_copy_non_model_files_removes_a_partial_copy(monkeypatch, tmp_path):
         Path(dst).write_text("{")
         raise OSError("disk full")
 
-    monkeypatch.setattr(hf_checkpoint_utils.shutil, "copy2", failing_copy)
+    monkeypatch.setattr(hf_checkpoint_utils.shutil, "copyfile", failing_copy)
     with pytest.warns(UserWarning, match="disk full"):
         assert hf_checkpoint_utils.copy_non_model_files(source_dir, export_dir) == []
     assert not (export_dir / "tokenizer.json").exists()

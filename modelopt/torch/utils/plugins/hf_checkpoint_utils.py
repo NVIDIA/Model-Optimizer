@@ -452,20 +452,13 @@ def _allowed_source_roots(src_dir: Path) -> list[Path]:
     return allowed_roots
 
 
-def _resolved_hub_cache() -> Path | None:
-    """``HF_HUB_CACHE``, resolved, or ``None`` when it cannot be resolved."""
-    try:
-        return Path(constants.HF_HUB_CACHE).resolve()
-    except (OSError, RuntimeError):  # RuntimeError: a symlink loop on Python < 3.13
-        return None
-
-
 def _hub_cache_root(src_dir: Path) -> Path | None:
     """``HF_HUB_CACHE`` if ``src_dir`` is inside it, else ``None``, as when it is unresolvable."""
-    hub_cache = _resolved_hub_cache()
-    if hub_cache is None or not _is_relative_to(src_dir.resolve(strict=True), hub_cache):
+    try:
+        hub_cache = Path(constants.HF_HUB_CACHE).resolve()
+    except (OSError, RuntimeError):  # RuntimeError: a symlink loop on Python < 3.13
         return None
-    return hub_cache
+    return hub_cache if _is_relative_to(src_dir.resolve(strict=True), hub_cache) else None
 
 
 def resolve_checkpoint_file(
@@ -492,16 +485,11 @@ def resolve_checkpoint_file(
 
 
 def _copy_into_export(src: Path, dst: Path) -> None:
-    """Copy the resolved checkpoint file ``src`` to a new ``dst``.
+    """Copy ``src`` to a new ``dst`` with the export's own mode, keeping ``src``'s execute bits.
 
-    A file in the Hugging Face cache takes the export's own mode, keeping its execute bits: ``copy2``
-    would carry over the hub's shared-store mode, read-only, and owner-only in a private cache. Any
-    other file is copied with ``copy2``, so it keeps its mode and an owner-only file stays private.
+    The export reads the source and saves a file of its own, as with every file it writes, so the
+    source's mode is not carried over: not the hub's read-only shared store, not an owner-only file.
     """
-    hub_cache = _resolved_hub_cache()
-    if hub_cache is None or not _is_relative_to(src, hub_cache):
-        shutil.copy2(src, dst)
-        return
     shutil.copyfile(src, dst)
     mode = stat.S_IMODE(dst.stat().st_mode)
     # Execute where the copy is readable, so a shipped helper script still runs from the export.
