@@ -153,7 +153,7 @@ For SciCode, we evaluated all 338 subtasks with each problem’s prerequisite st
 
 QAKTO had lower observed cap-hit rates on seven of eight benchmarks across the reported evaluations, with zero observed caps on SciCode.
 
-For tau2-bench Telecom, NEL can retry capped responses that contain only reasoning and save only the successful retry, so saved conversations may omit capped attempts. The table also shows results from an earlier custom-runner evaluation that counts capped attempts instead of replacing them with successful retries.
+For tau2-bench Telecom, NEL can retry capped responses that contain only reasoning and save only the successful retry, so saved conversations may omit capped attempts. The earlier custom runner also evaluated 114 tasks with nine trials each and counted a conversation if any agent attempt hit the cap.
 
 #### Missing final answers
 
