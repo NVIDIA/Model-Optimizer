@@ -739,6 +739,45 @@ def test_carry_over_reads_the_recorded_keys_off_disk(tmp_path):
 
 
 @requires_accelerate
+def test_carry_over_dequantizes_fp8_weights_given_a_dtype(tmp_path):
+    """The export lists carried modules as unquantized, so their FP8 weights come out dequantized.
+
+    DeepSeek-V3's MTP layer is one: as stored, a runtime would read its FP8 bytes into the plain
+    weight it builds for an unquantized module. The blocks are partial in both dims, so only the
+    checkpoint's weight_block_size names them.
+    """
+    torch.manual_seed(0)
+    weight = (torch.randn(192, 160) * 100).to(torch.float8_e4m3fn)
+    scale_inv = torch.rand(2, 2) + 0.5
+    save_file(
+        {
+            "mtp.proj.weight": weight,
+            "mtp.proj.weight_scale_inv": scale_inv,
+            "mtp.norm.weight": torch.ones(4),
+        },
+        str(tmp_path / "model.safetensors"),
+    )
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {"quantization_config": {"quant_method": "fp8", "weight_block_size": [128, 128]}}
+        )
+    )
+    model = _ProvenanceModel(
+        keys=["mtp.norm.weight", "mtp.proj.weight", "mtp.proj.weight_scale_inv"], ckpt=tmp_path
+    )
+
+    carried = read_unplaced_weights(model, dtype=torch.bfloat16)
+
+    scale = scale_inv.repeat_interleave(128, 0).repeat_interleave(128, 1)[:192, :160]
+    assert sorted(carried) == ["mtp.norm.weight", "mtp.proj.weight"]
+    assert torch.equal(carried["mtp.proj.weight"], (weight.float() * scale).to(torch.bfloat16))
+    assert torch.equal(carried["mtp.norm.weight"], torch.ones(4))
+    assert sorted(read_unplaced_weights(model, keys_only=True, dtype=torch.bfloat16)) == sorted(
+        carried
+    )
+
+
+@requires_accelerate
 def test_carry_over_warns_and_keeps_the_export_alive_when_the_checkpoint_is_unreadable(tmp_path):
     """Best-effort: the rest of the weights are already correct, so this must not abort the export."""
     model = _ProvenanceModel(keys=["kept.weight"], ckpt=tmp_path / "does-not-exist")

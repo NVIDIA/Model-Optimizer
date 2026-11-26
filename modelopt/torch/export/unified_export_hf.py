@@ -2001,7 +2001,59 @@ def unplaced_keys_for(model: nn.Module, ckpt: "str | Path") -> list[str]:
 _NO_TENSOR: Any = None
 
 
-def read_unplaced_weights(model: nn.Module, *, keys_only: bool = False) -> dict[str, torch.Tensor]:
+def _dequantize_block_fp8(
+    weight: torch.Tensor, scale_inv: torch.Tensor, block: "list[int] | None", dtype: torch.dtype
+) -> torch.Tensor:
+    """``weight * scale_inv`` for an FP8 weight with one inverse scale per tensor or per block.
+
+    ``block`` is the checkpoint's ``weight_block_size``. Without it the scales' shape names the
+    block only when every block is whole.
+    """
+    scale = scale_inv.float()
+    if scale.numel() == 1:
+        return (weight.float() * scale.reshape(())).to(dtype)
+    if weight.ndim != 2 or scale.ndim != 2:
+        raise ValueError(
+            f"Cannot dequantize an FP8 weight of shape {tuple(weight.shape)} with scales of shape "
+            f"{tuple(scale.shape)}: block scales are read for 2-D weights only."
+        )
+    rows, cols = weight.shape
+    if block is None:
+        if rows % scale.shape[0] or cols % scale.shape[1]:
+            raise ValueError(
+                f"Cannot tell the FP8 block size of a {rows}x{cols} weight from its "
+                f"{tuple(scale.shape)} scales; the checkpoint's config names no weight_block_size."
+            )
+        block = [rows // scale.shape[0], cols // scale.shape[1]]
+    block_rows, block_cols = block
+    if tuple(scale.shape) != (-(-rows // block_rows), -(-cols // block_cols)):
+        raise ValueError(
+            f"A {rows}x{cols} FP8 weight has {tuple(scale.shape)} scales, not one per "
+            f"{block_rows}x{block_cols} block."
+        )
+    scale = scale.repeat_interleave(block_rows, 0).repeat_interleave(block_cols, 1)
+    return (weight.float() * scale[:rows, :cols]).to(dtype)
+
+
+def _dequantize_fp8_weights(
+    tensors: dict[str, torch.Tensor], model: nn.Module, dtype: torch.dtype
+) -> dict[str, torch.Tensor]:
+    """Replace each FP8 ``weight`` beside a ``weight_scale_inv`` with its ``dtype`` values."""
+    quantization_config = _source_config_json(model).get("quantization_config") or {}
+    block = quantization_config.get("weight_block_size")
+    for scale_key in [k for k in tensors if k.endswith(".weight_scale_inv")]:
+        weight_key = scale_key.removesuffix("_scale_inv")
+        weight = tensors.get(weight_key)
+        if weight is not None and weight.element_size() == 1:
+            tensors[weight_key] = _dequantize_block_fp8(
+                weight, tensors.pop(scale_key), block, dtype
+            )
+    return tensors
+
+
+def read_unplaced_weights(
+    model: nn.Module, *, keys_only: bool = False, dtype: torch.dtype | None = None
+) -> dict[str, torch.Tensor]:
     """Read back checkpoint weights the model never loaded, so the export stays complete.
 
     A checkpoint can hold parameters the built model has no home for -- an MTP head, an auxiliary
@@ -2021,6 +2073,11 @@ def read_unplaced_weights(model: nn.Module, *, keys_only: bool = False) -> dict[
     carry -- but no tensor is loaded and the values are ``None``. Ranks that do not write the extra
     state use this: the FSDP2 writer only emits ``extra_state_dict`` from rank 0, so having every
     rank materialize an MTP head (10 GB+ in bf16 on a large MoE) is host memory read and dropped.
+
+    With ``dtype`` each FP8 ``weight`` carried beside its ``weight_scale_inv`` comes back
+    dequantized to ``dtype``, without the scale. An export that lists the carried modules as
+    unquantized needs that: a runtime builds them with plain weights, and would read the FP8
+    bytes of e.g. DeepSeek-V3's MTP layer into them as values.
     """
     # These are pure filesystem checks and deliberately sit ABOVE the try below: deciding that
     # there is nothing to carry must not depend on an optional import succeeding.
@@ -2060,15 +2117,26 @@ def read_unplaced_weights(model: nn.Module, *, keys_only: bool = False) -> dict[
         if keys_only:
             # The caller wants the names, not the bytes: every rank needs an identical key list
             # to build an identical quant config, but only the writing rank should pay the memory.
-            return dict.fromkeys(
-                (k for shard_keys in by_file.values() for k in shard_keys), _NO_TENSOR
-            )
+            names = [k for shard_keys in by_file.values() for k in shard_keys]
+            if dtype is not None:
+                # As a full read, which drops the scales of the weights it dequantizes.
+                present = set(names)
+                names = [
+                    k
+                    for k in names
+                    if not (
+                        k.endswith(".weight_scale_inv") and k.removesuffix("_scale_inv") in present
+                    )
+                ]
+            return dict.fromkeys(names, _NO_TENSOR)
 
         out: dict[str, torch.Tensor] = {}
         for shard, shard_keys in by_file.items():
             with safe_open(str(Path(ckpt) / shard), framework="pt") as f:
                 for k in shard_keys:
                     out[k] = f.get_tensor(k)
+        if dtype is not None:
+            out = _dequantize_fp8_weights(out, model, dtype)
     except Exception as exc:
         # ``keys`` can still be None here -- the failure may land before it is resolved (a failed
         # import, or unplaced_source_keys itself raising). Counting it unconditionally would throw
@@ -2251,6 +2319,10 @@ def export_hf_checkpoint(
     # below records alike on every rank for the quant config.
     _writes_extra = not _sharded_export or torch.distributed.get_rank() == 0
     _carried: dict = {}
+    # The export lists the carried modules as unquantized, so FP8 ones are written in its dtype.
+    carried_dtype = dtype
+    if carried_dtype is None and isinstance(model, nn.Module) and hasattr(model, "config"):
+        carried_dtype = _resolve_export_dtype(model, None)
 
     def carried_over_names() -> list[str]:
         # Everything the export writes in original precision straight from the source, by either
@@ -2258,7 +2330,9 @@ def export_hf_checkpoint(
         # get_quant_config reads this to seed exclude_modules; recorded here because it runs before
         # that, and because only this point knows what was actually written rather than what was
         # merely unplaced.
-        _carried.update(read_unplaced_weights(model, keys_only=not _writes_extra))
+        _carried.update(
+            read_unplaced_weights(model, keys_only=not _writes_extra, dtype=carried_dtype)
+        )
         return sorted({*_carried, *off_index_tensor_names(model)})
 
     if _sharded_export:
