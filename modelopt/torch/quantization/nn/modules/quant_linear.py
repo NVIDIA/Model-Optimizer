@@ -44,7 +44,7 @@ class _QuantLinear(QuantLinearConvBase):
     def forward(self, input, *args, **kwargs):
         """Try native packed fields before the dynamic weight attribute expands them."""
         quantizer = self.weight_quantizer
-        state = getattr(quantizer, "_local_repair_state", None)
+        state = quantizer.__dict__.get("_local_repair_state")
         if (
             state is not None
             and self.original_cls.forward is nn.Linear.forward
@@ -53,6 +53,7 @@ class _QuantLinear(QuantLinearConvBase):
             and not kwargs
             and not getattr(quantizer, "rotate_back_is_enabled", False)
         ):
+            # Keep native helper lookup late-bound for repair_formats instrumentation.
             from ...repair_formats import _packed_projection_qualified, repair_linear
 
             if _packed_projection_qualified(input, state.name, state.weight_shape):
