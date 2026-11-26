@@ -15,9 +15,11 @@
 """Utility functions for running example commands reused in multiple example tests."""
 
 import contextlib
+import ctypes
 import os
 import signal
 import subprocess
+import sys
 import threading
 import time
 import warnings
@@ -99,6 +101,45 @@ def _wait_without_reaping(
         capture_failed.wait(delay)
 
 
+_PR_GET_CHILD_SUBREAPER = 37
+_PR_SET_CHILD_SUBREAPER = 36
+
+
+def _become_subreaper():
+    """Adopt orphaned descendants: a worker that left its group and closed its output
+    escapes both the group scan and the pipe check, but still reparents here."""
+    if sys.platform != "linux":
+        return None
+    previous = ctypes.c_int()
+    libc = ctypes.CDLL(None, use_errno=True)
+    if (
+        libc.prctl(_PR_GET_CHILD_SUBREAPER, ctypes.byref(previous), 0, 0, 0) != 0
+        or libc.prctl(_PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0
+    ):
+        return None
+    return libc, previous.value
+
+
+def _restore_subreaper(state):
+    libc, previous = state
+    libc.prctl(_PR_SET_CHILD_SUBREAPER, previous, 0, 0, 0)
+
+
+def _adopted_workers():
+    """Children reparented to this process as the nearest subreaper, dead or alive."""
+    workers = []
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            fields = Path(f"/proc/{entry}/stat").read_bytes().rsplit(b")", 1)[1].split()
+            if int(fields[1]) == os.getpid():
+                workers.append(int(entry))
+        except (OSError, IndexError, ValueError):
+            continue
+    return workers
+
+
 def _run_capturing(
     cmd_parts: list[str],
     cwd: Path,
@@ -116,6 +157,7 @@ def _run_capturing(
     When a log is supplied, capture to that file instead of accumulating output in memory.
     Use discard_output when a backend may echo credentials; still drain its pipe for cleanup proof.
     """
+    subreaper = _become_subreaper() if cleanup_process_group else None
     chunks: list[str] = []
     process = subprocess.Popen(
         cmd_parts,
@@ -138,6 +180,16 @@ def _run_capturing(
                 os.killpg(pgid, signal.SIGKILL)
             else:  # no process groups; the command itself is the best we can reach
                 process.kill()
+
+    def _sweep_adopted():
+        # Callers that set cleanup_process_group spawn no other children at this point,
+        # so an attached child is an adopted worker: kill and reap it as proof.
+        survivors = [pid for pid in _adopted_workers() if pid != process.pid]
+        for pid in survivors:
+            with contextlib.suppress(ProcessLookupError, ChildProcessError):
+                os.kill(pid, signal.SIGKILL)
+                os.waitpid(pid, 0)
+        return survivors
 
     capture_failed = threading.Event()
     capture_error: Exception | None = None
@@ -195,9 +247,16 @@ def _run_capturing(
         raise
     finally:
         reader.join(_KILLED_PIPE_TIMEOUT_S)
+        try:
+            survivors = _sweep_adopted() if subreaper is not None else []
+        finally:
+            if subreaper is not None:
+                _restore_subreaper(subreaper)
         if cleanup_process_group and reader.is_alive():
             # A worker outside the original process group may still own the pipe and GPUs.
             raise ProcessGroupCleanupError("Output pipe is still open after deployment cleanup")
+        if cleanup_process_group and survivors:
+            raise ProcessGroupCleanupError("Detached deployment workers survived cleanup")
     if reader.is_alive():
         raise OSError("Timed out draining subprocess output")
     if capture_error is not None:

@@ -96,8 +96,14 @@ def _read_yaml(path):
     try:
         with Path(path).open(encoding="utf-8") as source:
             return _mapping(yaml.load(source, Loader=_UniqueKeyLoader), str(path))
-    except (ValueError, yaml.YAMLError) as exc:
-        raise ValueError(f"{path}: {exc}") from exc
+    except yaml.YAMLError as exc:
+        # Marks quote the source line and scalar errors may echo the value, both of which
+        # can carry credentials: report only the location and drop the exception chain.
+        mark = getattr(exc, "problem_mark", None) or getattr(exc, "context_mark", None)
+        where = f" at line {mark.line + 1}" if mark is not None else ""
+        raise ValueError(f"{path}: invalid YAML{where}") from None
+    except ValueError as exc:
+        raise ValueError(f"{path}: {exc}") from None
 
 
 def _parameter_maps(config, name):

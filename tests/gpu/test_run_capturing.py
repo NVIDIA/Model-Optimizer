@@ -77,9 +77,10 @@ def test_run_capturing_does_not_block_on_a_survivor_holding_the_pipe(monkeypatch
             assert libc.prctl(36, previous.value, 0, 0, 0) == 0
 
 
+@pytest.mark.parametrize("escaped", ["hold", "close"], ids=["holds-pipe", "closes-pipe"])
 @pytest.mark.parametrize("timeout", [None, 0.5], ids=["normal-exit", "timeout"])
 @pytest.mark.timeout(15)
-def test_run_capturing_escaped_worker(monkeypatch, tmp_path, timeout):
+def test_run_capturing_escaped_worker(monkeypatch, tmp_path, timeout, escaped):
     # Adopt the escaped grandchild so teardown can reap it, including in minimal CI containers.
     libc = ctypes.CDLL(None, use_errno=True)
     previous = ctypes.c_int()
@@ -95,6 +96,8 @@ import time
 pid = os.fork()
 if pid == 0:
     os.setsid()
+    if sys.argv[3] == "close":
+        os.close(1)
     pathlib.Path(sys.argv[1]).write_text(str(os.getpid()))
     time.sleep(60)
     os._exit(0)
@@ -106,7 +109,14 @@ if sys.argv[2] == "timeout":
     try:
         with pytest.raises(run_command.ProcessGroupCleanupError):
             run_command._run_capturing(
-                [sys.executable, "-c", script, str(pid_file), "timeout" if timeout else "exit"],
+                [
+                    sys.executable,
+                    "-c",
+                    script,
+                    str(pid_file),
+                    "timeout" if timeout else "exit",
+                    "close" if escaped == "close" else "hold",
+                ],
                 tmp_path,
                 os.environ.copy(),
                 cleanup_process_group=True,
@@ -118,6 +128,7 @@ if sys.argv[2] == "timeout":
                 pid = int(pid_file.read_text())
                 with contextlib.suppress(ProcessLookupError):
                     os.kill(pid, signal.SIGKILL)
-                os.waitpid(pid, 0)
+                with contextlib.suppress(ChildProcessError):
+                    os.waitpid(pid, 0)
         finally:
             assert libc.prctl(36, previous.value, 0, 0, 0) == 0

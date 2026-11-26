@@ -108,3 +108,20 @@ def test_yaml_merge_keys(tmp_path, mapping, expected_tp):
             load_deploy_config(config)
     else:
         assert load_deploy_config(config)["run"]["tensor_parallel_size"] == expected_tp
+
+
+@pytest.mark.parametrize("variant", ["malformed-scalar", "duplicate-key"])
+def test_yaml_errors_report_location_not_values(tmp_path, variant):
+    secret = "placeholder-private-authorization"
+    bodies = {
+        "malformed-scalar": f'run:\n  hf_token: "{secret}" {{unclosed\n',
+        "duplicate-key": f'run:\n  backend: vllm\n  hf_token: "{secret}"\n  hf_token: "{secret}"\n',
+    }
+    config = tmp_path / "run.yaml"
+    config.write_text(bodies[variant], encoding="utf-8")
+    with pytest.raises(ValueError) as error:
+        load_deploy_config(config)
+    message = str(error.value)
+    assert secret not in message
+    assert str(config) in message
+    assert "line" in message
