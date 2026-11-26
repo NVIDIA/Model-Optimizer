@@ -22,6 +22,7 @@ BCE), vLLM vanilla exports, and native gated/recurrent exports.
 """
 
 import json
+import logging
 import shutil
 from copy import deepcopy
 from fnmatch import fnmatchcase
@@ -36,8 +37,9 @@ import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 import modelopt.torch.speculative as mtsp
 from modelopt.torch.speculative.config import DFLASH_DEFAULT_CFG
-from modelopt.torch.speculative.plugins.hf_dflash import HFDFlashModel
-from modelopt.torch.speculative.plugins.hf_dspark import HFDSparkModel, _tvd_chunk, _tvd_per_token
+from modelopt.torch.speculative.plugins.dflash_losses import _tvd_chunk
+from modelopt.torch.speculative.plugins.hf_dflash import DraftBatch, HFDFlashModel
+from modelopt.torch.speculative.plugins.hf_dspark import HFDSparkModel
 from modelopt.torch.speculative.plugins.modeling_dflash import (
     DFlashBaseModelOutput,
     DFlashModule,
@@ -137,6 +139,26 @@ class TestDSparkConvert:
         with pytest.raises(ValueError, match="markov_rank"):
             mtsp.convert(model, [("dflash", config)])
 
+    @pytest.mark.parametrize("decay_factor", [0.0, 7.0])
+    def test_pinned_position_weighting_reports_what_actually_weights_the_block(
+        self, decay_factor, caplog
+    ):
+        """DSpark pins decay over dflash_loss_objective, which defaults to D-PACE.
+
+        So every DSpark run is told which field weights its block positions (Domino pins
+        the same way), and told it once: the D-PACE notice that a plain DFlash gets for a
+        non-zero decay factor would say the factor is ignored, when for DSpark it is the
+        only one of the two that is read.
+        """
+        config = _get_dspark_config()
+        config["dflash_loss_decay_factor"] = decay_factor
+        model = get_tiny_llama(num_hidden_layers=4)
+        with caplog.at_level(logging.WARNING):
+            mtsp.convert(model, [("dflash", config)])
+        messages = [r.getMessage() for r in caplog.records]
+        assert [m for m in messages if "dflash_loss_objective='dpace' is not wired" in m]
+        assert not [m for m in messages if "is ignored when dflash_loss_objective" in m]
+
     def test_dflash_mode_still_creates_plain_dflash(self):
         """Without projector_type=dspark, conversion still yields a plain DFlash model."""
         config = deepcopy(DFLASH_DEFAULT_CFG["config"])
@@ -172,9 +194,9 @@ class TestDSparkForward:
         assert out.loss.requires_grad
         assert out.loss.dim() == 0
         # three-term loss bookkeeping
-        for key in ("ce_loss", "l1_loss", "confidence_loss", "base_accuracy"):
-            assert key in out.dspark_metrics
-        assert out.dspark_metrics["confidence_loss"] == 0.0  # no confidence head here
+        for key in ("loss_ce", "loss_tvd", "confidence_loss", "backbone_accuracy"):
+            assert key in out.draft_metrics
+        assert out.draft_metrics["confidence_loss"] == 0.0  # no confidence head here
 
         out.loss.backward()
         head_grad = model.dflash_module.markov_w2.weight.grad
@@ -194,7 +216,7 @@ class TestDSparkForward:
 
         input_ids, attention_mask, labels = self._make_batch(model.dflash_config.vocab_size)
         out = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
-        assert out.dspark_metrics["confidence_loss"] > 0.0
+        assert out.draft_metrics["confidence_loss"] > 0.0
 
         out.loss.backward()
         conf_grad = model.dflash_module.confidence_proj.weight.grad
@@ -904,68 +926,6 @@ class TestExplicitTargetLayerIds:
         assert cfg["dflash_config"]["target_layer_ids"] == [0, 7]
 
 
-class TestTvdPerTokenChunking:
-    """``_tvd_per_token`` must be chunk-size-invariant, and must chunk via ``split``.
-
-    Calls the helper directly: the model fixtures never reach a second chunk.
-    """
-
-    @staticmethod
-    def _run(chunk_size, n=12, vocab=32):
-        """Forward + backward through ``_tvd_per_token`` from a fixed seed."""
-        torch.manual_seed(0)
-        final = torch.randn(n, vocab, requires_grad=True)
-        teacher = torch.randn(n, vocab)
-        out = _tvd_per_token(final, teacher, chunk_size=chunk_size)
-        # Weight the rows unequally, so a cat that reassembles the chunks in the wrong
-        # order cannot cancel out in the reduction.
-        (out * torch.arange(1, n + 1, dtype=out.dtype)).sum().backward()
-        return out.detach(), final.grad.detach()
-
-    # 12 rows: 5 and 7 leave a ragged last chunk (5+5+2, 7+5); 13 and 1024 exceed n.
-    @pytest.mark.parametrize("chunk_size", [1, 2, 3, 5, 7, 11, 12, 13, 1024])
-    def test_chunk_size_invariant(self, chunk_size):
-        ref_out, ref_grad = self._run(12)  # one chunk == the unchunked reference
-        out, grad = self._run(chunk_size)
-        assert torch.equal(out, ref_out), f"TVD value changed at chunk_size={chunk_size}"
-        assert torch.equal(grad, ref_grad), f"TVD grad changed at chunk_size={chunk_size}"
-
-    def test_chunks_via_split_not_slice(self):
-        """Pin the split itself: slicing gives identical values, only the graph differs."""
-        final = torch.randn(8, 4, requires_grad=True)
-        teacher = torch.randn(8, 4)
-        out = _tvd_per_token(final, teacher, chunk_size=2)
-
-        # `alive` keeps visited nodes referenced: `.next_functions` returns fresh wrappers,
-        # and a freed wrapper's id() can be reused, which would truncate the walk.
-        seen, visited, alive, stack = set(), set(), [], [out.grad_fn]
-        while stack:
-            fn = stack.pop()
-            if fn is None or id(fn) in visited:
-                continue
-            visited.add(id(fn))
-            alive.append(fn)
-            seen.add(type(fn).__name__)
-            stack.extend(nxt for nxt, _ in fn.next_functions)
-
-        assert any(name.startswith("SplitBackward") for name in seen), (
-            f"expected a SplitBackward node in the graph, saw: {sorted(seen)}"
-        )
-        assert not any(name.startswith("SliceBackward") for name in seen), (
-            f"chunking regressed to per-chunk slicing, saw: {sorted(seen)}"
-        )
-
-    def test_no_grad_path_matches_grad_path(self):
-        """The ``requires_grad=False`` branch skips checkpointing; values must not move."""
-        torch.manual_seed(0)
-        final = torch.randn(12, 32)
-        teacher = torch.randn(12, 32)
-        with torch.no_grad():
-            plain = _tvd_per_token(final, teacher, chunk_size=5)
-        grad_out = _tvd_per_token(final.requires_grad_(True), teacher, chunk_size=5)
-        assert torch.equal(plain, grad_out.detach())
-
-
 def _draft_args(model, n_blocks=2, bsz=1):
     """Build the draft module's inputs with the model's own helpers, as training does."""
     m = model.dflash_module
@@ -1061,29 +1021,20 @@ class TestDdpGradientCoverage:
     def test_loss_branch_with_zero_total_weight(self):
         """Anchors exist but every label position is masked, so the three terms are skipped."""
         model = self._model()
-        m = model.dflash_module
         n_blocks, bsz = 2, 1
-        input_ids, anchors, _, args = _draft_args(model, n_blocks=n_blocks, bsz=bsz)
-        hidden = m(*args)
-        vocab = model.dflash_config.vocab_size
-        backbone_logits = torch.randn(bsz, n_blocks * BLOCK_SIZE, vocab, dtype=hidden.dtype)
-        base_outputs = DFlashBaseModelOutput(args[1])  # no base distribution: not read here
-        final_logits, confidence_logits = model._apply_markov_head(
-            hidden, backbone_logits, input_ids, anchors, n_blocks
-        )
-        final_logits.retain_grad()
-        confidence_logits.retain_grad()
-        loss, _, _ = model._compute_dspark_loss(
-            backbone_logits,
-            final_logits,
-            confidence_logits,
+        input_ids, anchors, keep, args = _draft_args(model, n_blocks=n_blocks, bsz=bsz)
+        batch = DraftBatch(
             input_ids,
+            torch.zeros(bsz, SEQ_LEN),  # blocks are kept, but no label position carries weight
             anchors,
-            torch.ones(bsz, n_blocks),  # blocks are kept ...
-            torch.zeros(bsz, SEQ_LEN),  # ... but no label position carries weight
-            base_outputs,
+            keep,
+            DFlashBaseModelOutput(args[1]),  # no base distribution: not read here
+            model.dflash_module(*args),
         )
-        loss.backward()
+        ctx = model._loss_context(batch)
+        ctx.logits.final.retain_grad()
+        model._compute_loss(ctx).loss.backward()
         assert not self._ungraded(model), f"no gradient for {self._ungraded(model)}"
-        # Through the draft's outputs, which an FSDP2 unit around the draft needs.
-        assert final_logits.grad is not None and confidence_logits.grad is not None
+        # Through the draft's outputs, not by reading its parameters, which an FSDP2 unit
+        # around the draft needs.
+        assert ctx.logits.final.grad is not None

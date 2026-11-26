@@ -31,6 +31,8 @@ import functools
 import gc
 import importlib.util
 import inspect
+import os
+import subprocess
 import sys
 from functools import partial, wraps
 from pathlib import Path
@@ -56,6 +58,8 @@ from vllm.utils.import_utils import has_deep_gemm
 
 import modelopt.torch.quantization as mtq
 from modelopt.recipe import ModelOptPTQRecipe
+from modelopt.torch.models.glm5_next import modeling_ptq_vllm as glm5_next_ptq
+from modelopt.torch.models.kimi_k3 import modeling_ptq_vllm as kimi_k3_ptq
 from modelopt.torch.opt.config_loader import load_config
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.conversion import set_quantizer_by_cfg
@@ -65,7 +69,6 @@ from modelopt.torch.quantization.nn import (
     register_quant_backend,
 )
 from modelopt.torch.quantization.plugins import vllm as vllm_plugin
-from modelopt.torch.quantization.plugins import vllm_indexer
 from modelopt.torch.quantization.plugins.vllm import (
     _ATTENTION_TYPES,
     VllmMLAAttention,
@@ -76,10 +79,7 @@ from modelopt.torch.quantization.plugins.vllm import (
     configure_vllm_nvfp4_attention_quantizers,
     disable_compilation,
 )
-from modelopt.torch.quantization.plugins.vllm_indexer import (
-    _QuantVLLMGlm5NextIndexer,
-    _QuantVLLMIndexerBase,
-)
+from modelopt.torch.quantization.plugins.vllm_indexer import _QuantVLLMIndexerBase
 from modelopt.torch.quantization.utils import (
     is_quantized_column_parallel_linear,
     is_quantized_row_parallel_linear,
@@ -483,7 +483,7 @@ def test_kimi_mlp_low_latency_linear_fake_quant_support(
     model = torch.nn.Module()
     setattr(model, parent_name, mlp)
     model.attention_projection = new_linear("down_proj", torch.bfloat16, (4, 4))
-    vllm_plugin.vllm_replace_quant_module_hook(model)
+    kimi_k3_ptq.prepare_kimi_mlps_on_the_fly(model)
     for linear in (mlp.gate_up_proj, mlp.down_proj, model.attention_projection):
         linear._setup()
 
@@ -502,7 +502,212 @@ def test_non_kimi_conversion_never_imports_kimi():
     with patch("builtins.__import__", side_effect=reject_kimi_import):
         linear = SimpleNamespace(quant_method=vllm_plugin.vllm_linear.UnquantizedLinearMethod())
         assert vllm_plugin._supports_fake_quant_linear(linear)
-        vllm_plugin.vllm_replace_quant_module_hook(torch.nn.Linear(2, 2))
+        kimi_k3_ptq.prepare_kimi_mlps_on_the_fly(torch.nn.Linear(2, 2))
+
+
+# Runs in a fresh interpreter: this file imports the model packages itself.
+_CHECK_MODEL_PACKAGES_IMPORTED = """
+import sys
+from pathlib import Path
+
+import modelopt.torch.quantization
+from modelopt.torch import models
+
+expected = {
+    f"modelopt.torch.models.{path.parent.name}.modeling_ptq_vllm"
+    for path in Path(models.__file__).parent.glob("*/modeling_ptq_vllm.py")
+}
+missing = sorted(expected - sys.modules.keys())
+assert expected and not missing, f"the vLLM plugin did not import {missing}"
+"""
+
+
+# A fresh interpreter importing torch, vLLM and modelopt can outlast the 60 s per-test default.
+@pytest.mark.timeout(300)
+def test_vllm_plugin_imports_every_model_package():
+    """Importing modelopt registers every model package's vLLM wrappers.
+
+    The vLLM plugin finds each ``modelopt/torch/models/<model_type>/modeling_ptq_vllm.py`` itself,
+    and the guard around each import would hide one that fails.
+    """
+    # The child only asserts; tracing its imports for coverage would just slow it down.
+    env = {k: v for k, v in os.environ.items() if k != "COVERAGE_PROCESS_START"}
+    result = subprocess.run(
+        [sys.executable, "-c", _CHECK_MODEL_PACKAGES_IMPORTED],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+# The layouts of GLM-5.3-Flash's native indexer that the GLM module supports: the module of the
+# indexer, and that of its op. Located here without the module's own lookup, so that a lookup that
+# stops finding a supported layout fails the test below rather than skipping its check.
+_GLM5NEXT_LAYOUTS = (
+    ("vllm.models.glm5next.common.attention", "vllm.models.glm5next.sparse_indexer"),  # vLLM main
+    (  # vLLM 0.28 and later releases
+        "vllm.models.glm5next.nvidia.attention",
+        "vllm.model_executor.layers.sparse_attn_indexer_kpool",
+    ),
+)
+
+# Runs in a fresh interpreter; the native indexer's module is named on the command line.
+_CHECK_GLM5NEXT_INDEXER_REGISTERED = """
+import importlib
+import sys
+
+import modelopt.torch.quantization
+from modelopt.torch.models.glm5_next.modeling_ptq_vllm import _QuantVLLMGlm5NextIndexer
+from modelopt.torch.quantization.nn import QuantModuleRegistry
+
+native = importlib.import_module(sys.argv[1]).Indexer
+dm_cls = QuantModuleRegistry[native]
+assert issubclass(dm_cls, _QuantVLLMGlm5NextIndexer), dm_cls.__mro__
+# Quantization configs name the wrapper by this key, as ``parent_class``.
+assert QuantModuleRegistry["vllm_Glm5NextIndexer"] is dm_cls
+"""
+
+
+def _supported_glm5next_indexer_module() -> str | None:
+    """Return the module of GLM-5.3-Flash's native indexer, for a layout the GLM module supports."""
+    for indexer_path, op_path in _GLM5NEXT_LAYOUTS:
+        try:
+            # Each lookup raises when this vLLM build lacks that part of the layout.
+            _ = importlib.import_module(indexer_path).Indexer
+            op_cls = importlib.import_module(op_path).SparseAttnIndexerKpool
+            _ = importlib.import_module(op_cls.__module__).kpool_ops
+        except (ImportError, AttributeError, NotImplementedError):
+            continue
+        return indexer_path
+    return None
+
+
+@pytest.mark.timeout(300)
+def test_vllm_plugin_registers_native_glm5next_indexer():
+    """GLM-5.3-Flash's native indexer is registered, under its key, wherever vLLM has a supported
+    layout; the other GLM tests convert a stand-in indexer."""
+    indexer_path = _supported_glm5next_indexer_module()
+    if indexer_path is None:
+        pytest.skip("this vLLM build has no supported GLM-5.3-Flash native indexer")
+    env = {k: v for k, v in os.environ.items() if k != "COVERAGE_PROCESS_START"}
+    result = subprocess.run(
+        [sys.executable, "-c", _CHECK_GLM5NEXT_INDEXER_REGISTERED, indexer_path],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+# Runs in a fresh interpreter. The module named first fails to import with an error the model
+# modules do not catch, as an unexpected failure inside a vLLM build would; the registration named
+# second must survive it.
+_CHECK_FAILED_IMPORT_IS_ISOLATED = """
+import sys
+
+failing, kept = sys.argv[1:]
+
+if kept == "deepseek_v4_indexer":
+    # Only the Mega-MoE module fails, as on platforms where vLLM's DeepSeek-V4 package does not
+    # import its NVIDIA model module up front: the indexer's module is already importable.
+    import vllm.models.deepseek_v4.attention
+
+    sys.modules.pop(failing, None)
+elif kept == "kimi_k3_mlp_preparation":
+    # vLLM's Kimi-K3 package imports its model module itself, and failing that import inside the
+    # package would leave the package half-imported. Fail only the lookup modelopt makes; the module
+    # is handed back below, as when vLLM imports it while loading the model.
+    import vllm.models.kimi_k3.nvidia.model
+
+    kimi_model = sys.modules.pop(failing)
+
+
+class _FailingImport:
+    def find_spec(self, name, path=None, target=None):
+        if name == failing:
+            raise RuntimeError(f"simulated failure importing {name}")
+
+
+failing_import = _FailingImport()
+sys.meta_path.insert(0, failing_import)
+
+import modelopt.torch.quantization
+from modelopt.torch.quantization.nn import QuantModuleRegistry
+from modelopt.torch.quantization.plugins.custom import (
+    CUSTOM_MODEL_PLUGINS,
+    register_custom_model_plugins_on_the_fly,
+)
+
+if kept == "kimi_k3_mlp_preparation":
+    # vLLM's Kimi-K3 module failed while modelopt was imported and is loaded now; conversion's
+    # first step must still prepare the MLP.
+    from unittest.mock import Mock
+
+    import torch
+    import vllm.model_executor.layers.linear as vllm_linear
+
+    sys.meta_path.remove(failing_import)
+    sys.modules[failing] = kimi_model
+    down_proj = object.__new__(vllm_linear.RowParallelLinear)
+    torch.nn.Module.__init__(down_proj)
+    mlp = object.__new__(kimi_model.KimiMLP)
+    torch.nn.Module.__init__(mlp)
+    mlp.gate_up_proj = Mock()
+    mlp.down_proj = down_proj
+    mlp.gemm_rs_ar = Mock()
+    register_custom_model_plugins_on_the_fly(mlp)
+    guard = type(mlp.gemm_rs_ar).__name__
+    assert guard == "_KimiGemmRsArFakeQuantGuard", f"conversion left Kimi-K3's MLP unprepared: {guard}"
+elif kept == "kimi_k3_callback":
+    kimi = sys.modules.get("modelopt.torch.models.kimi_k3.modeling_ptq_vllm")
+    assert kimi is not None, f"failing to import {failing} skipped Kimi-K3's module"
+    assert kimi.prepare_kimi_mlps_on_the_fly in CUSTOM_MODEL_PLUGINS
+else:
+    # The model module still imports: one that failed halfway would fail here, registering the
+    # indexer a second time.
+    import modelopt.torch.models.deepseek_v4.modeling_ptq_vllm as deepseek_v4
+    from vllm.models.deepseek_v4.attention import DeepseekV4Indexer
+
+    assert DeepseekV4Indexer in QuantModuleRegistry, f"failing to import {failing} dropped it"
+    assert deepseek_v4.DeepseekV4MegaMoEExperts is None
+"""
+
+
+@pytest.mark.timeout(300)
+@pytest.mark.parametrize(
+    ("failing", "kept"),
+    [
+        # GLM's module is imported after DeepSeek-V4's and before Kimi-K3's.
+        ("modelopt.torch.models.glm5_next.modeling_ptq_vllm", "kimi_k3_callback"),
+        ("vllm.models.deepseek_v4.nvidia.model", "deepseek_v4_indexer"),
+        ("vllm.models.kimi_k3.nvidia.model", "kimi_k3_mlp_preparation"),
+    ],
+)
+def test_failed_vllm_model_import_keeps_other_registrations(failing, kept):
+    """A model module that fails to import leaves the other models' wrappers in place, and a failed
+    optional import leaves its model's module complete: DeepSeek-V4's indexer registered, Kimi-K3's
+    MLPs prepared once vLLM's Kimi module imports."""
+    needs = {
+        "deepseek_v4_indexer": "vllm.models.deepseek_v4.attention",
+        "kimi_k3_mlp_preparation": "vllm.models.kimi_k3.nvidia.model",
+    }.get(kept)
+    if needs:
+        try:
+            importlib.import_module(needs)
+        except (ImportError, NotImplementedError):
+            pytest.skip(f"this vLLM build has no {needs}")
+    env = {k: v for k, v in os.environ.items() if k != "COVERAGE_PROCESS_START"}
+    result = subprocess.run(
+        [sys.executable, "-c", _CHECK_FAILED_IMPORT_IS_ISOLATED, failing, kept],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_kimi_legacy_gemm_rs_routes_by_down_proj_quantizers(fake_parallel_state, monkeypatch):
@@ -532,9 +737,9 @@ def test_kimi_legacy_gemm_rs_routes_by_down_proj_quantizers(fake_parallel_state,
     down_proj.quant_method = object.__new__(kimi_method)
     mlp.down_proj = down_proj
 
-    vllm_plugin.vllm_replace_quant_module_hook(mlp)
+    kimi_k3_ptq.prepare_kimi_mlps_on_the_fly(mlp)
     guard = mlp.run_gemm_rs
-    vllm_plugin.vllm_replace_quant_module_hook(mlp)
+    kimi_k3_ptq.prepare_kimi_mlps_on_the_fly(mlp)
     assert mlp.run_gemm_rs is guard
     assert vllm_plugin.QuantModuleRegistry.convert(down_proj) is down_proj
     assert guard.down_proj is down_proj
@@ -584,9 +789,9 @@ def test_kimi_gemm_rs_ar_bypasses_enabled_fake_quantizers(quantizer_name):
     gemm_rs_ar.should_run.side_effect = lambda inputs: inputs.shape[0] >= 128
     mlp.gemm_rs_ar = gemm_rs_ar
 
-    vllm_plugin.vllm_replace_quant_module_hook(mlp)
-    vllm_plugin.vllm_replace_quant_module_hook(mlp)
-    assert isinstance(mlp.gemm_rs_ar, vllm_plugin._KimiGemmRsArFakeQuantGuard)
+    kimi_k3_ptq.prepare_kimi_mlps_on_the_fly(mlp)
+    kimi_k3_ptq.prepare_kimi_mlps_on_the_fly(mlp)
+    assert isinstance(mlp.gemm_rs_ar, kimi_k3_ptq._KimiGemmRsArFakeQuantGuard)
     assert torch.equal(mlp(x), x + 2)
     assert gemm_rs_ar.call_count == 1
     assert down_proj.forward.call_count == 0
@@ -622,11 +827,12 @@ def test_kimi_gemm_rs_guard_tracks_converted_down_projection(fake_parallel_state
     gemm_rs_ar.should_run.return_value = True
     mlp.gemm_rs_ar = gemm_rs_ar
 
-    vllm_plugin.vllm_replace_quant_module_hook(mlp)
+    # Conversion runs the registered callbacks first, Kimi-K3's MLP preparation among them.
+    mtq.replace_quant_module(mlp)
     guard = mlp.gemm_rs_ar
-    converted = vllm_plugin.QuantModuleRegistry.convert(down_proj)
 
-    assert converted is down_proj
+    assert isinstance(guard, kimi_k3_ptq._KimiGemmRsArFakeQuantGuard)
+    assert mlp.down_proj is down_proj
     assert guard.down_proj is down_proj
     assert down_proj._fake_quant_supported
     for name in _VLLMParallelLinear._QUANTIZER_NAMES:
@@ -1367,7 +1573,7 @@ def _calibrate_and_clip_indexer_k(self, cfg):
             if amaxes["k"][name]:
                 module.indexer_k_quantizer.amax = module.indexer_k_quantizer.amax / 8
             self.indexer_k_snapshots[name] = _cache_row_signature(module.k_cache.kv_cache)
-        if isinstance(module, _QuantVLLMGlm5NextIndexer):
+        if isinstance(module, glm5_next_ptq._QuantVLLMGlm5NextIndexer):
             module._score = functools.partial(
                 _record_scorer_call, module._score, name, self.indexer_scorer_calls
             )
@@ -1378,17 +1584,17 @@ def _record_scorer_call(score, name, calls, original, bound, paged):
     """Spy on ``_QuantVLLMGlm5NextIndexer._score``: the layer, the path, what top-k reads and the
     in-kernel numerics passed to DeepGEMM."""
     passed = {}
-    call_scorer = vllm_indexer._call_deep_gemm_scorer
+    call_scorer = glm5_next_ptq._call_deep_gemm_scorer
 
     def spy(deep_gemm_utils, arguments, weights, scorer_kwargs, paged):
         passed.update(scorer_kwargs)
         return call_scorer(deep_gemm_utils, arguments, weights, scorer_kwargs, paged)
 
-    vllm_indexer._call_deep_gemm_scorer = spy
+    glm5_next_ptq._call_deep_gemm_scorer = spy
     try:
         logits = score(original, bound, paged)
     finally:
-        vllm_indexer._call_deep_gemm_scorer = call_scorer
+        glm5_next_ptq._call_deep_gemm_scorer = call_scorer
     numerics = {key: passed[key] for key in ("mma_accum", "post_relu") if key in passed}
     calls.append((name, paged, str(logits.dtype), bool(logits.isnan().any()), numerics))
     return logits
