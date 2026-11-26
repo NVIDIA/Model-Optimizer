@@ -174,6 +174,25 @@ def _region_matches_filter(region, graph, filter_patterns: list[str]) -> bool:
     return False
 
 
+def _check_resumed_config(restored: Config, requested: Config, state_path: Path) -> None:
+    """Raise if a checkpoint was tuned with different quantization settings than requested.
+
+    Checkpointed latencies and the exported Q/DQ dtype both depend on these settings, so
+    resuming under a different request would silently export the checkpoint's precision.
+    """
+    mismatches = [
+        f"{field}: checkpoint={getattr(restored, field)!r}, requested={getattr(requested, field)!r}"
+        for field in ("default_quant_type", "default_dq_dtype")
+        if getattr(restored, field) != getattr(requested, field)
+    ]
+    if mismatches:
+        raise ValueError(
+            f"Checkpoint {state_path} does not match the requested quantization settings "
+            f"({'; '.join(mismatches)}). Use a different output_dir/state_file, or remove the "
+            "checkpoint to re-tune from scratch."
+        )
+
+
 def region_pattern_autotuning_workflow(
     model_or_path: str | onnx.ModelProto,
     output_dir: Path | None = None,
@@ -294,6 +313,8 @@ def region_pattern_autotuning_workflow(
             autotuner.baseline_latency_ms = None
             autotuner.config = config
             logger.info("Re-profiling checkpoint measurements for transformed models")
+        else:
+            _check_resumed_config(autotuner.config, config, state_path)
     else:
         logger.info("Starting new autotuning session")
 
