@@ -114,7 +114,7 @@ def _run_capturing(
         control = None
         command = cmd_parts
         pass_fds: tuple[int, ...] = ()
-        if cleanup_process_group and os.name == "posix":
+        if cleanup_process_group:
             if sys.platform != "linux":
                 raise ProcessGroupCleanupError("Deployment process supervision requires Linux")
             control, child_channel = socket.socketpair()
@@ -176,14 +176,14 @@ def _capture_output(
             capture_failed.set()
 
     reader = threading.Thread(target=_drain, daemon=True)
-    kill_group = True
+    clean_pipe = False
     try:
         reader.start()
         _wait_without_reaping(process, timeout, capture_failed)
-        if control is None and not (cleanup_process_group or capture_failed.is_set()):
+        if control is None and not capture_failed.is_set():
             reader.join(_ORPHAN_PIPE_TIMEOUT_S)
-            kill_group = reader.is_alive() or capture_failed.is_set()
-            if reader.is_alive():
+            clean_pipe = not reader.is_alive()
+            if not clean_pipe:
                 warnings.warn(
                     f"{executable} left descendants holding its output pipe open; killing the "
                     "process group. Output may be truncated."
@@ -194,7 +194,7 @@ def _capture_output(
                 returncode = _finish_deployment(process, control, executable)
             else:
                 # On interruption or a stuck reader the entire original group needs to stop.
-                if kill_group:
+                if not clean_pipe or capture_failed.is_set():
                     with contextlib.suppress(ProcessLookupError, PermissionError):
                         if os.name == "posix":
                             os.killpg(process.pid, signal.SIGKILL)
