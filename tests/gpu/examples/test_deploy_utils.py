@@ -27,6 +27,9 @@ from _test_utils.deploy_utils import ModelDeployer, _run_deploy_via_subprocess
         ("vllm", "prefill_context_parallel_size", 2, True),
         ("vllm", "pipeline_parallel_size", 1, False),
         ("sglang", "dp_size", 2, True),
+        ("sglang", "base_gpu_id", 1, True),  # shifts which devices the ranks use
+        ("sglang", "gpu_id_step", 2, True),  # skips devices between ranks
+        ("sglang", "base_gpu_id", 0, False),
         ("trtllm", "context_parallel_size", 4, True),
         ("trtllm", "gpus_per_node", 8, False),
         ("sglang", "ep_size", 2, False),  # expert parallel shares the TP ranks
@@ -35,7 +38,7 @@ from _test_utils.deploy_utils import ModelDeployer, _run_deploy_via_subprocess
 def test_text_deploy_topology_overrides(backend, field, value, rejected):
     kwargs = {"tensor_parallel_size": 2, "engine_kwargs": {field: value}}
     if rejected:
-        with pytest.raises(ValueError, match="Rank-multiplying"):
+        with pytest.raises(ValueError, match="this harness cannot perform"):
             ModelDeployer(backend=backend, model_id="test/model", **kwargs)
     else:
         ModelDeployer(backend=backend, model_id="test/model", **kwargs)

@@ -202,29 +202,38 @@ class ModelDeployer:
                 f"Set model_id and tensor_parallel_size instead of {reserved_keys} in "
                 "engine_kwargs so resource checks and engine arguments stay consistent."
             )
-        # Resource checks cover tensor_parallel_size ranks only; rank-multiplying fields
-        # (pipeline/context/data parallelism) would bypass them on this single-node harness.
-        topology_fields = {
+        # Resource checks cover tensor_parallel_size ranks on devices 0..TP-1; fields that
+        # multiply ranks (pipeline/context/data parallelism) or move the placement
+        # (base_gpu_id/gpu_id_step) would bypass them on this single-node harness. Each
+        # field keeps only the one value that leaves count and placement unchanged.
+        topology_defaults = {
             "vllm": {
-                "pipeline_parallel_size",
-                "data_parallel_size",
-                "prefill_context_parallel_size",
+                "pipeline_parallel_size": 1,
+                "data_parallel_size": 1,
+                "prefill_context_parallel_size": 1,
             },
-            "sglang": {"pp_size", "dp_size", "nnodes"},
+            "sglang": {
+                "pp_size": 1,
+                "dp_size": 1,
+                "nnodes": 1,
+                "node_rank": 0,
+                "base_gpu_id": 0,
+                "gpu_id_step": 1,
+            },
             "trtllm": {
-                "pipeline_parallel_size",
-                "context_parallel_size",
-                "moe_cluster_parallel_size",
+                "pipeline_parallel_size": 1,
+                "context_parallel_size": 1,
+                "moe_cluster_parallel_size": 1,
             },
-        }.get(backend, set())
+        }.get(backend, {})
         if unsupported := {
             key: self.engine_kwargs[key]
-            for key in topology_fields & self.engine_kwargs.keys()
-            if self.engine_kwargs[key] != 1
+            for key in topology_defaults.keys() & self.engine_kwargs.keys()
+            if self.engine_kwargs[key] != topology_defaults[key]
         }:
             raise ValueError(
-                f"Rank-multiplying engine option(s) {sorted(unsupported)} need resource checks "
-                "this harness cannot perform"
+                f"Rank-count or device-placement engine option(s) {sorted(unsupported)} need "
+                "resource checks this harness cannot perform"
             )
 
     def _engine_arguments(self):

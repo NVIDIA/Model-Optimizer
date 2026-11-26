@@ -221,14 +221,19 @@ def _write_json(path, value):
 
 
 def _active_weight_files(component):
+    """Return the weight index's tensor->file map, or (None, files) for a single file."""
     for name in ("diffusion_pytorch_model.safetensors", "model.safetensors"):
         index = component / f"{name}.index.json"
         if index.is_file():
             weight_map = json.loads(index.read_text(encoding="utf-8"))["weight_map"]
-            return {component / filename for filename in weight_map.values()}
+            return weight_map, {component / filename for filename in weight_map.values()}
         if (component / name).is_file():
-            return {component / name}
+            return None, {component / name}
     raise FileNotFoundError(f"No safetensors weights or weight index in {component}")
+
+
+# The NVFP4 export format stores E4M3 per-block scales and FP32 global/input scales.
+_SCALE_DTYPES = {"weight_scale": "F8_E4M3", "weight_scale_2": "F32", "input_scale": "F32"}
 
 
 def _valid_nvfp4_scale(scale, suffix, weight_shape):
@@ -267,12 +272,25 @@ def _check_static_nvfp4(snapshot, directory):
         for group in groups.values()
     ), "Published NVFP4 must contain static Linear weights and input activations"
     shards = set(component.glob("*.safetensors"))
-    active_files = _active_weight_files(component)
+    weight_map, active_files = _active_weight_files(component)
     with ExitStack() as files:
-        entries = {}
-        for path in sorted(active_files):
-            shard = files.enter_context(safe_open(str(path), framework="pt", device="cpu"))
-            entries.update(dict.fromkeys(shard.keys(), shard))
+        opened = {
+            path: files.enter_context(safe_open(str(path), framework="pt", device="cpu"))
+            for path in sorted(active_files)
+        }
+        if weight_map is None:
+            (shard,) = opened.values()
+            entries = dict.fromkeys(shard.keys(), shard)
+        else:
+            # The index is authoritative: only the shard it names may supply a tensor, so
+            # a duplicated key in another active shard cannot shadow the indexed copy.
+            names = {path: set(shard.keys()) for path, shard in opened.items()}
+            entries = {}
+            for tensor_name, filename in sorted(weight_map.items()):
+                assert tensor_name in names[component / filename], (
+                    f"Weight index maps {tensor_name} to a shard that lacks it"
+                )
+                entries[tensor_name] = opened[component / filename]
         packed = sorted(
             name.removesuffix(".weight")
             for name, shard in entries.items()
@@ -284,7 +302,7 @@ def _check_static_nvfp4(snapshot, directory):
                 for pattern in quant.get("ignore", [])
             )
         )
-        missing = {suffix: [] for suffix in ("weight_scale", "weight_scale_2", "input_scale")}
+        missing = {suffix: [] for suffix in _SCALE_DTYPES}
         invalid = []
         for prefix in packed:
             weight = f"{prefix}.weight"
@@ -293,7 +311,11 @@ def _check_static_nvfp4(snapshot, directory):
                 key = f"{prefix}.{suffix}"
                 if key not in entries:
                     missing[suffix].append(prefix)
-                elif not _valid_nvfp4_scale(entries[key].get_tensor(key), suffix, shape):
+                    continue
+                scale_slice = entries[key].get_slice(key)
+                if scale_slice.get_dtype() != _SCALE_DTYPES[suffix] or not _valid_nvfp4_scale(
+                    entries[key].get_tensor(key), suffix, shape
+                ):
                     invalid.append(key)
     _write_json(
         directory / "static-activation-scales.json",

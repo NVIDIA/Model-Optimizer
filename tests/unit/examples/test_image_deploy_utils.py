@@ -80,10 +80,12 @@ def test_static_nvfp4_accepts_valid_scales(tmp_path):
     [
         {"weight_scale": torch.full((4, 4), torch.nan).to(torch.float8_e4m3fn)},
         {"weight_scale": torch.ones(4, 1)},  # too few blocks per output row
+        {"weight_scale": torch.ones(4, 4, dtype=torch.int64)},  # block scales are F8_E4M3
         {"weight_scale_2": torch.ones(4)},  # global scale must be a single scalar
+        {"weight_scale_2": torch.ones(1, dtype=torch.float16)},  # global scale is FP32
         {"input_scale": torch.zeros(1)},  # nonpositive
     ],
-    ids=["nan", "wrong-block-count", "non-scalar-global", "zero"],
+    ids=["nan", "wrong-block-count", "int-dtype", "non-scalar-global", "fp16-dtype", "zero"],
 )
 def test_static_nvfp4_rejects_invalid_scales(tmp_path, bad_scale):
     component = _make_component(
@@ -112,3 +114,17 @@ def test_static_nvfp4_ignores_unreferenced_shards(tmp_path, indexed):
         _check_static_nvfp4(component.parent, tmp_path)
     evidence = json.loads((tmp_path / "static-activation-scales.json").read_text())
     assert evidence["unreferenced_shards"] == ["model-00002-of-00002.safetensors"]
+
+
+def test_static_nvfp4_indexed_shard_cannot_be_shadowed(tmp_path):
+    """A scale duplicated into a second active shard must not hide the indexed copy."""
+    indexed = _valid_tensors(weight_scale=torch.zeros(4, 4).to(torch.float8_e4m3fn))
+    duplicate = {**_valid_tensors(), "extra.bias": torch.ones(2)}
+    first, second = "model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"
+    component = _make_component(
+        tmp_path / "snapshot",
+        {first: indexed, second: duplicate},
+        index={**dict.fromkeys(indexed, first), "extra.bias": second},
+    )
+    with pytest.raises(AssertionError, match="invalid scales"):
+        _check_static_nvfp4(component.parent, tmp_path)

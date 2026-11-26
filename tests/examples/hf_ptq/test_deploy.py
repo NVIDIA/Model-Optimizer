@@ -129,13 +129,30 @@ def command(request, _deployment_cache, monkeypatch):
         # Override values are caller-supplied and may carry credentials; recipe values are public.
         params["private_output"] = _native_overrides(overrides, backend)
     if _deployment_cache is None:
+        # Workers start from tests/: resolve every inherited path variable to absolute so
+        # cache and credential locations survive the cwd change.
+        for key in (
+            "HF_HUB_CACHE",
+            "HUGGINGFACE_HUB_CACHE",
+            "HF_HOME",
+            "TRANSFORMERS_CACHE",
+            "PYTORCH_TRANSFORMERS_CACHE",
+            "PYTORCH_PRETRAINED_BERT_CACHE",
+        ):
+            if value := os.getenv(key):
+                monkeypatch.setenv(key, str(Path(value).expanduser().resolve()))
         # The Hub resolves HF_HUB_CACHE, then legacy HUGGINGFACE_HUB_CACHE and HF_HOME;
         # reuse its answer so workers and the parent agree on one absolute path.
         try:
             from huggingface_hub import constants
         except ImportError:
             constants = None
-        hub_root = getattr(constants, "HF_HUB_CACHE", None) or os.getenv("HF_HUB_CACHE")
+        hub_root = (
+            os.getenv("HF_HUB_CACHE")
+            or os.getenv("HUGGINGFACE_HUB_CACHE")
+            or (os.path.join(os.getenv("HF_HOME", ""), "hub") if os.getenv("HF_HOME") else None)
+            or getattr(constants, "HF_HUB_CACHE", None)
+        )
         if hub_root:
             monkeypatch.setenv("HF_HUB_CACHE", str(Path(hub_root).expanduser().resolve()))
         yield deployer(**params)

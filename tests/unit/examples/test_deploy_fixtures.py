@@ -30,16 +30,23 @@ deploy = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(deploy)
 
 
-_HUB_LOCATION_VARS = ("HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "HF_HOME")
-
-
 @pytest.mark.parametrize(
-    "cache_var", [None, *_HUB_LOCATION_VARS], ids=["owned", *_HUB_LOCATION_VARS]
+    ("env_var", "env_value", "hub_subpath"),
+    [
+        (None, None, None),
+        ("HF_HUB_CACHE", "hub", "hub"),
+        ("HUGGINGFACE_HUB_CACHE", "hub", "hub"),
+        ("HF_HOME", "home", "home/hub"),
+        ("TRANSFORMERS_CACHE", "legacy", "hub"),
+    ],
+    ids=["owned", "HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "HF_HOME", "TRANSFORMERS_CACHE"],
 )
-def test_deployment_cache(monkeypatch, tmp_path, cache_var):
+def test_deployment_cache(monkeypatch, tmp_path, env_var, env_value, hub_subpath):
     monkeypatch.chdir(tmp_path)
     for key in (
-        *_HUB_LOCATION_VARS,
+        "HF_HUB_CACHE",
+        "HUGGINGFACE_HUB_CACHE",
+        "HF_HOME",
         "HF_HUB_OFFLINE",
         "TRANSFORMERS_OFFLINE",
         "TRANSFORMERS_CACHE",
@@ -48,11 +55,8 @@ def test_deployment_cache(monkeypatch, tmp_path, cache_var):
     ):
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setattr(constants, "HF_HUB_CACHE", "hub")
-    if cache_var:
-        monkeypatch.setenv(cache_var, "hub")
-    snapshot = tmp_path / "hub/models--test--model/snapshots/staged/config.json"
-    snapshot.parent.mkdir(parents=True)
-    snapshot.write_text("{}", encoding="utf-8")
+    if env_var:
+        monkeypatch.setenv(env_var, env_value)
     case = {"model_id": "test/model", "backends": {"vllm": {}}}
     request = SimpleNamespace(
         config=SimpleNamespace(getoption=lambda name: None),
@@ -61,6 +65,10 @@ def test_deployment_cache(monkeypatch, tmp_path, cache_var):
         param=(case, "vllm"),
     )
     monkeypatch.setattr(deploy, "_deployment_settings", lambda config: ({}, load_deploy_config()))
+    expected = (tmp_path / hub_subpath).resolve() if env_var else None
+    snapshot = (expected or tmp_path / "hub") / "models--test--model/snapshots/staged/config.json"
+    snapshot.parent.mkdir(parents=True)
+    snapshot.write_text("{}", encoding="utf-8")
     cache_fixture = deploy._deployment_cache.__wrapped__(request)
     cache = next(cache_fixture)
     command_fixture = deploy.command.__wrapped__(request, cache, monkeypatch)
@@ -68,15 +76,18 @@ def test_deployment_cache(monkeypatch, tmp_path, cache_var):
     assert command.model_id == "test/model"
     worker_cache = Path(os.environ["HF_HUB_CACHE"])
     assert worker_cache.is_absolute()
-    if cache_var:
-        assert (worker_cache / snapshot.relative_to(tmp_path / "hub")).read_text() == "{}"
+    if env_var:
+        # Relative inherited paths are resolved before workers change to tests/.
+        assert Path(os.environ[env_var]) == (tmp_path / env_value).resolve()
+        assert worker_cache == expected
+        assert (worker_cache / snapshot.relative_to(expected)).read_text() == "{}"
     else:
         assert worker_cache != snapshot.parents[3]
         assert worker_cache.is_dir()
     command_fixture.close()
     cache_fixture.close()
     assert snapshot.read_text() == "{}"
-    if not cache_var:
+    if not env_var:
         assert not worker_cache.exists()
 
 
