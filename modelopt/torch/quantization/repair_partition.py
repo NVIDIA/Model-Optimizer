@@ -529,6 +529,8 @@ def _validate_rowwise_activation_statistics(quantizer, view, blocks, channel_blo
         view.intervals(quantizer.rotate_block_size or view.shape[-1])
     if not quantizer.is_enabled:
         return
+    if quantizer._if_calib:
+        raise ValueError("Rowwise TP input calibration must be disabled before placement.")
     if (quantizer.bias or {}).get("type") == "dynamic":
         raise ValueError("Rowwise TP dynamic activation bias requires global channel statistics.")
     if channel_block:
