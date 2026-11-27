@@ -76,6 +76,13 @@ def _is_nvfp4_quantizer(quantizer) -> bool:
     )
 
 
+def _quantizes(quantizer) -> bool:
+    """Whether the quantizer changes its input: enabled and not only calibrating."""
+    # _if_quant is internal TensorQuantizer state with no public property; toggled via
+    # enable_quant()/disable_quant().
+    return quantizer.is_enabled and quantizer._if_quant
+
+
 def _nvfp4_quantize_weight_along_k(weight, weight_quantizer):
     """Apply NVFP4 fake quantization to Conv3D weight along the GEMM K dimension."""
     w_flat = weight.reshape(weight.shape[0], -1)
@@ -93,12 +100,13 @@ class _QuantConv3d(QuantLinearConvBase):
     default_quant_desc_weight = tensor_quant.QUANT_DESC_8BIT_CONV3D_WEIGHT_PER_CHANNEL
 
     def _should_use_implicit_gemm(self):
-        """Check if both quantizers are NVFP4 and the implicit GEMM kernel is available."""
+        """Check if both quantizers are NVFP4, at least one quantizes, and the kernel applies."""
         return (
             hasattr(self, "input_quantizer")
             and hasattr(self, "weight_quantizer")
             and _is_nvfp4_quantizer(self.input_quantizer)
             and _is_nvfp4_quantizer(self.weight_quantizer)
+            and (_quantizes(self.input_quantizer) or _quantizes(self.weight_quantizer))
             and self.groups == 1
         )
 
