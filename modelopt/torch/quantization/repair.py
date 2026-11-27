@@ -23,7 +23,7 @@ from torch import nn
 from torch.distributed.tensor import DTensor
 
 from .ggml.registry import IQ_FORMAT_REGISTRY
-from .nn import QuantModule, SequentialQuantizer, TensorQuantizer
+from .nn import GroupedQuantizer, QuantModule, SequentialQuantizer, TensorQuantizer
 from .utils.core_utils import _fsdp2_persistent_parameters, _weight_quantizer_owners
 
 __all__: list[str] = []
@@ -47,6 +47,10 @@ class IQRepairPlan:
 
 
 def _iq_quantizer(container):
+    if isinstance(container, GroupedQuantizer):
+        if any(_iq_quantizer(quantizer) is not None for quantizer in container):
+            raise ValueError("IQ Bypass requires an unambiguous native weight quantizer")
+        return None
     if isinstance(container, SequentialQuantizer):
         enabled = [q for q in container if q.is_enabled and q._if_quant]
         iq = [q for q in enabled if q.backend == "ggml" and q.num_bits in IQ_FORMAT_REGISTRY]

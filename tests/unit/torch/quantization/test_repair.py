@@ -252,3 +252,53 @@ def test_iq_resident_nonoffload_hook_needs_no_optional_offload_plugin(monkeypatc
     plan = plan_iq_repair([model])
     assert len(plan.bindings[0]) == 1
     assert model.weight is original and model.weight.requires_grad
+
+
+def test_legacy_first_projection_quantizer_is_detected_by_export():
+    from modelopt.torch.export.quant_utils import (
+        get_quantization_format,
+        get_weight_block_size,
+        uses_iq_quantization,
+    )
+    from modelopt.torch.quantization.config import QuantizerAttributeConfig
+    from modelopt.torch.quantization.nn import TensorQuantizer
+    from modelopt.torch.quantization.utils.core_utils import (
+        representative_weight_quantizer,
+        weight_attr_names,
+    )
+
+    module = nn.Module()
+    module._first_proj_attr = "up_proj"
+    module.up_proj = nn.Parameter(torch.randn(2, 256))
+    quantizer = TensorQuantizer(
+        QuantizerAttributeConfig(num_bits="iq1_s", backend="ggml", block_sizes={-1: 256})
+    )
+    module.gate_up_proj_weight_quantizers = nn.ModuleList([quantizer])
+    assert list(weight_attr_names(module)) == ["up_proj"]
+    assert representative_weight_quantizer(module, "up_proj") is quantizer
+    assert get_quantization_format(module) == "iq1_s"
+    assert get_weight_block_size(module, "up_proj") == 256
+    assert uses_iq_quantization(module)
+
+
+@pytest.mark.parametrize("native_iq", [False, True])
+def test_iq_plan_refuses_an_unsupported_grouped_iq_container(native_iq):
+    from modelopt.torch.quantization.nn import GroupedQuantizer
+
+    model = nn.Sequential(nn.Linear(256, 2, bias=False), nn.Linear(256, 2, bias=False))
+    entries = [_iq("1.weight_quantizer", "iq1_s")]
+    if native_iq:
+        entries.append(_iq("0.weight_quantizer", "iq1_s"))
+    else:
+        entries.append({"quantizer_name": "0.weight_quantizer", "cfg": {"num_bits": 8}})
+    mtq.quantize(model, {**_config(entries), "algorithm": None})
+    model[0].weight_quantizer = GroupedQuantizer(model[0].weight_quantizer)
+    original = model[0].weight
+    if native_iq:
+        with pytest.raises(ValueError, match="unambiguous native weight quantizer"):
+            plan_iq_repair([model])
+    else:
+        plan = plan_iq_repair([model])
+        assert len(plan.bindings[0]) == 1
+        assert plan.bindings[0][0].module is model[1]
+    assert model[0].weight is original and model[0].weight.requires_grad
