@@ -1,0 +1,86 @@
+# On-policy rejection-memory training of the Nemotron-3.5-Bolt-74B-A9B-24GB LiLiCorr drafter (see
+# ../README.md). Same layout as qwen3.5-9b.yaml: a ModelOpt DFlash recipe with the drafter keys of the
+# recipe that trained the released LiLiCorr, plus the `onpolicy` section. Paths are container paths,
+# mounted by launch/onpolicy.sbatch (CONFIG=/code/.../configs/bolt-74b-lilicorr.yaml).
+# The target is the BF16 fold of the 24GB checkpoint: vLLM runs its ggml-packed experts only on SM12x.
+metadata:
+  description: On-policy rejection-memory LiLiCorr training on Nemotron-3.5-Bolt-74B-A9B rollouts.
+model:
+  model_name_or_path: /model
+  trust_remote_code: true
+  use_fake_base_for_offline: true
+training:
+  output_dir: /out
+  max_steps: 1000
+  per_device_train_batch_size: 2
+  learning_rate: 1.0e-4
+  warmup_steps: 20
+  lr_scheduler_type: constant_with_warmup
+  training_seq_len: 4096
+  logging_steps: 1
+  save_steps: 50
+  save_total_limit: 3
+  weight_decay: 0.0
+  max_grad_norm: 1.0
+  bf16: true
+  tf32: true
+  ddp_find_unused_parameters: true
+  ddp_timeout: 1800
+dflash:
+  dflash_init_checkpoint: /draft0
+  dflash_block_size: 8
+  # Rounds trained per sequence; block 8 has about twice the rounds of block 16 per token.
+  dflash_num_anchors: 512
+  dflash_use_torch_compile: true
+  dflash_self_logit_distillation: true
+  dflash_loss_objective: decay
+  dflash_loss_decay_factor: 4.0
+  dflash_mask_token_id: 990
+  # Sinks train on the eager attention path: FlexAttention has no sink column.
+  dflash_attention_sink: true
+  dflash_swa_window_size: 1024
+  dflash_lilicorr_w_ce: 0.05
+  dflash_lilicorr_w_margin: 0.0
+  dflash_lilicorr_w_pen: 0.0
+  dflash_lilicorr_w_cal: 0.45
+  dflash_lilicorr_margin: 2.0
+  dflash_architecture_config:
+    num_hidden_layers: 5
+    num_attention_heads: 32
+    num_key_value_heads: 2
+    head_dim: 128
+    intermediate_size: 12288
+    projector_type: lilicorr
+    target_layer_ids: [1, 18, 35, 51, 68, 85]
+    conv_kernel_size: 2
+    conv_group_size: 16
+    lilicorr_candidate_topk: 8
+    lilicorr_hidden_size: 1024
+    lilicorr_factor_dim: 1024
+    lilicorr_num_layers: 2
+    lilicorr_num_heads: 8
+    lilicorr_mlp_ratio: 2.0
+    lilicorr_logit_scale: 8.0
+    lilicorr_vector_eps: 1.0e-4
+onpolicy:
+  # Deployment regime. T=0: temperature 0 (and draft_sample_method greedy for a greedy deployment).
+  memory: true
+  num_speculative_tokens: 7
+  draft_sample_method: probabilistic
+  draft_attention_backend: FLASH_ATTN
+  sampling:
+    temperature: 1.0
+    top_p: 1.0
+    top_k: 0
+    min_p: 0.0
+    presence_penalty: 0.0
+    frequency_penalty: 0.0
+    repetition_penalty: 1.0
+  data_dir: /data
+  max_prompt_len: 2048
+  prompts_per_step: 16
+  # Appended to what `rollout.py serve` always sets. The target flags follow the Bolt AL evaluation
+  # (FLASHINFER target attention, FlashInfer Mamba kernels with BF16 state); the KV cache stays BF16,
+  # as in training. max_num_seqs x (1 + NS) must fit the batched-token budget.
+  server_args: [--trust-remote-code, --gpu-memory-utilization, "0.85", --max-num-seqs, "64", --seed, "0", --attention-backend, FLASHINFER, --mamba-backend,
+    flashinfer, --mamba-ssm-cache-dtype, bfloat16, --mamba-cache-dtype, bfloat16]

@@ -98,6 +98,9 @@ class OnPolicyConfig(BaseModel):
     memory: bool = True
     num_speculative_tokens: int = 15
     draft_sample_method: Literal["greedy", "probabilistic"] = "probabilistic"
+    # None leaves the choice to vLLM. A drafter with attention sinks needs FLASH_ATTN on SM100, where
+    # FLASHINFER silently drops the sink; the memory consumer refuses any other backend anyway.
+    draft_attention_backend: str | None = None
     sampling: SamplingConfig = SamplingConfig()
     # Prompts: jsonl shards of {"conversations": [...]}; a reply with "</think>" marks a think row.
     data_dir: str
@@ -335,6 +338,8 @@ def serve_command(
         "num_speculative_tokens": ns,
         "draft_sample_method": cfg.draft_sample_method,
     }
+    if cfg.draft_attention_backend:
+        spec["attention_backend"] = cfg.draft_attention_backend
     argv = [
         *(sys.executable, "-m", "vllm.entrypoints.cli.main", "serve", target),
         # Node-local: the trainer is the only client, and the weight-update endpoints unpickle bodies.
