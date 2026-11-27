@@ -130,11 +130,14 @@ class TestDominoForward:
         out = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
         assert out.loss.requires_grad
         assert out.loss.dim() == 0
-        # dual-loss bookkeeping
-        assert "base_loss" in out.domino_metrics
-        assert "final_loss" in out.domino_metrics
-        assert "base_accuracy" in out.domino_metrics
-        assert out.domino_metrics["lambda_base"] == 1.0  # default before any callback
+        # dual-loss bookkeeping, on top of the objective's own per-term losses
+        assert "loss_backbone" in out.draft_metrics
+        assert "loss_final" in out.draft_metrics
+        assert "loss_ce" in out.draft_metrics
+        assert "backbone_accuracy" in out.draft_metrics
+        assert out.draft_metrics["lambda_base"] == 1.0  # default before any callback
+        # No diagnostic asks the device for a dtype the step does not otherwise need.
+        assert all(v.dtype is not torch.float64 for v in out.draft_metrics.values())
 
         out.loss.backward()
         gru_grad = model.dflash_module.prefix_gru.weight_ih_l0.grad
@@ -145,7 +148,7 @@ class TestDominoForward:
         assert backbone_grad is not None and torch.isfinite(backbone_grad).all()
 
     def test_lambda_zero_uses_final_only(self):
-        """With lambda_base=0 the loss equals final_loss (correction head only)."""
+        """With lambda_base=0 the loss equals loss_final (correction head only)."""
         model = get_tiny_llama(num_hidden_layers=4)
         mtsp.convert(model, [("dflash", _get_domino_config())])
         model.train()
@@ -154,7 +157,7 @@ class TestDominoForward:
         vocab = model.dflash_config.vocab_size
         input_ids, attention_mask, labels = self._make_batch(vocab)
         out = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
-        assert abs(out.loss.item() - out.domino_metrics["final_loss"]) < 1e-4
+        assert abs(out.loss.item() - out.draft_metrics["loss_final"].item()) < 1e-4
 
     def test_ar_validation_is_refused(self):
         """DFlash's decode would draft Domino's block one position off and without its head."""

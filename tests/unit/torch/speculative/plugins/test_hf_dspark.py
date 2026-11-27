@@ -22,6 +22,7 @@ BCE), vLLM vanilla exports, and native gated/recurrent exports.
 """
 
 import json
+import logging
 import shutil
 from copy import deepcopy
 from fnmatch import fnmatchcase
@@ -37,7 +38,7 @@ import modelopt.torch.quantization as mtq
 import modelopt.torch.speculative as mtsp
 from modelopt.torch.speculative.config import DFLASH_DEFAULT_CFG
 from modelopt.torch.speculative.plugins.dflash_losses import _tvd_chunk
-from modelopt.torch.speculative.plugins.hf_dflash import HFDFlashModel
+from modelopt.torch.speculative.plugins.hf_dflash import DraftBatch, HFDFlashModel
 from modelopt.torch.speculative.plugins.hf_dspark import HFDSparkModel
 from modelopt.torch.speculative.plugins.modeling_dflash import (
     DFlashBaseModelOutput,
@@ -138,6 +139,26 @@ class TestDSparkConvert:
         with pytest.raises(ValueError, match="markov_rank"):
             mtsp.convert(model, [("dflash", config)])
 
+    @pytest.mark.parametrize("decay_factor", [0.0, 7.0])
+    def test_pinned_position_weighting_reports_what_actually_weights_the_block(
+        self, decay_factor, caplog
+    ):
+        """DSpark pins decay over dflash_loss_objective, which defaults to D-PACE.
+
+        So every DSpark run is told which field weights its block positions (Domino pins
+        the same way), and told it once: the D-PACE notice that a plain DFlash gets for a
+        non-zero decay factor would say the factor is ignored, when for DSpark it is the
+        only one of the two that is read.
+        """
+        config = _get_dspark_config()
+        config["dflash_loss_decay_factor"] = decay_factor
+        model = get_tiny_llama(num_hidden_layers=4)
+        with caplog.at_level(logging.WARNING):
+            mtsp.convert(model, [("dflash", config)])
+        messages = [r.getMessage() for r in caplog.records]
+        assert [m for m in messages if "dflash_loss_objective='dpace' is not wired" in m]
+        assert not [m for m in messages if "is ignored when dflash_loss_objective" in m]
+
     def test_dflash_mode_still_creates_plain_dflash(self):
         """Without projector_type=dspark, conversion still yields a plain DFlash model."""
         config = deepcopy(DFLASH_DEFAULT_CFG["config"])
@@ -173,9 +194,9 @@ class TestDSparkForward:
         assert out.loss.requires_grad
         assert out.loss.dim() == 0
         # three-term loss bookkeeping
-        for key in ("ce_loss", "l1_loss", "confidence_loss", "base_accuracy"):
-            assert key in out.dspark_metrics
-        assert out.dspark_metrics["confidence_loss"] == 0.0  # no confidence head here
+        for key in ("loss_ce", "loss_tvd", "confidence_loss", "backbone_accuracy"):
+            assert key in out.draft_metrics
+        assert out.draft_metrics["confidence_loss"] == 0.0  # no confidence head here
 
         out.loss.backward()
         head_grad = model.dflash_module.markov_w2.weight.grad
@@ -195,7 +216,7 @@ class TestDSparkForward:
 
         input_ids, attention_mask, labels = self._make_batch(model.dflash_config.vocab_size)
         out = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
-        assert out.dspark_metrics["confidence_loss"] > 0.0
+        assert out.draft_metrics["confidence_loss"] > 0.0
 
         out.loss.backward()
         conf_grad = model.dflash_module.confidence_proj.weight.grad
@@ -1000,29 +1021,20 @@ class TestDdpGradientCoverage:
     def test_loss_branch_with_zero_total_weight(self):
         """Anchors exist but every label position is masked, so the three terms are skipped."""
         model = self._model()
-        m = model.dflash_module
         n_blocks, bsz = 2, 1
-        input_ids, anchors, _, args = _draft_args(model, n_blocks=n_blocks, bsz=bsz)
-        hidden = m(*args)
-        vocab = model.dflash_config.vocab_size
-        backbone_logits = torch.randn(bsz, n_blocks * BLOCK_SIZE, vocab, dtype=hidden.dtype)
-        base_outputs = DFlashBaseModelOutput(args[1])  # no base distribution: not read here
-        final_logits, confidence_logits = model._apply_markov_head(
-            hidden, backbone_logits, input_ids, anchors, n_blocks
-        )
-        final_logits.retain_grad()
-        confidence_logits.retain_grad()
-        loss, _, _ = model._compute_dspark_loss(
-            backbone_logits,
-            final_logits,
-            confidence_logits,
+        input_ids, anchors, keep, args = _draft_args(model, n_blocks=n_blocks, bsz=bsz)
+        batch = DraftBatch(
             input_ids,
+            torch.zeros(bsz, SEQ_LEN),  # blocks are kept, but no label position carries weight
             anchors,
-            torch.ones(bsz, n_blocks),  # blocks are kept ...
-            torch.zeros(bsz, SEQ_LEN),  # ... but no label position carries weight
-            base_outputs,
+            keep,
+            DFlashBaseModelOutput(args[1]),  # no base distribution: not read here
+            model.dflash_module(*args),
         )
-        loss.backward()
+        ctx = model._loss_context(batch)
+        ctx.logits.final.retain_grad()
+        model._compute_loss(ctx).loss.backward()
         assert not self._ungraded(model), f"no gradient for {self._ungraded(model)}"
-        # Through the draft's outputs, which an FSDP2 unit around the draft needs.
-        assert final_logits.grad is not None and confidence_logits.grad is not None
+        # Through the draft's outputs, not by reading its parameters, which an FSDP2 unit
+        # around the draft needs.
+        assert ctx.logits.final.grad is not None

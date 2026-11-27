@@ -109,6 +109,32 @@ def _quantizer_tensors(module):
                     yield (id(quantizer), source, name), tensor
 
 
+@contextmanager
+def _offload_buffer_persistence(module, hook):
+    """Give recursive native hooks qualified exclusions without changing caller metadata."""
+    if not (hook.offload and hook.offload_buffers and hook.place_submodules):
+        yield
+        return
+    modules = list(module.named_modules())
+    original = [(owner, owner._non_persistent_buffers_set) for _, owner in modules]
+    names = {
+        f"{path}.{name}" if path else name
+        for path, owner in modules
+        for name in owner._non_persistent_buffers_set
+    }
+    if not names:
+        yield
+        return
+    try:
+        for owner, _ in original:
+            owner._non_persistent_buffers_set = set()
+        module._non_persistent_buffers_set = names
+        yield
+    finally:
+        for owner, saved in original:
+            owner._non_persistent_buffers_set = saved
+
+
 def _carry_quantizers_with_offload(hook):
     """Make an offload ``hook`` move its module's quantizer state on and off the GPU with the weights.
 
@@ -126,7 +152,8 @@ def _carry_quantizers_with_offload(hook):
     onloaded: dict[tuple, tuple[torch.Tensor, torch.Tensor, int]] = {}
 
     def carrying_pre_forward(module, *args, **kwargs):
-        result = pre_forward(module, *args, **kwargs)
+        with _offload_buffer_persistence(module, hook):
+            result = pre_forward(module, *args, **kwargs)
         if hook.offload:
             for key, tensor in _quantizer_tensors(module):
                 if tensor.device.type == "cpu":
@@ -136,7 +163,8 @@ def _carry_quantizers_with_offload(hook):
         return result
 
     def carrying_post_forward(module, output):
-        output = post_forward(module, output)
+        with _offload_buffer_persistence(module, hook):
+            output = post_forward(module, output)
         if hook.offload:
             for key, tensor in _quantizer_tensors(module):
                 # meta: a hook that places submodules offloaded it already.
@@ -184,8 +212,9 @@ def weight_access_and_writeback_context(module, writeback: bool = True):
         # Only call pre_forward if weights need materializing; already-materialized
         # weights would be overwritten with stale CPU state_dict values.
         needs_materialize = any(p.device.type == "meta" for p in mod.parameters())
-        if needs_materialize:
+        if needs_materialize or (hook.offload_buffers and hook.place_submodules):
             _carry_quantizers_with_offload(hook)
+        if needs_materialize:
             hook.pre_forward(mod)
         hook.offload = False
         materialized.append((mod, hook, needs_materialize))
