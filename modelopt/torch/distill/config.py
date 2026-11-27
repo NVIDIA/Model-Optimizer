@@ -16,7 +16,7 @@
 """Configurations for distillation modes."""
 
 import warnings
-from typing import Any, TypeAlias
+from typing import Any, Literal, TypeAlias
 
 import pydantic
 from torch.nn.modules.loss import _Loss as Loss
@@ -26,7 +26,7 @@ from modelopt.torch.utils.network import ModelLike
 
 from .loss_balancers import DistillationLossBalancer
 
-__all__ = ["ExportStudentConfig", "KDLossConfig", "LayerwiseKDConfig"]
+__all__ = ["BypassConfig", "ExportStudentConfig", "KDLossConfig", "LayerwiseKDConfig"]
 
 Criterion: TypeAlias = Loss | dict[tuple[str, str], Loss]
 
@@ -144,3 +144,27 @@ class ExportStudentConfig(ModeloptBaseConfig):
 
     This mode is used to export a student model after distillation training/fine-tuning.
     """
+
+
+class BypassConfig(ModeloptBaseConfig):
+    """Streaming native IQ scale repair on frozen teacher boundary inputs.
+
+    ``modules`` contains exact paths; ``layer_indices`` selects logical decoder
+    positions in the Transformers integration. The training loader must supply
+    enough unique data to fill every global update without recycling.
+    """
+
+    num_steps: int = ModeloptField(default=512, ge=0, description="Complete global-batch updates.")
+    optimizer: Literal["lion"] = ModeloptField(
+        default="lion", description="Optimizer used for IQ scale masters."
+    )
+    max_lr: float = ModeloptField(default=0.001, gt=0, allow_inf_nan=False)
+    warmup_fraction: float = ModeloptField(default=0.05, ge=0, le=1, allow_inf_nan=False)
+    scheduler: Literal["cosine", "linear", "constant"] = ModeloptField(default="cosine")
+    global_batch_size: int = ModeloptField(default=8, gt=0)
+    micro_batch_size: int = ModeloptField(default=1, gt=0)
+    sequence_length: int = ModeloptField(default=32768, gt=0)
+    max_grad_norm: float = ModeloptField(default=1.0, gt=0, allow_inf_nan=False)
+    seed: int = ModeloptField(default=42, ge=0)
+    modules: list[str] | None = ModeloptField(default=None)
+    layer_indices: list[int] | None = ModeloptField(default=None)
