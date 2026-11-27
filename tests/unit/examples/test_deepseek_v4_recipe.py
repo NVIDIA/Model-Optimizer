@@ -35,6 +35,7 @@ from pathlib import Path
 
 import pytest
 import torch
+from safetensors.torch import save_file
 
 _SCRIPT = Path(__file__).resolve().parents[3] / "examples" / "deepseek" / "deepseek_v4" / "ptq.py"
 _SPEC = importlib.util.spec_from_file_location("deepseek_v4_ptq", _SCRIPT)
@@ -237,15 +238,18 @@ def test_block_size_rejects_shapes_several_known_blocks_explain(monkeypatch):
         dsv4_ptq._ds_fp8_block_size(*_fp8_pair(32, 32, 32))
 
 
-def test_fp8_dequant_crops_partial_blocks():
+@pytest.mark.parametrize("block", [32, 64, 128])
+def test_fp8_dequant_crops_partial_blocks(monkeypatch, block):
     """Each element is scaled by its own block's UE8M0 exponent, including the partial
     trailing blocks that the ceil-div scale shape allocates."""
-    m, n, block = 100, 70, 32
+    m, n = 100, 270
+    monkeypatch.setattr(dsv4_ptq, "deekseep_v4_model", types.SimpleNamespace(block_size=block))
     gen = torch.Generator().manual_seed(0)
     weight = (torch.rand(m, n, generator=gen) * 4 - 2).to(torch.float8_e4m3fn)
     exp = torch.randint(-3, 4, dsv4_ptq._fp8_scale_shape(weight, block), generator=gen)
     scale = (exp + 127).to(torch.uint8)
-    got = dsv4_ptq._fp8_ue8m0_blockwise_to_bf16(weight, scale, block=block)
+    weight.scale = scale
+    got = dsv4_ptq._dequantize_linear_weight(types.SimpleNamespace(weight=weight))
     rows, cols = torch.arange(m)[:, None] // block, torch.arange(n)[None, :] // block
     want = (weight.to(torch.float32) * torch.pow(2.0, exp[rows, cols].to(torch.float32))).to(
         torch.bfloat16
@@ -283,14 +287,16 @@ def load_with(monkeypatch, tmp_path):
     monkeypatch.setattr(torch, "set_default_dtype", lambda _dtype: None)
     monkeypatch.setattr(torch, "set_default_device", lambda _device: None)
 
-    def _load(transformer_cls, tokenizer):
+    def _load(transformer_cls, tokenizer, model_path="unused", dummy_weights=True, expert_cls=None):
         monkeypatch.setattr(
             dsv4_ptq,
             "deekseep_v4_model",
-            types.SimpleNamespace(ModelArgs=_ModelArgs, Transformer=transformer_cls),
+            types.SimpleNamespace(
+                ModelArgs=_ModelArgs, Transformer=transformer_cls, Expert=expert_cls
+            ),
         )
         return dsv4_ptq.load_deepseek_v4(
-            str(config), "unused", batch_size=4, dummy_weights=True, tokenizer=tokenizer
+            str(config), model_path, batch_size=4, dummy_weights=dummy_weights, tokenizer=tokenizer
         )
 
     return _load
@@ -311,6 +317,95 @@ def test_tokenizer_aware_transformer_receives_the_tokenizer(load_with):
 def test_tokenizer_aware_transformer_requires_a_tokenizer(load_with):
     with pytest.raises(AssertionError, match="requires a tokenizer"):
         load_with(_TokenizerAwareTransformer, tokenizer=None)
+
+
+@pytest.mark.parametrize("scale_dtype", [torch.uint8, torch.int8, torch.float8_e8m0fnu])
+@pytest.mark.parametrize("scale_code", [127, 128, 255])
+@pytest.mark.parametrize("projection_path", ["experts.0.w1", "shared_experts.w3"])
+def test_load_validates_native_fp8_checkpoint_scales(
+    load_with, tmp_path, scale_dtype, scale_code, projection_path
+):
+    class FP8Expert(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            for name in ("w1", "w2", "w3"):
+                proj = torch.nn.Module()
+                proj.weight = torch.nn.Parameter(
+                    torch.ones(129, 3, device="cpu").to(torch.float8_e4m3fn), requires_grad=False
+                )
+                proj.scale = torch.nn.Parameter(
+                    torch.full((2, 1), 127, device="cpu", dtype=torch.uint8).view(scale_dtype),
+                    requires_grad=False,
+                )
+                proj.weight.scale = proj.scale
+                self.add_module(name, proj)
+
+    class InheritedExpert(FP8Expert):
+        pass
+
+    class CustomExpert(FP8Expert):
+        def forward(self, x):
+            weight = self.w1.weight.to(x.dtype)
+            scale = torch.exp2(self.w1.scale.float()).to(x.dtype)
+            return torch.nn.functional.linear(x, weight * scale[:, None])
+
+    class FP8Transformer(torch.nn.Module):
+        def __init__(self, args):
+            super().__init__()
+            self.unrelated_weight = torch.nn.Parameter(
+                torch.zeros(2, 3, device="cpu", dtype=torch.float8_e4m3fn), requires_grad=False
+            )
+            self.scalar_scaled_weight = torch.nn.Parameter(
+                torch.zeros(2, 3, device="cpu", dtype=torch.float8_e4m3fn), requires_grad=False
+            )
+            self.scalar_scaled_weight.scale = 0.5
+            self.attn = torch.nn.Module()
+            self.attn.weight = torch.nn.Parameter(
+                torch.ones(2, 3, device="cpu").to(torch.float8_e4m3fn), requires_grad=False
+            )
+            self.attn.scale = torch.nn.Parameter(
+                torch.full((2,), -1, device="cpu", dtype=torch.int8), requires_grad=False
+            )
+            self.attn.weight.scale = self.attn.scale
+            self.experts = torch.nn.ModuleList([FP8Expert()])
+            self.shared_experts = InheritedExpert()
+            self.custom_expert = CustomExpert()
+            self.custom_expert.w1.scale = torch.nn.Parameter(
+                torch.full((129,), -1, device="cpu", dtype=torch.int8), requires_grad=False
+            )
+            self.custom_expert.w1.weight.scale = self.custom_expert.w1.scale
+
+    source = FP8Transformer(None)
+    source_proj = source.get_submodule(projection_path)
+    source_proj.scale.view(torch.uint8).fill_(scale_code)
+    save_file(source.state_dict(), tmp_path / "model0-mp1.safetensors")
+    if scale_code == 255:
+        with pytest.raises(ValueError):
+            load_with(
+                FP8Transformer,
+                None,
+                model_path=str(tmp_path),
+                dummy_weights=False,
+                expert_cls=FP8Expert,
+            )
+    else:
+        model = load_with(
+            FP8Transformer,
+            None,
+            model_path=str(tmp_path),
+            dummy_weights=False,
+            expert_cls=FP8Expert,
+        )
+        torch.testing.assert_close(
+            dsv4_ptq._dequantize_linear_weight(model.get_submodule(projection_path)),
+            source_proj.weight.to(torch.bfloat16) * 2 ** (scale_code - 127),
+            rtol=0,
+            atol=0,
+        )
+        torch.testing.assert_close(model.attn.scale, source.attn.scale, rtol=0, atol=0)
+        torch.testing.assert_close(
+            model.custom_expert(torch.ones(1, 3)), torch.full((1, 129), 1.5), rtol=0, atol=0
+        )
 
 
 # --- forward output: V4-Pro's logits vs V4.1-Flash's ``(output_ids, logits, main_hidden)`` --

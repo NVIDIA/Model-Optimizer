@@ -16,6 +16,7 @@
 """Shared primitives for streaming checkpoint casts and export."""
 
 import errno
+import math
 import os
 import shutil
 from collections import defaultdict
@@ -24,7 +25,8 @@ from pathlib import Path
 
 import torch
 
-from modelopt.torch.quantization.qtensor import MXFP4QTensor, NVFP4QTensor
+from modelopt.torch.quantization.qtensor import FP8QTensor, MXFP4QTensor, NVFP4QTensor
+from modelopt.torch.quantization.utils import reduce_block_amax, reduce_block_padding
 from modelopt.torch.quantization.utils.numeric_utils import (
     E2M1_MAX,
     E4M3_KMAX,
@@ -39,8 +41,10 @@ from modelopt.torch.utils.plugins.hf_checkpoint_utils import resolve_checkpoint_
 __all__ = [
     "build_w13_amax_overrides",
     "build_w13_kmax_overrides",
+    "dequantize_fp8_ue8m0_to_bf16",
     "dequantize_mxfp4_to_bf16",
     "mxfp4_kmax",
+    "quantize_bf16_to_fp8_ue8m0",
     "quantize_mxfp4_to_nvfp4",
     "quantize_mxfp4_to_nvfp4_lossless",
 ]
@@ -48,6 +52,74 @@ __all__ = [
 _MXFP4_BLOCK = 32
 _MXFP4_BYTES_PER_BLOCK = 16
 _NVFP4_BLOCK = 16
+
+
+@torch.no_grad()
+def dequantize_fp8_ue8m0_to_bf16(
+    weight: torch.Tensor, scale: torch.Tensor, block: int = 128, *, validate_scales: bool = True
+) -> torch.Tensor:
+    """Decode a native DSV4 FP8 matrix with square UE8M0 blocks into BF16.
+
+    Uses square blocks of size ``block``, including partial trailing blocks.
+    Scales are uint8/int8 exponent bytes or float8_e8m0fnu, with no NaN scale codes.
+    Set ``validate_scales=False`` only for immutable scales already checked at load time,
+    to avoid synchronizing CUDA on repeated calls. Shape and dtype checks always run.
+    """
+    if weight.ndim != 2 or weight.dtype != torch.float8_e4m3fn or not weight.numel():
+        raise ValueError(
+            f"Expected a nonempty FP8 E4M3 matrix, got shape {tuple(weight.shape)} ({weight.dtype})"
+        )
+    if not isinstance(block, int) or block <= 0:
+        raise ValueError(f"FP8 block size must be a positive integer, got {block}")
+    m, n = weight.shape
+    expected = ((m + block - 1) // block, (n + block - 1) // block)
+    if scale.shape != expected or scale.dtype not in (
+        torch.uint8,
+        torch.int8,
+        torch.float8_e8m0fnu,
+    ):
+        raise ValueError(
+            f"Expected UE8M0 scales with shape {expected}, got {tuple(scale.shape)} ({scale.dtype})"
+        )
+    scale = scale.to(device=weight.device).contiguous().view(torch.uint8)
+    if validate_scales and (scale == 255).any():
+        raise ValueError("Native checkpoint scales must not contain NaN codes")
+    exp = scale.to(torch.int32) - E8M0_BIAS
+    exp = exp.repeat_interleave(block, 0).repeat_interleave(block, 1)[:m, :n]
+    # Some PyTorch CUDA ldexp kernels use the current device rather than the tensor's device.
+    with torch.cuda.device_of(weight):
+        return torch.ldexp(weight.to(torch.float32), exp).to(torch.bfloat16)
+
+
+@torch.no_grad()
+def quantize_bf16_to_fp8_ue8m0(
+    weight: torch.Tensor, block: int = 128
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Encode a finite BF16 matrix as native DSV4 FP8 weights and uint8 UE8M0 scales.
+
+    Uses square blocks of size ``block`` and recomputes scales for the trained weights.
+    Rejects values whose FP8 rounding would decode to nonfinite BF16.
+    """
+    if weight.ndim != 2 or weight.dtype != torch.bfloat16 or not weight.numel():
+        raise ValueError(
+            f"Expected a nonempty BF16 matrix, got shape {tuple(weight.shape)} ({weight.dtype})"
+        )
+    if not isinstance(block, int) or block <= 0:
+        raise ValueError(f"FP8 block size must be a positive integer, got {block}")
+    blocks = {-2: block, -1: block}
+    amax = reduce_block_amax(reduce_block_padding(weight, blocks), blocks).float()
+    # At exponent 120, FP8 rounds 248 up to 256, which decodes to overflowing 2**128.
+    if not (torch.isfinite(amax) & (amax < math.ldexp(248.0, 120))).all():
+        raise ValueError("BF16 weights must be finite and remain finite after native FP8 rounding")
+    # Choose the smallest power-of-two scale that fits E4M3, without log2 rounding.
+    max_mantissa, max_exponent = math.frexp(E4M3_MAX)
+    mantissa, exponent = torch.frexp(amax)
+    exponent = (exponent - max_exponent + (mantissa > max_mantissa)).clamp(min=-E8M0_BIAS)
+    exponent.masked_fill_(amax == 0, -E8M0_BIAS)
+    with torch.cuda.device_of(weight):
+        scales = torch.ldexp(torch.ones_like(amax), exponent)
+    quantized, _ = FP8QTensor.quantize(weight.float(), scales=scales, block_sizes=blocks)
+    return quantized._quantized_data.contiguous(), (exponent + E8M0_BIAS).to(torch.uint8)
 
 
 def dequantize_mxfp4_to_bf16(

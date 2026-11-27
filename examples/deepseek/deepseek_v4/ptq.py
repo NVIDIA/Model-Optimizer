@@ -94,6 +94,7 @@ from transformers import AutoTokenizer
 
 import modelopt.torch.quantization as mtq
 from modelopt.recipe import load_recipe
+from modelopt.torch.export.shard_cast_utils import dequantize_fp8_ue8m0_to_bf16
 from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.quantization.qtensor.mxfp4_tensor import MXFP4QTensor
 from modelopt.torch.utils.dataset_utils import get_dataset_dataloader
@@ -143,26 +144,6 @@ def _fp8_scale_shape(weight: torch.Tensor, block: int) -> tuple[int, int]:
     return ((m + block - 1) // block, (n + block - 1) // block)
 
 
-def _fp8_ue8m0_blockwise_to_bf16(
-    weight: torch.Tensor, scale: torch.Tensor, block: int = 128
-) -> torch.Tensor:
-    """FP8 E4M3 × UE8M0 ``block``x``block`` block-scale → BF16 (V4 native FP8 layout).
-
-    Same math as ``scripts/convert_dsv4_to_bf16.py``'s helper; ModelOpt's
-    triton ``weight_dequant`` expects FP32 scales and cannot consume UE8M0
-    directly, so we dequant inline.
-    """
-    m, n = weight.shape
-    expected = _fp8_scale_shape(weight, block)
-    assert scale.shape == expected, (
-        f"FP8 scale shape {tuple(scale.shape)} != expected {expected} for "
-        f"weight {(m, n)} at block size {block}"
-    )
-    exp = scale.contiguous().view(torch.uint8).to(torch.int32) - 127
-    exp = exp.repeat_interleave(block, 0).repeat_interleave(block, 1)[:m, :n]
-    return torch.ldexp(weight.to(torch.float32), exp).to(torch.bfloat16)
-
-
 def _dequantize_linear_weight(linear_module) -> torch.Tensor:
     """Materialize a BF16 copy of a DS-V4 ``Linear``'s weight.
 
@@ -171,7 +152,7 @@ def _dequantize_linear_weight(linear_module) -> torch.Tensor:
     on V4's global default (``set_dtype`` typically sets it to fp8) and on
     the optional ``dtype=`` kwarg passed to ``Expert.__init__``:
       * ``float4_e2m1fn_x2`` + UE8M0 1x32 scale   → MXFP4 dequant.
-      * ``float8_e4m3fn``    + UE8M0 NxN block scale → FP8 dequant (inline).
+      * ``float8_e4m3fn``    + UE8M0 NxN block scale → FP8 dequant.
       * any float dtype without a ``.scale``       → passthrough (already BF16).
     """
     w = linear_module.weight
@@ -189,7 +170,10 @@ def _dequantize_linear_weight(linear_module) -> torch.Tensor:
             block_sizes=[block_size],
         )
     if w.dtype == torch.float8_e4m3fn:
-        return _fp8_ue8m0_blockwise_to_bf16(w, w.scale, block=_ds_fp8_block_size(w, w.scale))
+        # Checkpoint scales are validated once by load_deepseek_v4 and remain frozen.
+        return dequantize_fp8_ue8m0_to_bf16(
+            w, w.scale, block=_ds_fp8_block_size(w, w.scale), validate_scales=False
+        )
     return w
 
 
@@ -307,6 +291,22 @@ def load_deepseek_v4(
                 f"checkpoint key mismatch while loading {ckpt}: "
                 f"missing={missing}, unexpected={unexpected}"
             )
+        # Match QuantModuleRegistry's expert selection; validate once instead of
+        # synchronizing CUDA on every expert forward.
+        for name, expert in model.named_modules():
+            if (
+                not isinstance(expert, deekseep_v4_model.Expert)
+                or type(expert).forward is not deekseep_v4_model.Expert.forward
+            ):
+                continue
+            for projection in ("w1", "w2", "w3"):
+                weight = getattr(expert, projection).weight
+                if weight.dtype != torch.float8_e4m3fn:
+                    continue
+                if (weight.scale.contiguous().view(torch.uint8) == 255).any():
+                    raise ValueError(
+                        f"Native checkpoint scales for {name}.{projection}.weight contain NaN codes"
+                    )
         print(f"[rank {rank}] loaded")
     # Match generate.py: default device to this rank's CUDA so that any
     # torch.empty(...) / torch.zeros(...) inside the V4 forward (TileLang
