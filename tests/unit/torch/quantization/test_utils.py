@@ -931,12 +931,16 @@ def test_fsdp2_weight_access_leaves_parameters_fsdp2_does_not_own(cpu_dist_worke
         cpu_dist_workers.job_timeout, cpu_dist_workers.failure_grace = timeout, grace
 
 
-def _nested_fsdp_mesh_mismatch_job(rank, size, rollback):
-    world = init_device_mesh("cpu", (size,), mesh_dim_names=("dp",))
-    singleton = init_device_mesh("cpu", (size, 1), mesh_dim_names=("replicate", "dp"))["dp"]
+def _nested_fsdp_mesh_mismatch_job(rank, size, rollback, hsdp_prefix):
+    if hsdp_prefix:
+        child_mesh = init_device_mesh("cpu", (1, size), mesh_dim_names=("replicate", "dp"))
+        parent_mesh = child_mesh["replicate"]
+    else:
+        child_mesh = init_device_mesh("cpu", (size,), mesh_dim_names=("dp",))
+        parent_mesh = init_device_mesh("cpu", (size, 1), mesh_dim_names=("replicate", "dp"))["dp"]
     model = torch.nn.Sequential(torch.nn.Linear(8, 8), torch.nn.Linear(8, 8))
-    fully_shard(model[0], mesh=world)
-    fully_shard(model, mesh=singleton)
+    fully_shard(model[0], mesh=child_mesh)
+    fully_shard(model, mesh=parent_mesh)
     # Model a cache built before FSDP introduced the child's current parameter objects.
     cached = _fsdp2_owned_params(model)
     for parameter in model[0].parameters():
@@ -944,10 +948,14 @@ def _nested_fsdp_mesh_mismatch_job(rank, size, rollback):
     originals = dict(model.named_parameters())
     before = {name: value.to_local().clone() for name, value in originals.items()}
     with (
+        mock.patch.object(
+            DTensor, "redistribute", autospec=True, side_effect=DTensor.redistribute
+        ) as redistributes,
         pytest.raises(ValueError, match="same sharding mesh"),
         fsdp2_weight_access_and_writeback_context(model, model, rollback=rollback),
     ):
-        pytest.fail("A writable window spanning different rank memberships yielded")
+        pytest.fail(f"A writable window exposed nested weight shape {tuple(model[0].weight.shape)}")
+    assert redistributes.call_count == 0
     for name, value in originals.items():
         assert model.get_parameter(name) is value
         torch.testing.assert_close(value.to_local(), before[name], rtol=0, atol=0)
@@ -958,5 +966,16 @@ def _nested_fsdp_mesh_mismatch_job(rank, size, rollback):
 
 
 @pytest.mark.parametrize("rollback", [False, True])
-def test_writable_nested_fsdp_requires_same_sharding_mesh(cpu_dist_workers, rollback):
-    cpu_dist_workers.run(_nested_fsdp_mesh_mismatch_job, rollback)
+@pytest.mark.parametrize("hsdp_prefix", [False, True])
+def test_writable_nested_fsdp_requires_same_sharding_mesh(cpu_dist_workers, rollback, hsdp_prefix):
+    if hsdp_prefix:
+        # Warm worker imports before bounding any mismatched-collective regression.
+        cpu_dist_workers.run(_nested_fsdp_mesh_mismatch_job, rollback, False)
+    timeout, grace = cpu_dist_workers.job_timeout, cpu_dist_workers.failure_grace
+    try:
+        if hsdp_prefix:
+            cpu_dist_workers.job_timeout = 15
+            cpu_dist_workers.failure_grace = 2
+        cpu_dist_workers.run(_nested_fsdp_mesh_mismatch_job, rollback, hsdp_prefix)
+    finally:
+        cpu_dist_workers.job_timeout, cpu_dist_workers.failure_grace = timeout, grace

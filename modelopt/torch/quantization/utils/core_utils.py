@@ -38,6 +38,8 @@ from modelopt.torch.utils.network import temporarily_remove_accelerate_hook
 if TYPE_CHECKING:
     from collections.abc import Generator
 
+    from torch.distributed.device_mesh import DeviceMesh
+
 # FP8 dtypes do not implement reduction kernels (e.g. ``max_all_cuda``), ``abs``, or
 # elementwise ``maximum``, so tensors of these dtypes must be upcast before amax reduction.
 _FP8_DTYPES = (torch.float8_e4m3fn, torch.float8_e5m2)
@@ -544,6 +546,9 @@ def _fsdp2_param_groups(module: nn.Module):
 _FSDP2_OWNED_PARAMS: "weakref.WeakKeyDictionary[nn.Module, dict[int, weakref.ref]]" = (
     weakref.WeakKeyDictionary()
 )
+_FSDP2_OWNED_PARAM_MESHES: "weakref.WeakKeyDictionary[nn.Module, dict[int, DeviceMesh]]" = (
+    weakref.WeakKeyDictionary()
+)
 _FSDP2_UNOWNED_PLAIN_PARAMS: "weakref.WeakKeyDictionary[nn.Module, dict[int, weakref.ref]]" = (
     weakref.WeakKeyDictionary()
 )
@@ -580,6 +585,7 @@ def _fsdp2_owned_params(fsdp_module: FSDPModule, refresh: bool = False) -> dict[
     owned = None if refresh else _FSDP2_OWNED_PARAMS.get(fsdp_module)
     if owned is None:
         owned = {}
+        meshes = {}
         groups = tuple(_fsdp2_param_groups(fsdp_module))
         _fsdp2_owned_modules(fsdp_module, groups)
         for group in groups:
@@ -592,6 +598,7 @@ def _fsdp2_owned_params(fsdp_module: FSDPModule, refresh: bool = False) -> dict[
                 ):
                     if state_param is not None:
                         owned[id(state_param)] = weakref.ref(state_param)
+                        meshes[id(state_param)] = group.mesh_info.mesh
         # Remember plain misses across the whole unit, not once per leaf window. DTensor misses
         # still refresh ownership each window so newly materialized FSDP2 views are discovered.
         _FSDP2_UNOWNED_PLAIN_PARAMS[fsdp_module] = {
@@ -599,6 +606,7 @@ def _fsdp2_owned_params(fsdp_module: FSDPModule, refresh: bool = False) -> dict[
             for parameter in fsdp_module.parameters()
             if not isinstance(parameter, DTensor) and not _fsdp2_owns(owned, parameter)
         }
+        _FSDP2_OWNED_PARAM_MESHES[fsdp_module] = meshes
         _FSDP2_OWNED_PARAMS[fsdp_module] = owned
     return owned
 
@@ -801,9 +809,11 @@ def _fsdp2_weight_access_and_writeback_context(module, root_model, writeback, na
                 raise ValueError(
                     "Writable FSDP2 access requires reshard() before entering the window"
                 )
-        for _, parameter in gather_params:
-            mesh = parameter.device_mesh
-            if mesh.ndim < fsdp_dim or any(
+        # A DTensor's trailing mesh dimensions may belong to HSDP rather than TP.
+        meshes = _FSDP2_OWNED_PARAM_MESHES[fsdp_module]
+        for _, parameter in owned_params:
+            mesh = meshes[id(parameter)]
+            if mesh.ndim != fsdp_dim or any(
                 torch.distributed.get_process_group_ranks(mesh.get_group(dimension))
                 != torch.distributed.get_process_group_ranks(fsdp_device_mesh.get_group(dimension))
                 for dimension in range(fsdp_dim)

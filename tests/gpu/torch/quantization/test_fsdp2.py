@@ -512,6 +512,29 @@ def _test_writeback_root_unwrapped(rank, size, reshard_after_forward):
         actual = tp_layer(distribute_tensor(inputs, world_mesh["tp"], [Replicate()]))
         torch.testing.assert_close(actual.to_local(), expected)
 
+    if reshard_after_forward is None and size >= 4 and size % 2 == 0:
+        hsdp = init_device_mesh("cuda", (2, size // 2), mesh_dim_names=("replicate", "shard"))
+        nested = nn.Sequential(nn.Linear(dim, dim), nn.Linear(dim, dim)).cuda(rank)
+        synchronize_state_dict(nested)
+        fully_shard(nested[0], mesh=hsdp)
+        fully_shard(nested, mesh=hsdp["replicate"])
+        originals = dict(nested.named_parameters())
+        before = {
+            name: parameter.to_local().detach().clone() for name, parameter in originals.items()
+        }
+        for rollback in (False, True):
+            with (
+                pytest.raises(ValueError, match="same sharding mesh"),
+                fsdp2_weight_access_and_writeback_context(nested, nested, rollback=rollback),
+            ):
+                pytest.fail("A parent window exposed a nested HSDP partial shard")
+            for owner in (nested[0], nested[1]):
+                with fsdp2_weight_access_and_writeback_context(owner, nested, rollback=rollback):
+                    assert owner.weight.shape == (dim, dim)
+        for name, parameter in originals.items():
+            assert nested.get_parameter(name) is parameter
+            torch.testing.assert_close(parameter.to_local(), before[name], rtol=0, atol=0)
+
 
 @pytest.mark.parametrize("reshard_after_forward", [None, 2])
 def test_writeback_root_unwrapped(dist_workers, reshard_after_forward):
