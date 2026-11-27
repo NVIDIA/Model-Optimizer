@@ -583,3 +583,37 @@ def _native_ep_transport_policy_worker(rank, size):
 def test_native_ep_transport_policy_reaches_hf_dispatcher(bypass_cpu_workers):
     pytest.importorskip("transformers", minversion="5.23")
     bypass_cpu_workers.run(_native_ep_transport_policy_worker)
+
+
+def _native_context_replica_worker(rank, size):
+    from transformers.distributed.utils import TransformersDeviceMesh
+
+    from modelopt.torch.distill.plugins.transformers.parallel import native_mesh_context
+
+    assert size == 4
+    shape = (1, 2, 2, 1, 1)
+    dense = init_device_mesh(
+        "cpu", shape, mesh_dim_names=("pp", "dp_replicate", "cp", "fsdp", "tp")
+    )
+    expert = init_device_mesh(
+        "cpu", shape, mesh_dim_names=("pp", "dp_replicate", "cp", "efsdp", "ep")
+    )
+    context = native_mesh_context(TransformersDeviceMesh(dense, expert))
+    assert context.dp_size == 2
+    assert context.context_mesh.size() == 2
+    assert context.data_context_mesh.size() == context.expert_replica_mesh.size() == 4
+    assert dist.get_process_group_ranks(context.data_mesh.get_group()) == (
+        [0, 2] if rank % 2 == 0 else [1, 3]
+    )
+    for mesh in (context.data_context_mesh, context.expert_replica_mesh):
+        assert dist.get_process_group_ranks(mesh.get_group()) == list(range(size))
+    assert dist.get_process_group_ranks(context.context_mesh.get_group()) == (
+        [0, 1] if rank < 2 else [2, 3]
+    )
+
+
+@pytest.mark.timeout(120)
+@pytest.mark.parametrize("bypass_cpu_workers", [4], indirect=True)
+def test_native_context_combines_cp_and_data_replicas(bypass_cpu_workers):
+    pytest.importorskip("transformers", minversion="5.23")
+    bypass_cpu_workers.run(_native_context_replica_worker)

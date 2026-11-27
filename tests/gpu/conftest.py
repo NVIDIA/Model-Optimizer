@@ -58,11 +58,12 @@ def calib_jsonl(tmp_path_factory):
 
 
 @pytest.fixture
-def bypass_cpu_workers(_dist_pools):
+def bypass_cpu_workers(request, _dist_pools):
+    size = getattr(request, "param", 2)
     return get_live_pool(
         _dist_pools,
-        ("bypass_cpu", 2),
+        ("bypass_cpu", size),
         lambda: DistributedWorkerPool(
-            world_size=2, backend="gloo", teardown_fn=default_worker_teardown
+            world_size=size, backend="gloo", teardown_fn=default_worker_teardown
         ),
     )
