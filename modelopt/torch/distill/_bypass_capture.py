@@ -364,7 +364,7 @@ class ModuleBypassAdapter:
         if isinstance(batch, torch.Tensor):
             return batch.shape[0]
         if isinstance(batch, dict):
-            for name in ("input_ids", "hidden_states"):
+            for name in ("input_ids", "inputs_embeds", "hidden_states"):
                 if name in batch:
                     return self.batch_size(batch[name])
             batch = batch.values()
@@ -374,13 +374,21 @@ class ModuleBypassAdapter:
         """Check declared context budgets for tokens or sequence-shaped hidden states."""
         _valid_token_mask(batch)
         values = (
-            batch.get("input_ids", batch.get("hidden_states")) if isinstance(batch, dict) else batch
+            batch.get("input_ids", batch.get("inputs_embeds", batch.get("hidden_states")))
+            if isinstance(batch, dict)
+            else batch
         )
         if isinstance(values, tuple):
             values = next(v for v in values if isinstance(v, torch.Tensor) and v.ndim)
         length = (
             values.shape[1]
-            if isinstance(values, torch.Tensor) and (values.ndim >= 3 or isinstance(batch, dict))
+            if isinstance(values, torch.Tensor)
+            and values.ndim >= 2
+            and (
+                values.ndim >= 3
+                or isinstance(batch, dict)
+                or not (values.is_floating_point() or values.is_complex())
+            )
             else None
         )
         if length is not None and length != config.sequence_length:

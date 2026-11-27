@@ -191,7 +191,12 @@ def test_bypass_refuses_aliases_and_cleans_failed_replay():
     original = copy.deepcopy(student.state_dict())
     with pytest.raises(ValueError):
         mtd.bypass(student, teacher, batches, {"num_steps": 0, "modules": ["", "mlp"]})
-    for malformed in ({"hidden_states": batches[0]}, (batches[0],)):
+    for malformed in (
+        {"hidden_states": batches[0]},
+        (batches[0],),
+        (torch.ones(2, 3, dtype=torch.long),),
+        {"inputs_embeds": batches[0]},
+    ):
         with pytest.raises(ValueError, match="sequence_length"):
             mtd.bypass(
                 student,
