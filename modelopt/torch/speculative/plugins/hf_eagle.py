@@ -64,6 +64,11 @@ def default_eagle_aux_layer_ids(num_layers: int) -> list[int]:
     return sorted({1, max(0, num_layers // 2 - 1), max(0, num_layers - 4)})
 
 
+def _shift_right_and_pad(tensor: torch.Tensor) -> torch.Tensor:
+    """Align predictions to the next token, zero-filling instead of wrapping future states."""
+    return torch.cat((torch.zeros_like(tensor[:, :1]), tensor[:, :-1]), dim=1)
+
+
 @EagleDMRegistry.register({PreTrainedModel: "hf.PreTrainedModel"})
 class HFEagleModel(EagleModel):
     """Eagle Model Class for huggingface models."""
@@ -814,7 +819,7 @@ class HFEagleModel(EagleModel):
                     None if self.eagle_mix_hidden_states else eagle_cache,
                     input_ids=eagle_input_ids,
                 )
-            eagle_output_hiddens = eagle_output_hiddens.roll(1, 1)
+            eagle_output_hiddens = _shift_right_and_pad(eagle_output_hiddens)
 
             if self.eagle_mix_hidden_states:
                 if self.eagle_mix_hidden_states_mode == "uniform_layer_sample":
