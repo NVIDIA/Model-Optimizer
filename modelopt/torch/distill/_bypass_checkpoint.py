@@ -307,6 +307,17 @@ def _sync_directory(path):
         os.close(descriptor)
 
 
+def _sync_directory_ancestry(path):
+    directory = Path(path).resolve()
+    device = directory.stat().st_dev
+    while True:
+        _sync_directory(directory)
+        parent = directory.parent
+        if parent == directory or parent.stat().st_dev != device:
+            return
+        directory = parent
+
+
 def _write_json(path, value):
     with path.open("w") as stream:
         json.dump(value, stream)
@@ -356,8 +367,13 @@ class BypassCheckpoint(_CheckpointRanks):
         self.identity = None
         error = None
         try:
-            if not hasattr(os, "O_DIRECTORY"):
-                raise ValueError("Bypass checkpointing requires POSIX directory sync support")
+            if self.directory is not None:
+                if not hasattr(os, "O_DIRECTORY"):
+                    raise ValueError("Bypass checkpointing requires POSIX directory sync support")
+                ancestor = Path(self.directory).resolve()
+                while not ancestor.exists():
+                    ancestor = ancestor.parent
+                _sync_directory_ancestry(ancestor)
             model_identities = {}
             for role, model in (("student", student), ("teacher", teacher)):
                 _LOG.info("Bypass checkpoint: reading all %s model bytes for identity", role)
@@ -387,10 +403,7 @@ class BypassCheckpoint(_CheckpointRanks):
                     "deterministic": torch.are_deterministic_algorithms_enabled(),
                 },
             }
-            if any(
-                getattr(getattr(model, "config", None), "model_type", None)
-                for model in (student, teacher)
-            ):
+            if getattr(getattr(student, "config", None), "model_type", None):
                 self.identity["runtime"]["transformers"] = version("transformers")
         except Exception as exc:
             error = f"rank {self.rank}: {type(exc).__name__}: {exc}"
@@ -433,14 +446,9 @@ class BypassCheckpoint(_CheckpointRanks):
             raise ValueError("; ".join(errors))
 
         def begin():
-            missing = []
-            ancestor = root
-            while not ancestor.exists():
-                missing.append(ancestor)
-                ancestor = ancestor.parent
             root.mkdir(parents=True, exist_ok=True)
-            for created in reversed(missing):
-                _sync_directory(created.parent)
+            # Retry must also persist entries left behind by an interrupted first save.
+            _sync_directory_ancestry(root)
             if (root / "latest").exists():
                 previous = (root / "latest").read_text().strip()
                 if previous in {"", ".", ".."} or Path(previous).name != previous:
@@ -540,7 +548,11 @@ class BypassCheckpoint(_CheckpointRanks):
             raise
 
     def load(self, directory):
-        """Validate the committed generation collectively before restoring any rank."""
+        """Validate collectively before restoring; callers must serialize loads and saves.
+
+        Saving may retire the generation a concurrent reader has resolved. This directory
+        supports one writer and no overlapping loads, including resume-only readers.
+        """
 
         def resolve():
             root = Path(directory)
