@@ -78,6 +78,7 @@ def install() -> None:
     import vllm
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
     from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
+    from vllm.v1.worker.gpu.spec_decode.lilicorr.speculator import LiLiCorrSpeculator
     from vllm.v1.worker.gpu_worker import Worker
 
     if vllm.__version__ != _VLLM_VERSION:
@@ -96,8 +97,12 @@ def install() -> None:
     def init_device_hook(worker, *args, **kwargs):
         init_device(worker, *args, **kwargs)
         # Without Model Runner V2's DFlash speculator (e.g. on the V1 runner) no hook would ever run.
-        if type(getattr(worker.model_runner, "speculator", None)) is not DFlashSpeculator:
-            raise NotImplementedError("rejmem capture needs Model Runner V2's DFlash speculator")
+        # LiLiCorr's speculator inherits the hooked propose unchanged.
+        speculator = type(getattr(worker.model_runner, "speculator", None))
+        if speculator not in (DFlashSpeculator, LiLiCorrSpeculator):
+            raise NotImplementedError(
+                "rejmem capture needs Model Runner V2's DFlash or LiLiCorr speculator"
+            )
         if worker.cache_config.enable_prefix_caching:
             # A cached prefix skips the rows whose features a record needs.
             raise NotImplementedError("rejmem capture needs --no-enable-prefix-caching")

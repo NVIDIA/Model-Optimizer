@@ -23,8 +23,9 @@ Enable it in the server's environment and load the rejmem worker extension::
         --max-model-len <max prompt_len + max_tokens + 3 * num_speculative_tokens>
 
 The ``3 * NS`` margin covers the memory rows of the step that async scheduling runs past ``max_tokens``.
-It needs vLLM 0.33.0 with Model Runner V2's DFlash speculator, non-causal draft layers, the FLASH_ATTN
-draft backend and draft sliding windows of at least ``2 * NS + 1``, and refuses anything else at startup.
+It needs vLLM 0.33.0 with Model Runner V2's DFlash speculator or its LiLiCorr subclass, non-causal draft
+layers, the FLASH_ATTN draft backend and draft sliding windows of at least ``2 * NS + 1``, and refuses
+anything else at startup.
 
 The speculator's context precompute already projects and RoPEs the rejected rows of a verify, then
 drops them (position 0, PAD slot). Here rejected row ``i`` of a request whose new anchor is ``a`` keeps
@@ -47,6 +48,8 @@ from vllm.v1.worker import gpu_worker
 from vllm.v1.worker.gpu.cp_utils import cp_local_slot
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.spec_decode.dflash import speculator as dflash
+from vllm.v1.worker.gpu.spec_decode.dflash2 import speculator as dflash2
+from vllm.v1.worker.gpu.spec_decode.lilicorr import speculator as lilicorr
 
 from modelopt import env
 
@@ -59,6 +62,11 @@ _SOURCE_SHA256 = {
     "_prepare_dflash_inputs_kernel": "98c1fc588215ae00e6c0979d91e6fc07f707961354dd09d2d46d003954f925c3",
     "DFlashSpeculator.propose": "b63f4ad371bec2be33179a522569eb226d1140d6428a71581c4bc829543f2b42",
     "DFlashSpeculator.set_attn": "968678300f8342154cbab8ee1f1d663a55972ae86a8dd205ed1ce901e2c3b799",
+    # LiLiCorr's overrides, which must keep reading only the block's query rows and the last
+    # accepted verify row (see _check_speculator).
+    "DFlash2Speculator._generate_draft": "a4d9bb84877846291d375ca3aecfbe0f35b04de2f29438ec25e566d0dda1e66e",
+    "LiLiCorrSpeculator.prepare_context_anchor": "0a21b231f298bff36b6278d0c0a5b058ff178a901c4732fd8018867c14b53428",
+    "LiLiCorrSpeculator._score_candidates": "28b9bad3c76973737e6022b17c687db3f2d94ea2f1506ac7361f094751bcb010",
 }
 
 _installed = False
@@ -121,6 +129,9 @@ def _check_vllm() -> None:
         "_prepare_dflash_inputs_kernel": dflash._prepare_dflash_inputs_kernel.fn,
         "DFlashSpeculator.propose": dflash.DFlashSpeculator.propose,
         "DFlashSpeculator.set_attn": dflash.DFlashSpeculator.set_attn,
+        "DFlash2Speculator._generate_draft": dflash2.DFlash2Speculator._generate_draft,
+        "LiLiCorrSpeculator.prepare_context_anchor": lilicorr.LiLiCorrSpeculator.prepare_context_anchor,
+        "LiLiCorrSpeculator._score_candidates": lilicorr.LiLiCorrSpeculator._score_candidates,
     }
     changed = [
         name
@@ -129,16 +140,20 @@ def _check_vllm() -> None:
     ]
     if changed:
         raise RuntimeError(
-            f"MODELOPT_REJMEM_CONSUMER: {', '.join(changed)} in {dflash.__name__} differ from "
-            f"vLLM {_VLLM_VERSION}; the memory consumer patches that exact code."
+            f"MODELOPT_REJMEM_CONSUMER: {', '.join(changed)} differ from vLLM {_VLLM_VERSION}; "
+            "the memory consumer patches that exact code."
         )
 
 
 def _check_speculator(spec: dflash.DFlashSpeculator) -> None:
     """Refuse the drafters for which slot redirect does not give the memory semantics."""
-    if type(spec) is not dflash.DFlashSpeculator:
+    # LiLiCorr inherits propose, set_attn and prepare_dflash_inputs. Its overrides read only the
+    # block's query rows and the last accepted verify row, and its convolutions run on the block's
+    # query rows, so the memory rows reach it only as KV, as in DFlash.
+    if type(spec) not in (dflash.DFlashSpeculator, lilicorr.LiLiCorrSpeculator):
         raise NotImplementedError(
-            f"MODELOPT_REJMEM_CONSUMER supports the DFlash speculator only, not {type(spec).__name__}."
+            "MODELOPT_REJMEM_CONSUMER supports the DFlash and LiLiCorr speculators only, not "
+            f"{type(spec).__name__}."
         )
     # A causal query would see memory rows by offset, not all of them.
     if any(spec.model.get_draft_attn_causal()):
