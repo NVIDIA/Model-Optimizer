@@ -18,7 +18,7 @@
 import inspect
 import logging
 import warnings
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from functools import partial
 from typing import TYPE_CHECKING
 
@@ -1501,6 +1501,21 @@ class _QuantFP8Linear(QuantModule):
             return weight.to(dtype) * scale_inv.to(dtype)
         assert weight_dequant is not None, "Triton is not available"
         return weight_dequant(weight, scale_inv, self.block_size, dtype=dtype)
+
+    def iter_weights_for_calibration(self):
+        """Yield the dequantized weight, not the stored FP8 codes, for weight-only calibration.
+
+        The forward quantizes the dequantized weight, so calibrating on the codes would set the
+        weight amax to the FP8 range instead of the weight's range. The dtype matches
+        :meth:`unpack_weight`.
+        """
+        if self.weight.element_size() != 1:
+            yield from super().iter_weights_for_calibration()
+            return
+        device = self.weight.device
+        with torch.cuda.device(device) if device.type == "cuda" else nullcontext():
+            weight = self._dequantize_weight(torch.get_default_dtype())
+        yield weight, self.weight_quantizer
 
     def forward(self, input: Tensor) -> Tensor:
         if self.weight.element_size() == 1:
