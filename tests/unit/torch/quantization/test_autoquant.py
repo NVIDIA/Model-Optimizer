@@ -25,6 +25,8 @@ from _test_utils.torch.distributed.utils import bounded_collectives
 from _test_utils.torch.quantization.models import SimpleConv, SimpleConvLinear, SimpleLinear
 from packaging.version import Version
 from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.fsdp import fully_shard
+from torch.distributed.tensor import DTensor, Replicate
 from torch.distributed.tensor.parallel import ColwiseParallel, parallelize_module
 
 import modelopt.torch.opt as mto
@@ -1192,8 +1194,11 @@ def _test_resume_from_another_point_on_one_rank(rank, size, directory, rank1_fil
                 state["candidate_stats"] = {}
             elif rank1_file == "other_setup":  # from a search whose groups resolved otherwise
                 state["resolved_search_setup_signature"] = ()
-            else:  # scored at the same progress, with other path settings
+            elif rank1_file == "other_scoring":  # at the same progress, with other path settings
                 state["scoring_signature"] = {"num_path_nodes": -1}
+            else:  # at the same progress and setup, scored on other data
+                for stats in state["candidate_stats"].values():
+                    stats["scores"] = [None if s is None else s + 1.0 for s in stats["scores"]]
             safe_save(state, path)
     # Rank 1 alone would calibrate or score again, refuse its setup or fail to load its file, while
     # rank 0 went on: every rank raises instead, rank 0 naming rank 1's failure to load.
@@ -1208,7 +1213,8 @@ def _test_resume_from_another_point_on_one_rank(rank, size, directory, rank1_fil
 
 
 @pytest.mark.parametrize(
-    "rank1_file", ["missing", "older", "other_setup", "other_scoring", "truncated"]
+    "rank1_file",
+    ["missing", "older", "other_setup", "other_scoring", "other_scores", "truncated"],
 )
 def test_resume_from_another_point_on_one_rank_raises_on_every_rank(
     cpu_dist_workers, tmp_path, rank1_file
@@ -1216,6 +1222,75 @@ def test_resume_from_another_point_on_one_rank_raises_on_every_rank(
     cpu_dist_workers.run(
         _test_resume_from_another_point_on_one_rank, directory=tmp_path, rank1_file=rank1_file
     )
+
+
+def _test_resume_with_the_same_nan_diagnostics_on_every_rank(rank, size, directory):
+    torch.manual_seed(rank)
+    data_loader = [SimpleLinear().get_input() for _ in range(2)]
+
+    def search():
+        return mtq.auto_quantize(
+            SimpleLinear(),
+            constraints={"effective_bits": 11.0},
+            quantization_formats=[mtq.INT8_SMOOTHQUANT_CFG],
+            data_loader=data_loader,
+            forward_step=lambda model, batch: model(batch),
+            loss_func=lambda output, data: output.sum(),
+            num_calib_steps=2,
+            num_score_steps=2,
+            method="aumann_shapley",
+            checkpoint=str(directory),
+        )[1]
+
+    searched = search()
+    # The NaN diagnostics a damage model records when it scored no tokens, on every rank alike.
+    path = directory / f"rank{rank}.pth"
+    state = safe_load(path)
+    state["damage_model"] = {
+        **state["damage_model"],
+        "completeness": float("nan"),
+        "f_corner": float("nan"),
+    }
+    safe_save(state, path)
+    with bounded_collectives():
+        assert search()["best"]["recipe"] == searched["best"]["recipe"]
+
+
+def test_resume_with_the_same_nan_diagnostics_on_every_rank(cpu_dist_workers, tmp_path):
+    cpu_dist_workers.run(
+        _test_resume_with_the_same_nan_diagnostics_on_every_rank, directory=tmp_path
+    )
+
+
+def test_resumed_search_recounts_the_costs_it_restored(tmp_path):
+    torch.manual_seed(0)
+    data_loader = [SimpleLinear().get_input() for _ in range(2)]
+    checkpoint = tmp_path / "search.pth"
+
+    def search():
+        return mtq.auto_quantize(
+            SimpleLinear(),
+            constraints={"effective_bits": 11.0},
+            quantization_formats=[mtq.INT8_SMOOTHQUANT_CFG],
+            data_loader=data_loader,
+            forward_step=lambda model, batch: model(batch),
+            loss_func=lambda output, data: output.sum(),
+            num_calib_steps=2,
+            num_score_steps=2,
+            checkpoint=str(checkpoint),
+        )[1]
+
+    searched = search()
+    # A checkpoint whose costs an earlier release counted otherwise, as before up_proj counted.
+    state = safe_load(checkpoint)
+    for stats in state["candidate_stats"].values():
+        stats["costs"] = [cost / 2 for cost in stats["costs"]]
+        stats["uncompressed_cost"] /= 2
+    safe_save(state, checkpoint)
+    resumed = search()
+    for name, stats in searched["candidate_stats"].items():
+        assert resumed["candidate_stats"][name]["costs"] == stats["costs"]
+        assert resumed["candidate_stats"][name]["uncompressed_cost"] == stats["uncompressed_cost"]
 
 
 def _test_data_parallel_moe_score_module(rank, size):
@@ -1462,10 +1537,12 @@ def test_expert_parallel_auto_quantize_picks_one_processes_formats(cpu_dist_work
     cpu_dist_workers.run(_test_expert_parallel_auto_quantize, methods=methods)
 
 
-def _test_kv_search_refuses_a_dense_layer_sharded_tensor_parallel(rank, size):
+def _test_kv_search_refuses_a_dense_layer_sharded_tensor_parallel(rank, size, fsdp2_elsewhere):
     register_torch_a2a()
     search, forward_step, constraints = _kv_cache_search()
     model = _sharded_like_the_expert_parallel_load(_tiny_qwen3_moe("torch_a2a"), size)
+    if fsdp2_elsewhere:  # FSDP2 owns another layer's DTensors, not the projection below
+        fully_shard(model.model.layers[1].self_attn, mesh=init_device_mesh("cpu", (size,)))
     # The caller's own tensor parallelism, on a dense projection of the expert-parallel model.
     parallelize_module(
         model.model.layers[0].self_attn.q_proj, init_device_mesh("cpu", (size,)), ColwiseParallel()
@@ -1485,23 +1562,33 @@ def _test_kv_search_refuses_a_dense_layer_sharded_tensor_parallel(rank, size):
     assert not any(isinstance(module, TensorQuantizer) for module in model.modules())
 
 
-def test_expert_parallel_kv_search_refuses_a_dense_layer_sharded_tensor_parallel(cpu_dist_workers):
-    """Only the routed experts' DTensors are exempt from the KV-cache search's refusal of tensor
-    parallelism, before it converts the model."""
+@pytest.mark.parametrize("fsdp2_elsewhere", [False, True], ids=["alone", "beside_fsdp2"])
+def test_expert_parallel_kv_search_refuses_a_dense_layer_sharded_tensor_parallel(
+    cpu_dist_workers, fsdp2_elsewhere
+):
+    """Only the routed experts' DTensors, and FSDP2's own, are exempt from the KV-cache search's
+    refusal of tensor parallelism, before it converts the model."""
     transformers = pytest.importorskip("transformers")
     if Version(transformers.__version__) < Version("5.16"):
         pytest.skip("transformers' expert-parallel load shards the experts as DTensors from 5.16")
-    cpu_dist_workers.run(_test_kv_search_refuses_a_dense_layer_sharded_tensor_parallel)
+    cpu_dist_workers.run(
+        _test_kv_search_refuses_a_dense_layer_sharded_tensor_parallel,
+        fsdp2_elsewhere=fsdp2_elsewhere,
+    )
 
 
-def _test_cost_counts_each_projection_by_its_own_layout(rank, size):
+def _test_cost_counts_each_projection_by_its_own_layout(rank, size, down_proj_as):
     register_torch_a2a()
     model = _sharded_like_the_expert_parallel_load(_tiny_qwen3_moe("torch_a2a"), size)
     mtq.quantize(model, mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG)
     experts = model.model.layers[0].mlp.experts
     whole = experts.gate_up_proj.numel() + experts.down_proj.numel()  # DTensors: the whole sizes
-    # One projection this rank's plain EP shard, beside the other's DTensor.
-    experts.down_proj = torch.nn.Parameter(experts.down_proj.to_local())
+    down_proj = experts.down_proj.to_local()
+    if down_proj_as == "own_rank_dtensor":  # whole over a mesh of this rank alone, not the EP group
+        own_rank = init_device_mesh("cpu", (size, 1), mesh_dim_names=("ep", "own"))["own"]
+        down_proj = DTensor.from_local(down_proj, own_rank, [Replicate()])
+    # One projection laid out otherwise than the other's DTensor over the EP group.
+    experts.down_proj = torch.nn.Parameter(down_proj)
     hparam = QuantRecipeHparam(
         [QuantRecipe(mtq.INT8_DEFAULT_CFG)],
         quant_modules=[experts],
@@ -1510,12 +1597,55 @@ def _test_cost_counts_each_projection_by_its_own_layout(rank, size):
     assert hparam.get_cost(QuantRecipe(quant_cfg=None)) == whole
 
 
-def test_expert_parallel_cost_counts_each_projection_by_its_own_layout(cpu_dist_workers):
-    """A plain projection is summed over the expert-parallel group; a DTensor one is whole already."""
+@pytest.mark.parametrize("down_proj_as", ["plain_shard", "own_rank_dtensor"])
+def test_expert_parallel_cost_counts_each_projection_by_its_own_layout(
+    cpu_dist_workers, down_proj_as
+):
+    """A projection is summed over the expert-parallel group unless it is a DTensor whose mesh
+    holds the group, whole already."""
     transformers = pytest.importorskip("transformers")
     if Version(transformers.__version__) < Version("5.16"):
         pytest.skip("transformers' expert-parallel load shards the experts as DTensors from 5.16")
-    cpu_dist_workers.run(_test_cost_counts_each_projection_by_its_own_layout)
+    cpu_dist_workers.run(
+        _test_cost_counts_each_projection_by_its_own_layout, down_proj_as=down_proj_as
+    )
+
+
+def _test_expert_parallel_weight_search_resumes(rank, size, directory):
+    register_torch_a2a()
+    gen = torch.Generator().manual_seed(1)
+    batches = []
+    for _ in range(size):
+        input_ids = torch.randint(0, 64, (2, 8), generator=gen)
+        batches.append({"input_ids": input_ids, "labels": input_ids})
+
+    def search():
+        model = _sharded_like_the_expert_parallel_load(_tiny_qwen3_moe("torch_a2a"), size)
+        return mtq.auto_quantize(
+            model,
+            constraints={"effective_bits": 6.0},
+            quantization_formats=[mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG, mtq.INT8_DEFAULT_CFG],
+            data_loader=batches[rank::size],
+            forward_step=lambda model, batch: model(**batch),
+            loss_func=lambda output, _: output.loss,
+            num_calib_steps=1,
+            num_score_steps=1,
+            checkpoint=str(directory),
+        )[1]
+
+    searched = search()
+    # Each rank's file holds its own experts' quantizer states, and the same scores and costs.
+    with bounded_collectives():
+        resumed = search()
+    assert resumed["best"]["recipe"] == searched["best"]["recipe"]
+    assert resumed["candidate_stats"] == searched["candidate_stats"]
+
+
+def test_expert_parallel_weight_search_resumes_from_its_checkpoint(cpu_dist_workers, tmp_path):
+    transformers = pytest.importorskip("transformers")
+    if Version(transformers.__version__) < Version("5.16"):
+        pytest.skip("transformers' expert-parallel load shards the experts as DTensors from 5.16")
+    cpu_dist_workers.run(_test_expert_parallel_weight_search_resumes, directory=tmp_path)
 
 
 def _test_kv_resume_with_one_stale_expert_shard(rank, size, directory):

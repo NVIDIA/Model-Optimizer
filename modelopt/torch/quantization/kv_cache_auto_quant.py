@@ -27,6 +27,7 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.distributed.fsdp import FSDPModule
 from torch.distributed.tensor import DTensor
 from tqdm import tqdm
 
@@ -44,6 +45,7 @@ from ._auto_quantize_cost import (
 from .config import QuantizeConfig, QuantizerAttributeConfig
 from .conversion import set_quantizer_by_cfg
 from .nn import TensorQuantizer
+from .utils.core_utils import _fsdp2_owned_params, _fsdp2_owns
 
 __all__ = ["AutoQuantizeKVSearcher"]
 
@@ -627,10 +629,16 @@ def _expert_quantizer_names(model: nn.Module) -> set[str]:
 
 
 def _has_dtensors_outside_experts(model: nn.Module) -> bool:
-    """Whether a tensor outside the routed experts is a DTensor, as tensor parallelism leaves it."""
+    """Whether a DTensor is neither a routed expert's nor FSDP2's own: tensor parallelism's."""
     experts = _expert_module_names(model)
+    fsdp2_owned: dict = {}
+    for module in model.modules():
+        if isinstance(module, FSDPModule):
+            fsdp2_owned.update(_fsdp2_owned_params(module))
     return any(
-        isinstance(tensor, DTensor) and not _is_under(name, experts)
+        isinstance(tensor, DTensor)
+        and not _is_under(name, experts)
+        and not _fsdp2_owns(fsdp2_owned, tensor)
         for name, tensor in (*model.named_parameters(), *model.named_buffers())
     )
 

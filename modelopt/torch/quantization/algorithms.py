@@ -19,6 +19,7 @@ import copy
 import fnmatch
 import functools
 import gc
+import numbers
 import types
 import warnings
 from abc import ABC, abstractmethod
@@ -805,20 +806,26 @@ class QuantRecipeHparam(Hparam):
                 cost += sum(w.numel() for w in weights) * cost_weight * recipe.compression
                 continue
 
-            # A plain tensor is this rank's shard over the TP and EP groups. A DTensor's size is the
-            # whole tensor's already, as for the routed experts transformers shards expert-parallel.
-            shards = [w for w in weights if not isinstance(w, DTensor)]
-            weight_size = sum(w.numel() for w in shards) * cost_weight
-            if shards:
-                weight_size = DistributedProcessGroup.get_dist_syncd_obj(
-                    weight_size,
-                    [
+            # A plain tensor is this rank's shard over the TP and EP groups, and a DTensor is whole
+            # over its mesh, as for the routed experts transformers shards expert-parallel: a weight
+            # is summed over the TP and EP groups its mesh leaves out.
+            numels: dict[tuple, int] = {}
+            for weight in weights:
+                groups = tuple(
+                    group
+                    for group in (
                         parallel_state.tensor_parallel_group,
                         parallel_state.expert_model_parallel_group,
-                    ],
-                    sum,
+                    )
+                    if group.is_initialized() and not _mesh_spans(weight, group)
                 )
-            weight_size += sum(w.numel() for w in weights if isinstance(w, DTensor)) * cost_weight
+                numels[groups] = numels.get(groups, 0) + weight.numel()
+            weight_size = sum(
+                DistributedProcessGroup.get_dist_syncd_obj(numel * cost_weight, list(groups), sum)
+                if groups
+                else numel * cost_weight
+                for groups, numel in numels.items()
+            )
 
             # Across data parallel groups, the weight size is the same for all the ranks.
             weight_size = DistributedProcessGroup.get_dist_syncd_obj(
@@ -867,10 +874,37 @@ def _quantization_formats_signature(quant_recipes) -> tuple[str, ...]:
     return tuple(sorted(recipe.checkpoint_signature for recipe in quant_recipes))
 
 
-# The checkpoint fields the ranks compare in short before resuming, the calibrated quantizer states
-# (their own on each rank) by format and the scores by whether there are any, or not at all, the
-# solved result; they compare every other field, each a field the search checks or branches on.
-_SUMMARIZED_ON_RESUME = ("quantizer_states", "candidate_stats", "best")
+def _comparable(value: Any) -> Any:
+    """``value`` as lists, strings and integers, a dict as its ordered items and a float as its text.
+
+    So ranks compare what they restored exactly, order included, a NaN they each restored equal to
+    itself, and the result sends with ``weights_only``.
+    """
+    if isinstance(value, torch.Tensor):
+        value = value.tolist()
+    if isinstance(value, QuantRecipe):
+        return value.checkpoint_signature
+    if isinstance(value, dict):
+        return [[_comparable(key), _comparable(item)] for key, item in value.items()]
+    if isinstance(value, (list, tuple)):
+        return [_comparable(item) for item in value]
+    if isinstance(value, (set, frozenset)):
+        return sorted((_comparable(item) for item in value), key=repr)
+    if value is None or isinstance(value, (bool, str)):
+        return value
+    if isinstance(value, numbers.Integral):
+        return int(value)
+    if isinstance(value, numbers.Real):
+        return repr(float(value))
+    return repr(value)
+
+
+def _mesh_spans(weight: torch.Tensor, group: DistributedProcessGroup) -> bool:
+    """Whether ``weight`` is a DTensor whose mesh holds every rank of ``group``: whole over it."""
+    if not isinstance(weight, DTensor):
+        return False
+    ranks = torch.distributed.get_process_group_ranks(group.group or torch.distributed.group.WORLD)
+    return set(ranks) <= set(weight.device_mesh.mesh.flatten().tolist())
 
 
 def _resume_together(progresses: list) -> None:
@@ -1023,13 +1057,16 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             nonlocal loaded
             loaded = self.load_search_checkpoint()
             state = self.state_dict()
-            return {
-                **{key: value for key, value in state.items() if key not in _SUMMARIZED_ON_RESUME},
-                "quantizer_states": sorted(
-                    r.checkpoint_signature for r in state["quantizer_states"]
-                ),
-                "candidate_stats": bool(state["candidate_stats"]),
-            }
+            # Everything restored but the solved result, which the search solves again, and the
+            # calibrated quantizer states, each rank's own, by their formats.
+            return _comparable(
+                {
+                    **{key: value for key, value in state.items() if key != "best"},
+                    "quantizer_states": sorted(
+                        r.checkpoint_signature for r in state["quantizer_states"]
+                    ),
+                }
+            )
 
         if is_distributed_run():
             # Each rank resumes from its own file and checks and branches on what it holds. Read in
@@ -1470,6 +1507,15 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             # solver-selectable for this hparam. Fixed formats must remain in the cost model.
             self.candidate_stats[name]["uncompressed_cost"] = hparam.get_cost(no_quant_recipe)
 
+    def _recount_candidate_costs(self):
+        """Count the restored candidate stats' costs again, as initialize_candidate_stats does."""
+        no_quant_recipe = QuantRecipe(quant_cfg=None)
+        for name, hparam in named_hparams(self.model, unique=True):
+            if isinstance(hparam, QuantRecipeHparam) and name in self.candidate_stats:
+                stats = self.candidate_stats[name]
+                stats["costs"] = [hparam.get_cost(recipe) for recipe in stats["formats"]]
+                stats["uncompressed_cost"] = hparam.get_cost(no_quant_recipe)
+
     def _run_func(self, func, num_iters=1, desc=""):
         for i, data in tqdm(
             zip(range(num_iters), self.config["data_loader"]),
@@ -1816,6 +1862,9 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             self.save_search_checkpoint(verbose=self.config["verbose"])
 
         if self.candidate_stats:
+            # A cost is the model's and the format's, not the scores': recount restored ones, so a
+            # search resumed from an earlier release's checkpoint solves against today's costs.
+            self._recount_candidate_costs()
             if self.config["verbose"]:
                 print_rank_0("AutoQuantize: Restored from checkpoint, skipping scoring")
             return

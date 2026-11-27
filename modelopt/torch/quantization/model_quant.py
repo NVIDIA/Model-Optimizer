@@ -791,8 +791,13 @@ def _auto_quantize_kv_cache(
     plan = dist.recorded_distribution_plan(model)
     ep_mesh = expert_parallel_mesh(model) if plan is not None and plan.is_expert_parallel else None
     # From transformers 5.16 the expert-parallel load leaves the routed experts' weights DTensors:
-    # only theirs are exempt, so a dense layer a caller shards with tensor parallelism stays refused.
-    if dist.size() > 1 and not dist.is_fsdp2_model(model) and _has_dtensors_outside_experts(model):
+    # only theirs and FSDP2's own are exempt, so a dense layer a caller shards with tensor
+    # parallelism stays refused. Without expert parallelism an FSDP2 model is exempt whole, as on main.
+    if (
+        dist.size() > 1
+        and (ep_mesh is not None or not dist.is_fsdp2_model(model))
+        and _has_dtensors_outside_experts(model)
+    ):
         raise NotImplementedError(
             "Distributed KV-cache AutoQuantize supports DP/FSDP2 and EP, not TP."
         )
