@@ -97,6 +97,26 @@ def test_reduce_amax_fp8(fp8_dtype, axis):
 
 
 @pytest.mark.parametrize(
+    ("shape", "axis"),
+    [((3,), 0), ((3,), -1), ((1, 3), (0, 1)), ((1, 3), (-2, -1))],
+)
+def test_calibration_preserves_unreduced_axes(shape, axis):
+    """When the quantization axes cover every dimension, amax must stay elementwise."""
+    inputs = torch.tensor([127.0, 0.125, -0.25]).reshape(shape)
+    quantizer = TensorQuantizer(
+        QuantizerAttributeConfig(num_bits=8, axis=axis), if_quant=False, if_calib=True
+    )
+    quantizer(inputs)
+    quantizer.load_calib_amax()
+
+    assert torch.equal(quantizer.amax, inputs.abs())
+
+    quantizer.disable_calib()
+    quantizer.enable_quant()
+    assert torch.equal(quantizer(inputs), inputs)
+
+
+@pytest.mark.parametrize(
     ("shape", "quant_axis", "expected_reduce_axis"),
     [
         ((2, 3, 4), None, None),  # Per-tensor quantization (None axis)

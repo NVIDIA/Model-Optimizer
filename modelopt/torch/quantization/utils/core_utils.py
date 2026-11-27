@@ -159,7 +159,8 @@ def reduce_amax(input, axis=None, keepdims=True, squeeze_scalar=True):
     Args:
         input: Input tensor
         axis: The dimensions to reduce. None or int or tuple of ints. If None (the default),
-            reduces all dimensions. Must be in the range [-rank(input_tensor), rank(input_tensor)).
+            reduces all dimensions. An empty sequence reduces no dimensions.
+            Must be in the range [-rank(input_tensor), rank(input_tensor)).
         keepdims: A boolean. If true, retains reduced dimensions with length 1. Default True
 
     Returns:
@@ -174,14 +175,17 @@ def reduce_amax(input, axis=None, keepdims=True, squeeze_scalar=True):
         max_val = torch.max(input)
         min_val = torch.min(input)
         output = torch.maximum(torch.abs(max_val), torch.abs(min_val))
+    elif isinstance(axis, list | tuple) and not axis:
+        # torch.amax/amin treat an empty dim as "reduce all"; here nothing is reduced.
+        output = input.abs()
     else:
         if isinstance(axis, int):
             axis = (axis,)
         max_val = torch.amax(input, dim=axis, keepdim=keepdims)
         min_val = torch.amin(input, dim=axis, keepdim=keepdims)
         output = torch.maximum(torch.abs(max_val), torch.abs(min_val))
-        if squeeze_scalar and output.numel() == 1:
-            output.squeeze_()
+    if squeeze_scalar and output.numel() == 1:
+        output.squeeze_()
     return output
 
 
