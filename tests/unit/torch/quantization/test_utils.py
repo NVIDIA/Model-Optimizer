@@ -672,11 +672,20 @@ def _fsdp2_receipt_inspection_failure_job(rank, size, direct, inject, stage):
 
     mesh = init_device_mesh("cpu", (size,))
     layer = torch.nn.Linear(8, 8)
-    fully_shard(layer, mesh=mesh)
+    root = layer
+    if stage in ("ignored_entry", "ignored_exit"):
+        root = torch.nn.Sequential(layer, torch.nn.Linear(8, 8))
+        fully_shard(root, mesh=mesh, ignored_params=set(layer.parameters()))
+    else:
+        fully_shard(root, mesh=mesh)
+
+    def local(value):
+        return value.to_local() if isinstance(value, DTensor) else value
+
     parameters = dict(layer.named_parameters())
-    before = {name: value.to_local().detach().clone() for name, value in parameters.items()}
+    before = {name: local(value).detach().clone() for name, value in parameters.items()}
     alias = torch.nn.Linear(8, 4, bias=False)
-    alias.weight = torch.nn.Parameter(layer.weight.to_local().detach())
+    alias.weight = torch.nn.Parameter(local(layer.weight).detach())
     cpu_offload(alias, execution_device="cpu")
     # A resident TP/FSDP shard may coexist with the independent offloaded owner.
     mixed = torch.nn.ModuleDict({"offloaded": alias, "resident": torch.nn.Module()})
@@ -691,8 +700,8 @@ def _fsdp2_receipt_inspection_failure_job(rank, size, direct, inject, stage):
 
     def inspect_scope(owner, materialized):
         at_stage = (
-            stage in ("preflight", "read_entry")
-            or (stage == "read_exit" and body_done)
+            stage in ("preflight", "read_entry", "ignored_entry")
+            or (stage in ("read_exit", "ignored_exit") and body_done)
             or (stage == "publication" and body_done and owner.weight is parameters["weight"])
         )
         if inject and rank == 0 and owner is layer and at_stage:
@@ -713,10 +722,10 @@ def _fsdp2_receipt_inspection_failure_job(rank, size, direct, inject, stage):
         with (
             mock.patch.object(offload_plugin, "_rollback_scope", inspect_scope),
             mock.patch.object(DTensor, "redistribute", count_gathers),
-            access(layer, layer, writeback=not stage.startswith("read_")),
+            access(layer, root, writeback=not stage.startswith("read_")),
         ):
             entered = True
-            if stage in ("read_exit", "publication"):
+            if stage in ("read_exit", "publication", "ignored_exit"):
                 with offload_plugin.weight_access_and_writeback_context(
                     alias, rollback=True
                 ) as undo:
@@ -733,18 +742,21 @@ def _fsdp2_receipt_inspection_failure_job(rank, size, direct, inject, stage):
         if rank == 0:
             assert error is failure
     else:
-        assert error is None and entered
+        assert error is None and entered, repr(error)
     with pytest.raises(RuntimeError):
         undo()
     for name, parameter in parameters.items():
         assert layer.get_parameter(name) is parameter
         expected = before[name] + (stage == "publication" and name == "weight")
-        torch.testing.assert_close(parameter.to_local(), expected, rtol=0, atol=0)
+        torch.testing.assert_close(local(parameter), expected, rtol=0, atol=0)
     torch.distributed.barrier()
 
 
 @pytest.mark.parametrize("direct", [False, True])
-@pytest.mark.parametrize("stage", ["preflight", "read_entry", "read_exit", "publication"])
+@pytest.mark.parametrize(
+    "stage",
+    ["preflight", "read_entry", "read_exit", "publication", "ignored_entry", "ignored_exit"],
+)
 def test_fsdp2_receipt_inspection_failure_is_coordinated(cpu_dist_workers, direct, stage):
     pytest.importorskip("accelerate")
     cpu_dist_workers.run(_fsdp2_receipt_inspection_failure_job, direct, False, stage)

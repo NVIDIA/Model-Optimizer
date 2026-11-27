@@ -688,7 +688,6 @@ def fsdp2_weight_access_and_writeback_context(
                 module, root_model, writeback, names, rollback=rollback
             ),
             fsdp_access=True,
-            writeback=writeback,
         ),
     ):
         yield
@@ -748,7 +747,7 @@ def _fsdp2_weight_access_and_writeback_context(module, root_model, writeback, na
     gather_params = []
     preflight_error = None
     try:
-        _invalidate_pending_accelerate_rollbacks(module)
+        _invalidate_pending_accelerate_rollbacks(module, strict=coordinate_window)
         if (
             rollback
             and _FSDP2_ACTIVE_PARAMS
@@ -978,7 +977,7 @@ def _invalidate_pending_accelerate_rollbacks(module, *, strict=True):
 
 
 @contextmanager
-def _expire_accelerate_rollbacks_on_exit(module, context, *, fsdp_access=False, writeback=True):
+def _expire_accelerate_rollbacks_on_exit(module, context, *, fsdp_access=False):
     error = None
 
     def scan(strict):
@@ -997,7 +996,7 @@ def _expire_accelerate_rollbacks_on_exit(module, context, *, fsdp_access=False, 
                 error = exc
                 raise
             finally:
-                scan(not (fsdp_access and not writeback))
+                scan(not fsdp_access)
         error = None
     except BaseException as exc:
         error = exc
@@ -1040,7 +1039,9 @@ def enable_weight_access_and_writeback(
             Read-only FSDP2 access uses native unshard/reshard without this coordination.
             Accelerate's callback restores backing maps, registrations and captured CPU aliases;
             callers still restore already-resident execution values from their own backups,
-            including inside outer materialization scopes. The callback becomes valid after exit
+            including inside outer materialization scopes. Backing maps holding execution-device
+            tensors instead of CPU tensors are not snapshotted; callers own their restoration.
+            The callback becomes valid after exit
             and expires when overlapping access through any dispatcher route or the direct FSDP2
             context enters or publishes, including read-only or failed access and enclosing
             publication. Stale undo raises before mutation; successful undo stays idempotent.
@@ -1081,9 +1082,7 @@ def _enable_weight_access_and_writeback(module, root_model, names, writeback, *,
         context = nullcontext()
 
     if not accelerate_access:
-        context = _expire_accelerate_rollbacks_on_exit(
-            module, context, fsdp_access=fsdp_access, writeback=writeback
-        )
+        context = _expire_accelerate_rollbacks_on_exit(module, context, fsdp_access=fsdp_access)
     with context as owner_rollback:
         yield owner_rollback
 

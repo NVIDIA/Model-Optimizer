@@ -357,7 +357,10 @@ def weight_access_and_writeback_context(module, writeback: bool = True, *, rollb
     With ``rollback=True``, the yielded callback restores offload backing maps, saved registrations
     and placement, and snapshotted CPU backing aliases after a local success or failure. It does
     not restore in-place edits to already-resident execution tensors. Callers must restore those
-    values from their own backups, including inside an outer materialization window, before that
+    values from their own backups. Backing maps that hold execution-device tensors instead of CPU
+    tensors are also not snapshotted; callers own their restoration. This includes aliases created
+    on onload when a backing is already on the execution device. Inside an outer materialization
+    window, restore caller-owned values before that
     outer scope republishes them. Successful callback restoration is idempotent; a failed attempt
     reports its error and remains retryable so the caller can finish restoration.
     A callback is valid only after its window exits and until another overlapping access enters
