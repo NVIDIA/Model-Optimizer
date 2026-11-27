@@ -20,6 +20,7 @@ import itertools
 import warnings
 import weakref
 from collections import namedtuple
+from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager, nullcontext
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -563,16 +564,37 @@ def _fsdp2_owned_params(fsdp_module: FSDPModule, refresh: bool = False) -> dict[
         owned = {}
         for group in _fsdp2_param_groups(fsdp_module):
             for fsdp_param in group.fsdp_params:
-                # The last two exist once their state is first entered.
-                for state_param in (
-                    fsdp_param.sharded_param,
-                    getattr(fsdp_param, "_sharded_post_forward_param", None),
-                    getattr(fsdp_param, "_unsharded_param", None),
-                ):
-                    if state_param is not None:
-                        owned[id(state_param)] = weakref.ref(state_param)
+                for state_param in _fsdp2_state_params(fsdp_param):
+                    owned[id(state_param)] = weakref.ref(state_param)
         _FSDP2_OWNED_PARAMS[fsdp_module] = owned
     return owned
+
+
+def _fsdp2_state_params(fsdp_param) -> Iterator[nn.Parameter]:
+    """The parameter objects FSDP2 has registered for ``fsdp_param``, one per shard state."""
+    # The last two exist once their state is first entered.
+    for state_param in (
+        fsdp_param.sharded_param,
+        getattr(fsdp_param, "_sharded_post_forward_param", None),
+        getattr(fsdp_param, "_unsharded_param", None),
+    ):
+        if state_param is not None:
+            yield state_param
+
+
+def _fsdp2_sharded_alone(module: nn.Module) -> set[int]:
+    """The parameters of ``module``'s FSDP2 units that FSDP2 alone shards, by id.
+
+    Not those that were DTensors before ``fully_shard`` wrapped them, which tensor or expert
+    parallelism shards too.
+    """
+    return {
+        id(state_param)
+        for group in _fsdp2_param_groups(module)
+        for fsdp_param in group.fsdp_params
+        if not fsdp_param.is_dtensor
+        for state_param in _fsdp2_state_params(fsdp_param)
+    }
 
 
 def _fsdp2_owns(owned: dict[int, weakref.ref], param: nn.Parameter) -> bool:

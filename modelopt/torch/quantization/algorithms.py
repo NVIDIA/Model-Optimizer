@@ -46,6 +46,8 @@ from modelopt.torch.utils.distributed import (
     all_reduce,
     is_distributed_run,
     is_master,
+    rank,
+    recorded_distribution_plan,
 )
 
 from . import config as mtq_config
@@ -904,7 +906,28 @@ def _mesh_spans(weight: torch.Tensor, group: DistributedProcessGroup) -> bool:
     if not isinstance(weight, DTensor):
         return False
     ranks = torch.distributed.get_process_group_ranks(group.group or torch.distributed.group.WORLD)
-    return set(ranks) <= set(weight.device_mesh.mesh.flatten().tolist())
+    return _whole_over(set(weight.device_mesh.mesh.flatten().tolist()), set(ranks))
+
+
+def _whole_over(mesh_ranks: set[int], group_ranks: set[int]) -> bool:
+    """Whether a DTensor on ``mesh_ranks`` is whole over ``group_ranks``, or this rank's part of it.
+
+    A mesh holding some of the group's ranks but not all leaves the tensor a part that other ranks
+    of the group share, which no sum over the group counts once.
+    """
+    shared = mesh_ranks & group_ranks
+    if len(shared) not in (1, len(group_ranks)):
+        raise NotImplementedError(
+            f"AutoQuantize cannot count a DTensor whose mesh holds {len(shared)} of the "
+            f"{len(group_ranks)} ranks of a group its module is sharded over."
+        )
+    return shared == group_ranks
+
+
+def _plan_signature(model: nn.Module) -> str | None:
+    """The distribution plan recorded on ``model``, as a checkpoint records it."""
+    plan = recorded_distribution_plan(model)
+    return None if plan is None else repr(plan)
 
 
 def _resume_together(progresses: list) -> None:
@@ -996,6 +1019,10 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             "num_calib_steps": None,
             "num_score_steps": None,
             "scoring_config": {},
+            # The rank and distribution plan that wrote the checkpoint: its quantizer states are that
+            # rank's own, an expert-parallel rank's those of its own experts.
+            "checkpoint_rank": None,
+            "distribution_plan": None,
             "best": {"recipe": {}, "constraints": {}, "score": float("inf"), "is_satisfied": False},
         }
 
@@ -1057,11 +1084,23 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             nonlocal loaded
             loaded = self.load_search_checkpoint()
             state = self.state_dict()
-            # Everything restored but the solved result, which the search solves again, and the
-            # calibrated quantizer states, each rank's own, by their formats.
+            # On several ranks, a file another rank wrote holds other quantizer states, such as other
+            # experts'. (One process may still re-solve a file rank 0 of a distributed run wrote.)
+            if is_distributed_run() and state["checkpoint_rank"] not in (None, rank()):
+                raise ValueError(
+                    f"Rank {rank()}'s AutoQuantize checkpoint was written by rank "
+                    f"{state['checkpoint_rank']}. Restore each rank's own file from the same search, "
+                    "or use a new checkpoint path."
+                )
+            # Everything restored but the solved result, which the search solves again, the writer's
+            # rank, checked above, and the calibrated quantizer states, each rank's own, by format.
             return _comparable(
                 {
-                    **{key: value for key, value in state.items() if key != "best"},
+                    **{
+                        key: value
+                        for key, value in state.items()
+                        if key not in ("best", "checkpoint_rank")
+                    },
                     "quantizer_states": sorted(
                         r.checkpoint_signature for r in state["quantizer_states"]
                     ),
@@ -1676,6 +1715,18 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         mismatch = self.scoring_mismatch(self.state_dict()) if self.candidate_stats else None
         if mismatch:
             raise ValueError(f"{mismatch} Use a different checkpoint path.")
+        # Another plan gives a rank other experts. Every rank restored the same plan (checked in
+        # validate_search_input) and runs under the same one, so every rank refuses alike.
+        restored_plan, plan = getattr(self, "distribution_plan", None), _plan_signature(self.model)
+        if (
+            is_distributed_run()
+            and (self.quantizer_states or self.candidate_stats)
+            and restored_plan not in (None, plan)
+        ):
+            raise ValueError(
+                f"The AutoQuantize checkpoint was written under {restored_plan}, not {plan}. Resume "
+                "with the same world size and expert-parallel degree, or use a new checkpoint path."
+            )
         self.method = self.method_name
         self.scoring_config = self.scoring_config_from(self.config)
         self.cost_model = self.config["cost_model"]
@@ -1683,6 +1734,8 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         self.active_moe_expert_ratio = self.config["active_moe_expert_ratio"]
         self.disabled_layers = self.config["disabled_layers"]
         self.cost_denominator = getattr(self, "cost_denominator", None)
+        self.checkpoint_rank = rank()
+        self.distribution_plan = plan
 
         module_search_spaces = self._normalize_module_search_spaces(
             self.config["module_search_spaces"]

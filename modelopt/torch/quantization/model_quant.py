@@ -1373,7 +1373,10 @@ def auto_quantize(
     finally:
         model_calib._ENABLE_FOLDING_PQS_TO_WEIGHTS = folding_pqs_to_weights
 
-    return model, searcher.state_dict()
+    # The rank that wrote a checkpoint marks its file, not the search's result, alike on every rank.
+    search_state = searcher.state_dict()
+    search_state.pop("checkpoint_rank", None)
+    return model, search_state
 
 
 def merge_auto_quantize_checkpoints(shard_checkpoints: Sequence[str], checkpoint: str) -> None:

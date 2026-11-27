@@ -48,6 +48,7 @@ from modelopt.torch.quantization.algorithms import (
     _get_kl_div_loss,
     _get_log_prob,
     _module_search_space_signature,
+    _whole_over,
     estimate_quant_compression,
 )
 from modelopt.torch.quantization.config import _base_disable_all, _default_disabled_quantizer_cfg
@@ -1359,8 +1360,7 @@ def _tiny_qwen3_moe(experts_implementation):
     # transformers is optional here: the tests that reach this importorskip it.
     from transformers import Qwen3MoeConfig, Qwen3MoeForCausalLM
 
-    # Every input width a multiple of INT4's 128-wide blocks: the KV-cache search after a weight
-    # search cannot yet fingerprint the slices a quantizer keeps for the blocks it pads.
+    # Widths of 128, whose KV-cache KL scores stay well above float32 noise.
     config = Qwen3MoeConfig(
         vocab_size=64,
         hidden_size=128,
@@ -1406,6 +1406,14 @@ def _sharded_like_the_expert_parallel_load(model, size):
     return model
 
 
+def _int4_in_blocks_of(width):
+    config = copy.deepcopy(mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG)
+    for entry in config["quant_cfg"]:
+        if entry["quantizer_name"] == "*weight_quantizer":
+            entry["cfg"]["block_sizes"][-1] = width
+    return config
+
+
 def _kv_cache_search():
     """Each layer's K/V cast to FP8 with its calibrated scale or a constant one."""
     return (
@@ -1444,7 +1452,9 @@ def _test_expert_parallel_auto_quantize(rank, size, methods):
     for _ in range(size):
         input_ids = torch.randint(0, 64, (2, 8), generator=gen)
         batches.append({"input_ids": input_ids, "labels": input_ids})
-    formats = [mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG, mtq.INT8_DEFAULT_CFG]
+    # INT4 in blocks of 96 pads every 128-wide weight's last block, a padding the KV-cache search
+    # after the weight search fingerprints with the weight quantizers before it.
+    formats = [_int4_in_blocks_of(96), mtq.INT8_DEFAULT_CFG]
     searches = {
         "gradient": (
             {"quantization_formats": formats, "loss_func": lambda output, _: output.loss},
@@ -1537,16 +1547,20 @@ def test_expert_parallel_auto_quantize_picks_one_processes_formats(cpu_dist_work
     cpu_dist_workers.run(_test_expert_parallel_auto_quantize, methods=methods)
 
 
-def _test_kv_search_refuses_a_dense_layer_sharded_tensor_parallel(rank, size, fsdp2_elsewhere):
+def _test_kv_search_refuses_a_dense_layer_sharded_tensor_parallel(rank, size, layout):
     register_torch_a2a()
     search, forward_step, constraints = _kv_cache_search()
     model = _sharded_like_the_expert_parallel_load(_tiny_qwen3_moe("torch_a2a"), size)
-    if fsdp2_elsewhere:  # FSDP2 owns another layer's DTensors, not the projection below
-        fully_shard(model.model.layers[1].self_attn, mesh=init_device_mesh("cpu", (size,)))
+    attention = model.model.layers[0].self_attn
     # The caller's own tensor parallelism, on a dense projection of the expert-parallel model.
-    parallelize_module(
-        model.model.layers[0].self_attn.q_proj, init_device_mesh("cpu", (size,)), ColwiseParallel()
-    )
+    if layout == "inside_fsdp2":  # in an FSDP2 unit, which then owns the projection too
+        mesh = init_device_mesh("cpu", (1, size), mesh_dim_names=("dp", "tp"))
+        parallelize_module(attention.q_proj, mesh["tp"], ColwiseParallel())
+        fully_shard(attention, mesh=mesh["dp"])
+    else:
+        if layout == "beside_fsdp2":  # FSDP2 owns another layer's DTensors, not the projection
+            fully_shard(model.model.layers[1].self_attn, mesh=init_device_mesh("cpu", (size,)))
+        parallelize_module(attention.q_proj, init_device_mesh("cpu", (size,)), ColwiseParallel())
     gen = torch.Generator().manual_seed(1)
     with pytest.raises(NotImplementedError, match="not TP"):
         mtq.auto_quantize(
@@ -1562,19 +1576,26 @@ def _test_kv_search_refuses_a_dense_layer_sharded_tensor_parallel(rank, size, fs
     assert not any(isinstance(module, TensorQuantizer) for module in model.modules())
 
 
-@pytest.mark.parametrize("fsdp2_elsewhere", [False, True], ids=["alone", "beside_fsdp2"])
+@pytest.mark.parametrize("layout", ["alone", "beside_fsdp2", "inside_fsdp2"])
 def test_expert_parallel_kv_search_refuses_a_dense_layer_sharded_tensor_parallel(
-    cpu_dist_workers, fsdp2_elsewhere
+    cpu_dist_workers, layout
 ):
-    """Only the routed experts' DTensors, and FSDP2's own, are exempt from the KV-cache search's
-    refusal of tensor parallelism, before it converts the model."""
+    """Only the routed experts' DTensors, and those FSDP2 alone shards, are exempt from the KV-cache
+    search's refusal of tensor parallelism, before it converts the model."""
     transformers = pytest.importorskip("transformers")
     if Version(transformers.__version__) < Version("5.16"):
         pytest.skip("transformers' expert-parallel load shards the experts as DTensors from 5.16")
     cpu_dist_workers.run(
-        _test_kv_search_refuses_a_dense_layer_sharded_tensor_parallel,
-        fsdp2_elsewhere=fsdp2_elsewhere,
+        _test_kv_search_refuses_a_dense_layer_sharded_tensor_parallel, layout=layout
     )
+
+
+def test_a_dtensor_is_whole_over_a_group_its_mesh_holds_or_this_ranks_part():
+    assert _whole_over({0, 1, 2, 3}, {0, 1, 2, 3})
+    assert _whole_over({0, 1, 2, 3, 4, 5}, {0, 1})  # a mesh beyond the group
+    assert not _whole_over({2}, {0, 1, 2, 3})  # this rank's own part, as a plain tensor is
+    with pytest.raises(NotImplementedError, match="holds 2 of the 4 ranks"):
+        _whole_over({0, 1}, {0, 1, 2, 3})  # half shared with another rank
 
 
 def _test_cost_counts_each_projection_by_its_own_layout(rank, size, down_proj_as):
@@ -1611,7 +1632,7 @@ def test_expert_parallel_cost_counts_each_projection_by_its_own_layout(
     )
 
 
-def _test_expert_parallel_weight_search_resumes(rank, size, directory):
+def _test_expert_parallel_weight_search_resumes(rank, size, directory, files):
     register_torch_a2a()
     gen = torch.Generator().manual_seed(1)
     batches = []
@@ -1634,18 +1655,32 @@ def _test_expert_parallel_weight_search_resumes(rank, size, directory):
         )[1]
 
     searched = search()
+    if files == "swapped" and rank == 0:  # bounded_collectives waits for it
+        first, second, spare = (directory / f"{name}.pth" for name in ("rank0", "rank1", "spare"))
+        first.rename(spare)
+        second.rename(first)
+        spare.rename(second)
     # Each rank's file holds its own experts' quantizer states, and the same scores and costs.
     with bounded_collectives():
+        if files == "swapped":  # the scores agree, but each rank would take the other's experts
+            with pytest.raises(ValueError, match="written by rank"):
+                search()
+            return
         resumed = search()
     assert resumed["best"]["recipe"] == searched["best"]["recipe"]
     assert resumed["candidate_stats"] == searched["candidate_stats"]
 
 
-def test_expert_parallel_weight_search_resumes_from_its_checkpoint(cpu_dist_workers, tmp_path):
+@pytest.mark.parametrize("files", ["own", "swapped"])
+def test_expert_parallel_weight_search_resumes_from_its_checkpoint(
+    cpu_dist_workers, tmp_path, files
+):
     transformers = pytest.importorskip("transformers")
     if Version(transformers.__version__) < Version("5.16"):
         pytest.skip("transformers' expert-parallel load shards the experts as DTensors from 5.16")
-    cpu_dist_workers.run(_test_expert_parallel_weight_search_resumes, directory=tmp_path)
+    cpu_dist_workers.run(
+        _test_expert_parallel_weight_search_resumes, directory=tmp_path, files=files
+    )
 
 
 def _test_kv_resume_with_one_stale_expert_shard(rank, size, directory):

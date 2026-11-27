@@ -27,7 +27,6 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.distributed.fsdp import FSDPModule
 from torch.distributed.tensor import DTensor
 from tqdm import tqdm
 
@@ -45,7 +44,7 @@ from ._auto_quantize_cost import (
 from .config import QuantizeConfig, QuantizerAttributeConfig
 from .conversion import set_quantizer_by_cfg
 from .nn import TensorQuantizer
-from .utils.core_utils import _fsdp2_owned_params, _fsdp2_owns
+from .utils.core_utils import _fsdp2_sharded_alone
 
 __all__ = ["AutoQuantizeKVSearcher"]
 
@@ -507,6 +506,14 @@ def _fingerprint_value(value: Any) -> Any:
         return str(value)
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
+    if isinstance(value, slice):  # the blocks a block quantizer pads, from _setup_for_blockquant
+        return {
+            "slice": [
+                _fingerprint_value(value.start),
+                _fingerprint_value(value.stop),
+                _fingerprint_value(value.step),
+            ]
+        }
     raise TypeError(f"Unsupported preceding quantizer state value: {type(value).__qualname__}.")
 
 
@@ -629,16 +636,13 @@ def _expert_quantizer_names(model: nn.Module) -> set[str]:
 
 
 def _has_dtensors_outside_experts(model: nn.Module) -> bool:
-    """Whether a DTensor is neither a routed expert's nor FSDP2's own: tensor parallelism's."""
+    """Whether a DTensor is neither a routed expert's nor FSDP2's alone: tensor parallelism's."""
     experts = _expert_module_names(model)
-    fsdp2_owned: dict = {}
-    for module in model.modules():
-        if isinstance(module, FSDPModule):
-            fsdp2_owned.update(_fsdp2_owned_params(module))
+    fsdp2_alone = _fsdp2_sharded_alone(model)
     return any(
         isinstance(tensor, DTensor)
         and not _is_under(name, experts)
-        and not _fsdp2_owns(fsdp2_owned, tensor)
+        and id(tensor) not in fsdp2_alone
         for name, tensor in (*model.named_parameters(), *model.named_buffers())
     )
 
