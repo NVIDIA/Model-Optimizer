@@ -11,6 +11,8 @@ Release notes, technical updates, examples, and deployment stories from the Mode
        <input id="announcement-search" class="announcement-search" type="search" placeholder="Search announcements" autocomplete="off" />
        <div class="announcement-tags" aria-label="Announcement tags">
          <button class="announcement-tag is-active" type="button" data-tag="all" aria-pressed="true">All</button>
+         <button class="announcement-tag" type="button" data-tag="evaluation" aria-pressed="false">Evaluation</button>
+         <button class="announcement-tag" type="button" data-tag="fast-experimentation" aria-pressed="false">Fast experimentation</button>
          <button class="announcement-tag" type="button" data-tag="release" aria-pressed="false">Release</button>
          <button class="announcement-tag" type="button" data-tag="autoquantize" aria-pressed="false">AutoQuantize</button>
          <button class="announcement-tag" type="button" data-tag="kv-cache" aria-pressed="false">KV cache</button>
@@ -31,6 +33,17 @@ Release notes, technical updates, examples, and deployment stories from the Mode
      </div>
 
    <div class="announcement-grid" id="announcement-grid">
+     <article class="announcement-card" data-date="2026-11-18" data-title="Evaluating Models Efficiently During Optimization Experiments" data-summary="Compare checkpoints during optimization experiments: choose metrics, check regressions and reliability, and balance question coverage with repeated runs." data-tags="evaluation docs quantization qad fast-experimentation">
+       <div class="announcement-card-meta">November 18, 2026 &middot;
+         <a href="https://github.com/danielkorzekwa">Daniel Korzekwa</a>,
+         <a href="https://github.com/rohansjoshi">Rohan Joshi</a>,
+         <a href="https://github.com/chadvoegele">Chad Voegele</a>,
+         <a href="https://github.com/cjluo-nv">Chenjie Luo</a>
+       </div>
+       <h2><a href="announcements/evaluating_models_efficiently_during_optimization_experiments/index.html">Evaluating Models Efficiently During Optimization Experiments</a></h2>
+       <p>Compare checkpoints during optimization experiments: choose metrics, check regressions and reliability, and balance question coverage with repeated runs.</p>
+       <div class="announcement-card-tags"><span>evaluation</span><span>docs</span><span>quantization</span><span>qad</span><span>fast-experimentation</span></div>
+     </article>
      <article class="announcement-card" data-date="2026-11-17" data-title="Training Standalone Speculative Decoding Drafts for Fast Inference on Groq 3 LPX" data-summary="Three ModelOpt-trained standalone drafts for Qwen3.8-27B, intended for Groq 3 LPX deployment. At unbounded draft length, offline scoring gives the 4B and 0.8B drafts 59% and 6% higher acceptance lengths than the live MTP baseline." data-tags="speculative-decoding external-draft groq-lpx qwen3.8 distillation">
        <div class="announcement-card-meta">November 17, 2026 &middot; Peter Hicks et al.</div>
        <h2><a href="announcements/20261117-qwen38-27b-external-drafts-lpx.html">Training Standalone Speculative Decoding Drafts for Fast Inference on Groq 3 LPX</a></h2>
@@ -139,6 +152,7 @@ Release notes, technical updates, examples, and deployment stories from the Mode
    guides/0_support_matrix
    guides/1_quantization
    guides/quantization_aware_training_and_distillation
+   guides/evaluation/index
    guides/2_save_load
    guides/3_pruning
    guides/4_distillation
