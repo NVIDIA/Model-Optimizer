@@ -38,6 +38,7 @@ from modelopt.torch.quantization.utils.core_utils import (
     _fsdp2_owned_params,
     _fsdp2_owns,
     _fsdp2_param_groups,
+    _fsdp2_persistent_parameters,
     enable_fake_quant,
     enable_weight_access_and_writeback,
     fsdp2_weight_access_and_writeback_context,

@@ -1185,7 +1185,11 @@ def _validation_refusal_worker(rank, size, problem):
     )
     before = copy.deepcopy(student.state_dict())
     axis = "dp" if problem == "global_batch" else "cp"
-    mesh = init_device_mesh("cpu", (size,), mesh_dim_names=(axis,))
+    mesh = (
+        _runtime_mesh(axis)
+        if problem == "finalization_format"
+        else init_device_mesh("cpu", (size,), mesh_dim_names=(axis,))
+    )
     recipe = {"num_steps": 1, "global_batch_size": 2, "sequence_length": 4}
     if problem == "global_batch" and rank == 0:
         recipe["global_batch_size"] = 1
@@ -1194,6 +1198,10 @@ def _validation_refusal_worker(rank, size, problem):
         mtd.bypass(reference, copy.deepcopy(teacher), [batch], recipe, device_mesh=mesh)
         before = copy.deepcopy(reference.state_dict())
     student.fail_lookup = problem == "resolve" and rank == 1
+    if problem == "finalization_format" and rank == 1:
+        student.mlp.register_forward_hook(
+            lambda module, args, output: setattr(module.weight_quantizer, "num_bits", "iq1_s")
+        )
 
     class Validation:
         def __iter__(self):
@@ -1225,7 +1233,7 @@ def _validation_refusal_worker(rank, size, problem):
                 validation_dataloader=validation,
                 device_mesh=mesh,
             )
-        if problem == "global_batch":
+        if problem in ("global_batch", "finalization_format"):
             errors = [None] * size
             dist.all_gather_object(errors, str(refusal.value), group=group)
             assert len(set(errors)) == 1
@@ -1247,6 +1255,7 @@ def _validation_refusal_worker(rank, size, problem):
         "train_advance",
         "resolve",
         "global_batch",
+        "finalization_format",
     ],
 )
 def test_distributed_bypass_refuses_unequal_validation(bypass_cpu_workers, problem):
