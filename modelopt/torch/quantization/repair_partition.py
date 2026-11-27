@@ -26,6 +26,7 @@ from .ggml.registry import GGML_FORMAT_REGISTRY
 from .nn import TensorQuantizer
 from .qtensor import FP8QTensor, NVFP4QTensor, QTensorWrapper
 from .qtensor.base_qtensor import get_native_tensor_class
+from .qtensor.nvfp4_tensor import cutlass_fp4_scale_to_modelopt_fp4_scale
 from .utils.native_weight import (
     _canonical,
     _format_key,
@@ -311,8 +312,6 @@ def prepare_packed_weights_for_tp(model):
             scale = quantizer._scale
             swizzled = isinstance(native, NVFP4QTensor) and scale.dtype == torch.uint8
             if swizzled:
-                from .qtensor.nvfp4_tensor import cutlass_fp4_scale_to_modelopt_fp4_scale
-
                 scale = cutlass_fp4_scale_to_modelopt_fp4_scale(
                     scale, native.metadata["shape"][-2:]
                 )
