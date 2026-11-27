@@ -1422,6 +1422,8 @@ class TensorQuantizer(nn.Module):
                 raise ValueError("Incomplete original quantizer properties captured for repair")
             # Repair disables calibration: layout setup changes properties, not serialized buffers.
             # Captured original properties (including absent keys) must describe those buffers.
+            # The producer must delete this snapshot on close, including failed preparation;
+            # non-adapter quantizers also need it while their calibration is disabled.
             for name in self._repair_overlay_properties:
                 if name in repair_properties:
                     modelopt_state[name] = repair_properties[name]
