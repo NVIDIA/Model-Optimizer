@@ -376,6 +376,8 @@ class ModuleBypassAdapter:
         values = (
             batch.get("input_ids", batch.get("hidden_states")) if isinstance(batch, dict) else batch
         )
+        if isinstance(values, tuple):
+            values = next(v for v in values if isinstance(v, torch.Tensor) and v.ndim)
         length = (
             values.shape[1]
             if isinstance(values, torch.Tensor) and (values.ndim >= 3 or isinstance(batch, dict))
@@ -434,9 +436,23 @@ class ModuleBypassAdapter:
 
     def forward_teacher(self, teacher, args, kwargs):
         """Preserve the supplied callable's real forward and outer hooks."""
-        parameters = inspect.signature(teacher.forward).parameters
+        signature = inspect.signature(teacher.forward)
+        parameters = signature.parameters
         if "use_cache" in parameters:
-            kwargs = {**kwargs, "use_cache": False}
+            positional = [
+                name
+                for name, parameter in parameters.items()
+                if parameter.kind in (parameter.POSITIONAL_ONLY, parameter.POSITIONAL_OR_KEYWORD)
+            ]
+            if "use_cache" in positional and (index := positional.index("use_cache")) < len(args):
+                args = (*args[:index], False, *args[index + 1 :])
+            elif parameters["use_cache"].kind == inspect.Parameter.POSITIONAL_ONLY:
+                bound = signature.bind(*args, **kwargs)
+                bound.apply_defaults()
+                bound.arguments["use_cache"] = False
+                args, kwargs = bound.args, bound.kwargs
+            else:
+                kwargs = {**kwargs, "use_cache": False}
         return teacher(*args, **kwargs)
 
     def teacher_microbatch(self, teacher, units, batch, consume):

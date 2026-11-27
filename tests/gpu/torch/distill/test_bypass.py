@@ -191,13 +191,14 @@ def test_bypass_refuses_aliases_and_cleans_failed_replay():
     original = copy.deepcopy(student.state_dict())
     with pytest.raises(ValueError):
         mtd.bypass(student, teacher, batches, {"num_steps": 0, "modules": ["", "mlp"]})
-    with pytest.raises(ValueError, match="sequence_length"):
-        mtd.bypass(
-            student,
-            teacher,
-            [{"hidden_states": batches[0]}],
-            {"num_steps": 1, "global_batch_size": 2, "sequence_length": 4},
-        )
+    for malformed in ({"hidden_states": batches[0]}, (batches[0],)):
+        with pytest.raises(ValueError, match="sequence_length"):
+            mtd.bypass(
+                student,
+                teacher,
+                [malformed],
+                {"num_steps": 1, "global_batch_size": 2, "sequence_length": 4},
+            )
     teacher.mlp.weight = nn.Parameter(student.mlp.weight.detach())
     with pytest.raises(ValueError):
         mtd.bypass(student, teacher, batches, {"num_steps": 0, "modules": ["mlp"]})
@@ -228,7 +229,9 @@ def test_bypass_refuses_aliases_and_cleans_failed_replay():
     assert not any("repair" in n for n, _ in student.named_modules())
 
 
-@pytest.mark.parametrize("reader", ["reused_storage", "shared_positions"])
+@pytest.mark.parametrize(
+    "reader", ["reused_storage", "shared_positions", "positional_cache", "default_positional_cache"]
+)
 def test_bypass_preserves_reader_samples_and_shared_positions(reader):
     student, teacher, batches = _problem()
     batches = [batch[:, :2].clone() for batch in batches[:2]]
@@ -236,12 +239,30 @@ def test_bypass_preserves_reader_samples_and_shared_positions(reader):
     handle = teacher.mlp.register_forward_pre_hook(
         lambda module, args: observed.append(args[0].clone())
     )
+    if reader in ("positional_cache", "default_positional_cache"):
+        original_forward = teacher.forward
+
+        def forward(hidden_states, use_cache=True):
+            assert use_cache is False
+            return original_forward(hidden_states)
+
+        teacher.forward = forward
+        if reader == "default_positional_cache":
+
+            def positional_forward(hidden_states, use_cache=True, /):
+                return forward(hidden_states, use_cache)
+
+            teacher.forward = positional_forward
 
     def read():
         staging = torch.empty_like(batches[0])
         for batch in batches:
             if reader == "reused_storage":
                 yield staging.copy_(batch)
+            elif reader == "positional_cache":
+                yield (batch, True)
+            elif reader == "default_positional_cache":
+                yield (batch,)
             else:
                 yield {"hidden_states": batch, "position_ids": torch.arange(2)}
 

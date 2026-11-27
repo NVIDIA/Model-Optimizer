@@ -51,7 +51,7 @@ def bypass(
             are unsupported; other metadata does not define the loss mask.
             Batches are snapshotted before the next reader call. Named model inputs
             and loss masks have a leading sample axis; other 1D dict metadata is
-            shared across samples. Use batch-shaped auxiliary per-sample tensors.
+            shared across samples. Represent auxiliary sample vectors as ``[batch, 1]``.
             Global Python/NumPy/CPU RNG and CUDA RNG on resident model devices are
             seeded and restored. Readers using other CUDA devices must own their
             generators; reader generators and worker state advance independently.
