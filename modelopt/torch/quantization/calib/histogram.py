@@ -150,7 +150,7 @@ class HistogramCalibrator(_Calibrator):
         Keyword Arguments:
             stride: An integer. Default 1
             start_bin: An integer. Default 128
-            percentils: A float number between [0, 100]. Default 99.99.
+            percentile: A float number between [0, 100]. Default 99.99.
 
         Returns:
             amax: a tensor

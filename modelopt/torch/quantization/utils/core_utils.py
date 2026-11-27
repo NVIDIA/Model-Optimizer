@@ -95,7 +95,7 @@ def reduce_block_padding(input: torch.Tensor, block_sizes: dict, pad_value: floa
     """Padding the input using block-based reduction for each dimension.
 
     Args:
-        input_tensor (torch.Tensor): The input tensor.
+        input (torch.Tensor): The input tensor.
         block_sizes (dict): A dictionary specifying the block size for padding each dimension.
                             Example: `{-1: 128, -2: 128}` pads the input over 2D blocks.
     """
