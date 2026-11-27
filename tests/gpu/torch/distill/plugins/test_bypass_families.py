@@ -28,6 +28,7 @@ import modelopt.torch.distill as mtd
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.distill.plugins.transformers import TransformersBypassAdapter
+from modelopt.torch.models.kimi_k31.modeling_kimi_k31 import KimiK31ShortConvolution
 from modelopt.torch.quantization.ggml import IQ_FORMAT_REGISTRY
 from modelopt.torch.quantization.ggml.common import pinned_packed_weight
 from modelopt.torch.quantization.ggml.scale_fields import decode_scale_fields, replace_scale_fields
@@ -110,3 +111,24 @@ def test_release_text_bypass_and_native_reload(record, tmp_path):
         restored = mto.restore(build_model(record, device), tmp_path / "student.pt")
         with torch.no_grad(), hf_torch_kernels(restored):
             torch.testing.assert_close(restored(**forward).logits, expected, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="FLA short convolution requires CUDA")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_k31_fla_short_convolution_preserves_fp32_weight_boundary(dtype):
+    # The optional FLA path is admitted by the same import as the model's kernel selector.
+    causal_conv1d = pytest.importorskip("fla.modules.conv.causal_conv1d").causal_conv1d
+
+    torch.manual_seed(17)
+    conv = KimiK31ShortConvolution(8, 3).cuda()
+    with torch.no_grad():
+        conv.weight.normal_(std=0.1)
+    x = torch.randn(2, 16, 8, device="cuda", dtype=dtype, requires_grad=True)
+    reference = x.detach().clone().requires_grad_()
+    actual = conv(x, kernel=causal_conv1d)
+    expected = conv(reference)
+    assert conv.weight.dtype == torch.float32 and actual.dtype == dtype
+    torch.testing.assert_close(actual, expected, rtol=0.03, atol=0.003)
+    actual.float().square().sum().backward()
+    expected.float().square().sum().backward()
+    torch.testing.assert_close(x.grad, reference.grad, rtol=0.05, atol=0.01)

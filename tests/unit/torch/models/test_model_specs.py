@@ -541,9 +541,9 @@ EXPECTED_MOE_LAYOUTS = [
     (
         "kimi_k31",
         ("KimiK31MoE",),
-        ("gate_proj", "up_proj", "down_proj"),
-        False,
-        ("gate_proj", "up_proj"),
+        ("gate_up_proj", "down_proj"),
+        True,
+        None,
     ),
     (
         "gemma4",

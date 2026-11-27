@@ -27,6 +27,7 @@ pytest.importorskip("transformers", minversion="5.23")
 from transformers.distributed.configuration_utils import DistributedConfig
 
 import modelopt.torch.quantization as mtq
+from modelopt.torch.export.layer_utils import get_expert_linear_names
 from modelopt.torch.models.kimi_k31 import (
     KimiK31Config,
     KimiK31ForCausalLM,
@@ -133,7 +134,7 @@ def test_k31_kda_matches_bounded_delta_rule_and_padding_unpadding():
     assert torch.count_nonzero(actual[:, 1]) == 0
 
 
-def test_k31_checkpoint_mapping_restores_split_experts_and_padded_a_log():
+def test_k31_checkpoint_mapping_restores_split_experts_and_rejects_ambiguous_a_log():
     config = _config()
     model = KimiK31ForCausalLM(config)
     checkpoint = {}
@@ -151,13 +152,20 @@ def test_k31_checkpoint_mapping_restores_split_experts_and_padded_a_log():
             for expert in range(config.num_experts):
                 checkpoint[base + f"{expert}.w2.weight"] = value[expert]
         else:
-            checkpoint[name] = F.pad(value, (0, 2)) if name.endswith("A_log") else value
+            checkpoint[name] = value
     for malformed in (
         {
             **checkpoint,
             "model.embed_tokens.weight": checkpoint["language_model.model.embed_tokens.weight"],
         },
         {**checkpoint, "language_model.model.layers.0.self_attn.A_log": torch.ones(1)},
+        # Published K3 adapters encountered head_dim-sized tensors; never silently reinterpret these as heads.
+        {
+            **checkpoint,
+            "language_model.model.layers.0.self_attn.A_log": torch.arange(
+                config.linear_attn_config["head_dim"]
+            ).float(),
+        },
         {
             **checkpoint,
             "language_model.model.layers.1.block_sparse_moe.experts.0.w1.weight": torch.ones(
@@ -248,14 +256,19 @@ def test_k31_bf16_reload_preserves_precision_children_and_executes_fsdp_boundari
     assert loaded.model.layers[0].self_attn.q_conv1d.weight.grad is not None
 
 
-def test_k31_latent_situ_moe_matches_independent_expert_sum_and_gradients():
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_k31_latent_situ_moe_matches_independent_expert_sum_and_gradients(dtype):
     torch.manual_seed(14)
     config = _config()
-    model = KimiK31ForCausalLM(config)
+    config._experts_implementation = "eager"
+    if dtype == torch.bfloat16:
+        config.num_experts = config.num_experts_per_token = 16
+    model = KimiK31ForCausalLM._from_config(config, dtype=dtype)
     block = model.model.layers[1].mlp
     assert isinstance(block, KimiK31MoE)
+    assert get_expert_linear_names(block, "kimi_k31") == ["gate_up_proj", "down_proj"]
     reference = copy.deepcopy(block)
-    x = torch.randn(2, 3, config.hidden_size, requires_grad=True)
+    x = torch.randn(2, 3, config.hidden_size, dtype=dtype, requires_grad=True)
     y = x.detach().clone().requires_grad_()
     flat = y.flatten(0, 1)
     base_indices, base_weights = block.gate(flat.detach())
@@ -264,30 +277,39 @@ def test_k31_latent_situ_moe_matches_independent_expert_sum_and_gradients():
     torch.testing.assert_close(amp_indices, base_indices)
     torch.testing.assert_close(amp_weights, base_weights)
     scores = F.linear(flat.float(), reference.gate.weight.float()).sigmoid()
-    indices = (scores + reference.gate.e_score_correction_bias).topk(2, dim=-1).indices
+    indices = (
+        (scores + reference.gate.e_score_correction_bias)
+        .topk(config.num_experts_per_token, dim=-1)
+        .indices
+    )
     weights = scores.gather(-1, indices)
     weights = weights / weights.sum(-1, keepdim=True)
     latent = reference.routed_expert_down_proj(flat)
-    routed = torch.zeros_like(latent)
+    routed = torch.zeros_like(latent, dtype=torch.float32)
     for expert in range(config.num_experts):
         gate, up = F.linear(latent, reference.experts.gate_up_proj[expert]).chunk(2, -1)
-        out = F.linear(_situ(gate, up, config), reference.experts.down_proj[expert])
+        out = F.linear(_situ(gate, up, config).to(dtype), reference.experts.down_proj[expert])
         routed = routed + out * ((indices == expert) * weights).sum(-1, keepdim=True)
-    routed = reference.routed_expert_up_proj(reference.routed_expert_norm(routed))
+    if dtype == torch.bfloat16:
+        # All 16 owners run identical GEMMs; only the reduction precision can differ here.
+        actual_routed = block.experts(latent.detach(), indices, weights.detach())
+        torch.testing.assert_close(actual_routed, routed.detach().to(dtype), rtol=0, atol=0)
+    routed = reference.routed_expert_up_proj(reference.routed_expert_norm(routed.to(dtype)))
     shared = reference.shared_experts
     expected = routed + shared.down_proj(
-        _situ(shared.gate_proj(flat), shared.up_proj(flat), config)
+        _situ(shared.gate_proj(flat), shared.up_proj(flat), config).to(dtype)
     )
     actual = block(x)
-    torch.testing.assert_close(actual.flatten(0, 1), expected)
+    tolerances = {} if dtype == torch.float32 else {"rtol": 0.03, "atol": 0.001}
+    torch.testing.assert_close(actual.flatten(0, 1), expected, **tolerances)
     actual.square().sum().backward()
     expected.square().sum().backward()
-    torch.testing.assert_close(x.grad, y.grad)
+    torch.testing.assert_close(x.grad, y.grad, **tolerances)
     for (name, parameter), (_, other) in zip(
         block.named_parameters(), reference.named_parameters()
     ):
         if other.grad is not None:
-            torch.testing.assert_close(parameter.grad, other.grad, msg=name)
+            torch.testing.assert_close(parameter.grad, other.grad, msg=name, **tolerances)
 
 
 @pytest.mark.parametrize("attn_implementation", ["eager", "sdpa"])

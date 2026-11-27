@@ -125,7 +125,7 @@ class KimiK31ShortConvolution(nn.Module):
         if kernel is not None and cache_params is None:
             value, _ = kernel(
                 x=x,
-                weight=self.weight.squeeze(1),
+                weight=self.weight.squeeze(1).to(x.dtype),
                 bias=None,
                 initial_state=None,
                 output_final_state=False,
@@ -218,7 +218,7 @@ class KimiK31Experts(nn.Module):
         return _situ(gate, up, self.beta, self.linear_beta)
 
     def forward(self, hidden_states, top_k_index, top_k_weights):
-        output = torch.zeros_like(hidden_states)
+        output = torch.zeros_like(hidden_states, dtype=torch.float32)
         for expert in range(self.num_experts):
             token, slot = torch.where(top_k_index == expert)
             if not token.numel():
@@ -226,8 +226,8 @@ class KimiK31Experts(nn.Module):
             value = F.linear(hidden_states[token], self.gate_up_proj[expert])
             value = F.linear(self._apply_gate(value), self.down_proj[expert])
             value = value * top_k_weights[token, slot, None]
-            output.index_add_(0, token, value.to(output.dtype))
-        return output
+            output.index_add_(0, token, value.float())
+        return output.to(hidden_states.dtype)
 
 
 class KimiK31Router(nn.Module):
@@ -821,9 +821,14 @@ def convert_kimi_k31_state_dict(state_dict, config):
             name = name.replace(".self_attn.", ".self_attn.decay_gate.")
         if name.endswith(".decay_gate.A_log"):
             heads = config.linear_attn_config["num_heads"]
-            if value.ndim != 1 or value.numel() < heads:
-                raise ValueError("K3.1 A_log must contain at least one value per KDA head.")
-            value = value[:heads]
+            # FLA's KDA gate indexes A_log by head (fla/ops/kda/gate.py).
+            # K3 checkpoints with a different length have ambiguous provenance here;
+            # reject them rather than silently dropping or reinterpreting trained values.
+            if value.ndim != 1 or value.numel() != heads:
+                raise ValueError(
+                    "K3.1 A_log must contain exactly one value per KDA head; "
+                    "other checkpoint layouts require explicit conversion."
+                )
         if name in output:
             raise ValueError(f"Duplicate K3.1 checkpoint mapping for {name!r}.")
         output[name] = value

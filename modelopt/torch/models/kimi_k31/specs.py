@@ -28,8 +28,8 @@ register(
         ),
         moe_spec=MoESpec(
             block_names=("KimiK31MoE",),
-            expert_linear_names=("gate_proj", "up_proj", "down_proj"),
-            gate_up_pair=("gate_proj", "up_proj"),
+            expert_linear_names=("gate_up_proj", "down_proj"),
+            fused_expert_names=True,
         ),
         ep_spec=EPSpec(requires_transformers="5.23"),
     )
