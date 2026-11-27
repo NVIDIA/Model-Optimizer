@@ -162,12 +162,12 @@ class OnPolicyTrainer:
         prompts = self.source.take(cfg.prompts_per_step)
         tags = [f"{self.tag_prefix}-s{step}-{i}" for i in range(len(prompts))]
         max_tokens = [seq_len - len(p.token_ids) for p in prompts]
-        rollouts = rollout.generate(
+        # The records load as their requests finish, so t_rollout holds most of their loading.
+        rollouts, records, nbytes = rollout.generate_and_load(
             cfg, self.recipe.model.model_name_or_path, prompts, max_tokens, tags
         )
         rollout.check_memory_rows(cfg.server_urls, cfg.request_timeout)
         t1 = time.perf_counter()
-        records, nbytes = rollout.load_records(cfg.capture_dir, tags, cfg.record_timeout)
         _check_on_policy(records, version=self.pusher.weight_version)
         seed = np.random.SeedSequence((self.targs.seed, self.rank, step)).generate_state(1).item()
         generator = torch.Generator().manual_seed(seed)

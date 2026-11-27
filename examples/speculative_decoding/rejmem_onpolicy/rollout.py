@@ -246,21 +246,35 @@ def generate(
     cfg: OnPolicyConfig, model: str, prompts: list[Prompt], max_tokens: list[int], tags: list[str]
 ) -> list[Rollout]:
     """Generate every prompt once, spread round-robin over this node's servers."""
-    return asyncio.run(_generate(cfg, model, prompts, max_tokens, tags))
+    return asyncio.run(_generate(cfg, model, prompts, max_tokens, tags, load=False))
 
 
-async def _generate(cfg, model, prompts, max_tokens, tags):
+def generate_and_load(
+    cfg: OnPolicyConfig, model: str, prompts: list[Prompt], max_tokens: list[int], tags: list[str]
+) -> tuple[list[Rollout], list[RolloutRecord], int]:
+    """``generate``, loading each record (``load_record_file``) as soon as its response is in.
+
+    The records then load while the slower requests still generate, not after the slowest one.
+    Returns the rollouts, their records and the records' total bytes.
+    """
+    done = asyncio.run(_generate(cfg, model, prompts, max_tokens, tags, load=True))
+    return [r for r, _ in done], [rec for _, (rec, _) in done], sum(n for _, (_, n) in done)
+
+
+async def _generate(cfg, model, prompts, max_tokens, tags, load):
     limits = httpx.Limits(max_connections=None, max_keepalive_connections=None)
     async with httpx.AsyncClient(timeout=cfg.request_timeout, limits=limits) as client:
         return await asyncio.gather(
             *(
-                _complete(client, cfg.server_urls[i % len(cfg.server_urls)], cfg, model, *args)
+                _complete(
+                    client, cfg.server_urls[i % len(cfg.server_urls)], cfg, model, *args, load
+                )
                 for i, args in enumerate(zip(prompts, max_tokens, tags))
             )
         )
 
 
-async def _complete(client, url, cfg, model, prompt, max_tokens, tag):
+async def _complete(client, url, cfg, model, prompt, max_tokens, tag, load):
     body = {
         **cfg.sampling.model_dump(),
         "model": model,
@@ -275,9 +289,13 @@ async def _complete(client, url, cfg, model, prompt, max_tokens, tag):
     choice = resp.json()["choices"][0]
     if choice["prompt_token_ids"] != prompt.token_ids:
         raise RuntimeError(f"{url} request {tag}: the server changed the prompt tokens")
-    return Rollout(
+    done = Rollout(
         tag, prompt.token_ids + choice["token_ids"], len(prompt.token_ids), choice["finish_reason"]
     )
+    if not load:
+        return done
+    record = await asyncio.to_thread(load_record_file, cfg.capture_dir, tag, cfg.record_timeout)
+    return done, record
 
 
 def check_memory_rows(server_urls: list[str], timeout: float) -> None:
@@ -302,20 +320,24 @@ def load_records(
     capture_dir: str, tags: list[str], timeout: float
 ) -> tuple[list[RolloutRecord], int]:
     """Wait for, load (validated) and delete the record of every tag; also returns their bytes."""
-    paths = [Path(capture_dir) / f"{tag}.safetensors" for tag in tags]
+    loaded = [load_record_file(capture_dir, tag, timeout) for tag in tags]
+    return [rec for rec, _ in loaded], sum(n for _, n in loaded)
+
+
+def load_record_file(capture_dir: str, tag: str, timeout: float) -> tuple[RolloutRecord, int]:
+    """Wait for, load (validated) and delete the record of ``tag``; also returns its bytes."""
+    path = Path(capture_dir) / f"{tag}.safetensors"
     deadline = time.monotonic() + timeout
-    for path in paths:
-        while not path.exists():
-            if time.monotonic() > deadline:
-                raise TimeoutError(f"no record {path} {timeout}s after its response")
-            time.sleep(0.05)
-    nbytes = sum(p.stat().st_size for p in paths)
-    records = [load_record(str(p)) for p in paths]
-    for tag, rec, path in zip(tags, records, paths):
-        if rec.meta["tag"] != tag:
-            raise ValueError(f"{path} holds the record of tag {rec.meta['tag']}")
-        path.unlink()
-    return records, nbytes
+    while not path.exists():
+        if time.monotonic() > deadline:
+            raise TimeoutError(f"no record {path} {timeout}s after its response")
+        time.sleep(0.05)
+    nbytes = path.stat().st_size
+    rec = load_record(str(path))
+    if rec.meta["tag"] != tag:
+        raise ValueError(f"{path} holds the record of tag {rec.meta['tag']}")
+    path.unlink()
+    return rec, nbytes
 
 
 def serve_command(
