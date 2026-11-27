@@ -18,6 +18,7 @@
 
 import builtins
 import copy
+import importlib
 from types import SimpleNamespace
 
 import pytest
@@ -206,3 +207,22 @@ def test_materialized_iq_replay_saves_int8_levels_and_matches_native_vjp(dtype, 
         source = torch.nn.functional.pad(weight, (0, 512 - width)).reshape(-1, 256)
         assert torch.equal(fmt.pack(source, quantizer).reshape_as(native), native)
         torch.testing.assert_close(quantizer(weight), expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("name", sorted(IQ_FORMAT_REGISTRY))
+def test_native_codebook_warmed_in_inference_can_be_saved_for_backward(monkeypatch, name):
+    # Native kernel metadata is optional when Triton is unavailable.
+    pytest.importorskip("triton")
+    from modelopt.torch.kernels.quantization.repair import iq_metadata
+
+    family = "iq1_s" if name == "iq1_m" else name
+    module = importlib.import_module(f"modelopt.torch.quantization.ggml.{family}")
+    monkeypatch.setattr(module, "_GRID_CACHE", {})
+    with torch.inference_mode():
+        raw = getattr(module, f"{family}_grid")("cpu")
+        assert torch.is_inference(raw)
+        grid, _ = iq_metadata("cpu", name)
+    parameter = torch.ones_like(grid, requires_grad=True)
+    actual = torch.autograd.grad((parameter * grid).sum(), parameter)[0]
+    torch.testing.assert_close(actual, raw, rtol=0, atol=0)
+    assert iq_metadata("cpu", name)[0] is grid

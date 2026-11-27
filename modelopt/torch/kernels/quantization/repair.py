@@ -18,6 +18,7 @@
 # ruff: noqa: PLR1714 -- Triton constexpr dispatch uses explicit scalar comparisons.
 
 import math
+from functools import cache
 
 import torch
 import triton
@@ -124,20 +125,30 @@ def _decode_iq(
 
 
 def iq_metadata(device, format_name):
-    if format_name not in SUPPORTED_FORMATS:
-        raise ValueError(f"No native repair-level decoder for {format_name!r}.")
-    fmt = IQ_FORMAT_REGISTRY[format_name]
-    if fmt.block_size != 256:
-        raise ValueError("Native IQ kernels require 256-element blocks.")
-    if format_name in ("iq1_m", "iq1_s"):
-        grid = iq1_s_grid(device)
-    elif format_name == "iq2_s":
-        grid = iq2_s_grid(device)
-    elif format_name == "iq2_xs":
-        grid = iq2_xs_grid(device)
-    else:
-        grid = iq2_xxs_grid(device)
-    return grid, fmt.block_bytes
+    device = torch.device(device)
+    if device.type == "cuda" and device.index is None:
+        device = torch.device("cuda", torch.cuda.current_device())
+    return _iq_metadata(device, format_name)
+
+
+@cache
+def _iq_metadata(device, format_name):
+    # Inference can warm the GGML cache before trainable repair first needs its codebook.
+    with torch.inference_mode(False):
+        if format_name not in SUPPORTED_FORMATS:
+            raise ValueError(f"No native repair-level decoder for {format_name!r}.")
+        fmt = IQ_FORMAT_REGISTRY[format_name]
+        if fmt.block_size != 256:
+            raise ValueError("Native IQ kernels require 256-element blocks.")
+        if format_name in ("iq1_m", "iq1_s"):
+            grid = iq1_s_grid(device)
+        elif format_name == "iq2_s":
+            grid = iq2_s_grid(device)
+        elif format_name == "iq2_xs":
+            grid = iq2_xs_grid(device)
+        else:
+            grid = iq2_xxs_grid(device)
+        return grid.clone() if torch.is_inference(grid) else grid, fmt.block_bytes
 
 
 def decode_iq_levels(packed, format_name, shape):
