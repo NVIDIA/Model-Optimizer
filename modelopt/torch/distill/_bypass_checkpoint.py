@@ -16,6 +16,7 @@
 """Committed rank-local repair generations, without duplicating frozen models."""
 
 import hashlib
+import io
 import json
 import logging
 import os
@@ -97,12 +98,11 @@ def _model_hash(model):
                         buffer
                         for key, buffer in child._buffers.items()
                         if not isinstance(child, TensorQuantizer)
-                        and key not in child._non_persistent_buffers_set
                     ),
                 )
             )
         ):
-            # Quantizer buffers belong with this weight owner. Other persistent
+            # Quantizer buffers belong with this weight owner. Other
             # descendant state needs its own bounded access window.
             # The canonical context walks descendants; do not silently onload a
             # frozen model under a composite/ancestor preload owner.
@@ -120,6 +120,11 @@ def _model_hash(model):
             # before their access windows and retain a full model of stale meta refs.
             state = {}
             module._save_to_state_dict(state, prefix="", keep_vars=True)
+            state.update(
+                ("_non_persistent_buffer." + key, value)
+                for key, value in module._buffers.items()
+                if key in module._non_persistent_buffers_set and value is not None
+            )
             for local_name, value in state.items():
                 digest.update(str((name, local_name)).encode())
                 if isinstance(value, torch.Tensor):
@@ -241,6 +246,16 @@ def _data_identity(loader, max_batches):
         and callable(getattr(loader, "load_state_dict", None))
         and getattr(loader, "data_identity", None) is not None
     ):
+        # Match the committed shard's safe reader before any batches or updates.
+        # The save path repeats this check because cursor types can change later.
+        with io.BytesIO() as stream:
+            torch.save(loader.state_dict(), stream)
+            try:
+                stream.seek(0)
+                torch.load(stream, map_location="meta", weights_only=True)
+            except Exception:
+                stream.seek(0)
+                torch.load(stream, map_location="cpu", weights_only=True)
         return {"kind": "stateful", "identity": _semantic_config(loader.data_identity)}
     raise ValueError(
         "Checkpointing needs a replayable Sequence or a stateful loader with data_identity"
@@ -341,6 +356,8 @@ class BypassCheckpoint(_CheckpointRanks):
         self.identity = None
         error = None
         try:
+            if not hasattr(os, "O_DIRECTORY"):
+                raise ValueError("Bypass checkpointing requires POSIX directory sync support")
             model_identities = {}
             for role, model in (("student", student), ("teacher", teacher)):
                 _LOG.info("Bypass checkpoint: reading all %s model bytes for identity", role)
@@ -416,10 +433,17 @@ class BypassCheckpoint(_CheckpointRanks):
             raise ValueError("; ".join(errors))
 
         def begin():
+            missing = []
+            ancestor = root
+            while not ancestor.exists():
+                missing.append(ancestor)
+                ancestor = ancestor.parent
             root.mkdir(parents=True, exist_ok=True)
+            for created in reversed(missing):
+                _sync_directory(created.parent)
             if (root / "latest").exists():
                 previous = (root / "latest").read_text().strip()
-                if Path(previous).name != previous:
+                if previous in {"", ".", ".."} or Path(previous).name != previous:
                     raise ValueError("Invalid Bypass latest pointer")
                 manifest = json.loads((root / previous / "COMMITTED.json").read_text())
                 identities = {str(rank): value["identity"] for rank, value in enumerate(reports)}
@@ -493,7 +517,7 @@ class BypassCheckpoint(_CheckpointRanks):
                 os.fsync(stream.fileno())
             os.replace(temporary, root / "latest")
             _sync_directory(root)
-            if previous and previous != name and Path(previous).name == previous:
+            if previous and previous not in {".", "..", name} and Path(previous).name == previous:
                 old = root / previous
                 try:
                     if not old.is_symlink() and (old / "COMMITTED.json").is_file():
@@ -522,7 +546,7 @@ class BypassCheckpoint(_CheckpointRanks):
             root = Path(directory)
             if (root / "latest").is_file():
                 name = (root / "latest").read_text().strip()
-                if Path(name).name != name:
+                if name in {"", ".", ".."} or Path(name).name != name:
                     raise ValueError("Invalid Bypass checkpoint latest pointer.")
                 root = root / name
             if not (root / "COMMITTED.json").is_file():
@@ -540,7 +564,7 @@ class BypassCheckpoint(_CheckpointRanks):
                 identities[str(self.rank)], sort_keys=True
             ) != json.dumps(self.identity, sort_keys=True):
                 raise ValueError(
-                    "Bypass checkpoint input, topology or configuration identity differs."
+                    "Bypass checkpoint input, topology, CUDA device scope or configuration identity differs."
                 )
             if set(manifest["shards"]) != {f"rank-{rank}.pt" for rank in range(self.size)}:
                 raise ValueError("Bypass checkpoint does not contain every rank.")
