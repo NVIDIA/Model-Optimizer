@@ -862,6 +862,22 @@ def _quantization_formats_signature(quant_recipes) -> tuple[str, ...]:
     return tuple(sorted(recipe.checkpoint_signature for recipe in quant_recipes))
 
 
+# The checkpoint fields the search checks or branches on, each rank on its own file.
+_RESUME_POINT_KEYS = (
+    "method",
+    "cost_model",
+    "active_moe_expert_ratio",
+    "scoring_config",
+    "quantization_formats_signature",
+    "fixed_quantization_config_signature",
+    "module_search_space_signature",
+    "resolved_search_setup_signature",
+    "format_shard",
+    "num_calib_steps",
+    "num_score_steps",
+)
+
+
 def _resume_together(progresses: list) -> None:
     if any(progress != progresses[0] for progress in progresses):
         raise ValueError(
@@ -1006,18 +1022,27 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         self.config = config
         self._preloaded_state = None
         self.reset_search()
-        loaded = self.load_search_checkpoint()
-        state = self.state_dict()
-        if is_distributed_run():
-            # Each rank resumes from its own file, and the search branches on what it holds: ranks
-            # resuming from different points, e.g. after a run stopped between two ranks' saves,
-            # would enter different collectives.
-            progress = (
-                state.get("method"),
+        loaded = False
+
+        def resume_point():
+            nonlocal loaded
+            loaded = self.load_search_checkpoint()
+            state = self.state_dict()
+            return (
+                {key: state.get(key) for key in _RESUME_POINT_KEYS},
                 sorted(map(str, state["quantizer_states"])),
                 bool(state["candidate_stats"]),
             )
-            all_reduce("AutoQuantize checkpoint progress", lambda: progress, _resume_together)
+
+        if is_distributed_run():
+            # Each rank resumes from its own file and checks and branches on what it holds. Read in
+            # one collective, a file that fails to load (e.g. truncated by an interrupted save) makes
+            # every rank raise, and the ranks go on only from the same point, so each check of it
+            # below raises on all of them or on none, before they enter the search's collectives.
+            all_reduce("AutoQuantize checkpoint", resume_point, _resume_together)
+        else:
+            resume_point()
+        state = self.state_dict()
         self._preloaded_state = state if loaded else {}
         if not state["candidate_stats"]:
             return

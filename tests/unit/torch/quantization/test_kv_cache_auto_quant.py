@@ -752,7 +752,7 @@ def test_public_kv_autoquant_rejects_invalid_inputs_before_mutation(
     original_types = {name: type(module) for name, module in model.named_modules()}
     if unsupported_sharding:
         monkeypatch.setattr(model_quant.dist, "size", lambda: 2)
-        monkeypatch.setattr(model_quant.dist, "is_dtensor_sharded", lambda _: True)
+        monkeypatch.setattr(model_quant, "_has_dtensors_outside_experts", lambda _: True)
         monkeypatch.setattr(model_quant.dist, "is_fsdp2_model", lambda _: False)
     error = NotImplementedError if unsupported_sharding else ValueError
     message = (

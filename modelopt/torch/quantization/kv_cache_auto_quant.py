@@ -33,7 +33,7 @@ from tqdm import tqdm
 from modelopt.torch.opt.hparam import Hparam
 from modelopt.torch.opt.searcher import LPS, BaseSearcher, SearchConfig, SearchStateDict
 from modelopt.torch.utils import print_rank_0
-from modelopt.torch.utils.distributed import is_master, recorded_distribution_plan, size
+from modelopt.torch.utils.distributed import all_reduce, is_master, recorded_distribution_plan, size
 
 from ._auto_quantize_cost import (
     COST_MODEL_KV_CACHE,
@@ -600,22 +600,39 @@ def _split_expert_quantizers(
     )
 
 
-def _expert_quantizer_names(model: nn.Module) -> set[str]:
-    """The quantizers under the routed experts an expert-parallel load shards over the ranks."""
-    experts = {
+def _expert_module_names(model: nn.Module) -> set[str]:
+    """The routed experts an expert-parallel load shards over the ranks."""
+    return {
         name
         for name, module in model.named_modules(remove_duplicate=False)
         if (state := getattr(module, "_parallel_state", None)) is not None
         and state.expert_model_parallel_group.world_size() > 1
     }
+
+
+def _is_under(name: str, modules: set[str]) -> bool:
+    return any(".".join(name.split(".")[:end]) in modules for end in range(1, name.count(".") + 1))
+
+
+def _expert_quantizer_names(model: nn.Module) -> set[str]:
+    """The quantizers under the routed experts an expert-parallel load shards over the ranks."""
+    experts = _expert_module_names(model)
     if not experts:
         return set()
     return {
         name
         for name, module in model.named_modules(remove_duplicate=False)
-        if isinstance(module, TensorQuantizer)
-        and any(".".join(name.split(".")[:end]) in experts for end in range(1, name.count(".") + 1))
+        if isinstance(module, TensorQuantizer) and _is_under(name, experts)
     }
+
+
+def _has_dtensors_outside_experts(model: nn.Module) -> bool:
+    """Whether a tensor outside the routed experts is a DTensor, as tensor parallelism leaves it."""
+    experts = _expert_module_names(model)
+    return any(
+        isinstance(tensor, DTensor) and not _is_under(name, experts)
+        for name, tensor in (*model.named_parameters(), *model.named_buffers())
+    )
 
 
 def _validate_persistent_candidate_scales(
@@ -758,7 +775,16 @@ class AutoQuantizeKVSearcher(BaseSearcher):
 
     def load_search_checkpoint(self) -> bool:
         """Load compatible fields before validating the resolved KV search signature."""
-        return super().load_search_checkpoint(strict=False)
+        load = super().load_search_checkpoint
+        if size() == 1:
+            return load(strict=False)
+        # Every rank reads its own file in one collective: a file that fails to load, e.g. truncated
+        # by an interrupted save, makes every rank raise rather than leave the others waiting.
+        return all_reduce(
+            "KV-cache AutoQuantize checkpoint",
+            lambda: load(strict=False),
+            lambda loaded: loaded[dist.get_rank()],
+        )
 
     @property
     def _collective_device(self) -> torch.device:

@@ -25,6 +25,7 @@ from _test_utils.torch.distributed.utils import bounded_collectives
 from _test_utils.torch.quantization.models import SimpleConv, SimpleConvLinear, SimpleLinear
 from packaging.version import Version
 from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.tensor.parallel import ColwiseParallel, parallelize_module
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
@@ -312,6 +313,14 @@ def test_active_moe_cost_model_counts_fused_experts_without_weight():
     # Fused experts expose no `.weight`; their size is summed across all parameters.
     assert _get_module_weight_numel(fused_experts) == (
         fused_experts.gate_up_proj.numel() + fused_experts.down_proj.numel()
+    )
+    # Non-gated fused experts, such as Nemotron-H's, name their first projection up_proj.
+    non_gated_experts = torch.nn.Module()
+    non_gated_experts._first_proj_attr = "up_proj"
+    non_gated_experts.up_proj = torch.nn.Parameter(torch.empty(2, 3, 5))
+    non_gated_experts.down_proj = torch.nn.Parameter(torch.empty(2, 5, 3))
+    assert _get_module_weight_numel(non_gated_experts) == (
+        non_gated_experts.up_proj.numel() + non_gated_experts.down_proj.numel()
     )
     # Routed MoE experts are scaled by the active-expert ratio; excluded modules drop to zero.
     assert cost_model.module_cost_weight(["layers.0.mlp.experts"], cost_constraints) == 0.25
@@ -1174,16 +1183,28 @@ def _test_resume_from_another_point_on_one_rank(rank, size, directory, rank1_fil
         path = directory / "rank1.pth"
         if rank1_file == "missing":
             path.unlink()
-        else:  # saved after calibrating, before scoring
+        elif rank1_file == "truncated":  # by an interrupted save
+            path.write_bytes(path.read_bytes()[:64])
+        else:
             state = safe_load(path)
-            state["candidate_stats"] = {}
+            if rank1_file == "older":  # saved after calibrating, before scoring
+                state["candidate_stats"] = {}
+            else:  # from a search whose groups resolved otherwise
+                state["resolved_search_setup_signature"] = ()
             safe_save(state, path)
-    # Rank 1 would calibrate or score again while rank 0 restores both: every rank refuses instead.
-    with bounded_collectives(), pytest.raises(ValueError, match="checkpoint at the same progress"):
+    # Rank 1 alone would calibrate or score again, refuse its setup or fail to load its file, while
+    # rank 0 went on: every rank raises instead, rank 0 naming rank 1's failure to load.
+    if rank1_file == "truncated":
+        error, match = (
+            (RuntimeError, "rank 1 failed to compute") if rank == 0 else (Exception, None)
+        )
+    else:
+        error, match = ValueError, "checkpoint at the same progress"
+    with bounded_collectives(), pytest.raises(error, match=match):
         search()
 
 
-@pytest.mark.parametrize("rank1_file", ["missing", "older"])
+@pytest.mark.parametrize("rank1_file", ["missing", "older", "other_setup", "truncated"])
 def test_resume_from_another_point_on_one_rank_raises_on_every_rank(
     cpu_dist_workers, tmp_path, rank1_file
 ):
@@ -1434,6 +1455,38 @@ def test_expert_parallel_auto_quantize_picks_one_processes_formats(cpu_dist_work
     if Version(transformers.__version__) < Version("5.16"):
         pytest.skip("transformers' expert-parallel load shards the experts as DTensors from 5.16")
     cpu_dist_workers.run(_test_expert_parallel_auto_quantize, methods=methods)
+
+
+def _test_kv_search_refuses_a_dense_layer_sharded_tensor_parallel(rank, size):
+    register_torch_a2a()
+    search, forward_step, constraints = _kv_cache_search()
+    model = _sharded_like_the_expert_parallel_load(_tiny_qwen3_moe("torch_a2a"), size)
+    # The caller's own tensor parallelism, on a dense projection of the expert-parallel model.
+    parallelize_module(
+        model.model.layers[0].self_attn.q_proj, init_device_mesh("cpu", (size,)), ColwiseParallel()
+    )
+    gen = torch.Generator().manual_seed(1)
+    with pytest.raises(NotImplementedError, match="not TP"):
+        mtq.auto_quantize(
+            model,
+            constraints=constraints,
+            data_loader=[{"input_ids": torch.randint(0, 64, (2, 8), generator=gen)}],
+            forward_step=forward_step,
+            num_calib_steps=1,
+            num_score_steps=1,
+            method="kl_div",
+            **search,
+        )
+    assert not any(isinstance(module, TensorQuantizer) for module in model.modules())
+
+
+def test_expert_parallel_kv_search_refuses_a_dense_layer_sharded_tensor_parallel(cpu_dist_workers):
+    """Only the routed experts' DTensors are exempt from the KV-cache search's refusal of tensor
+    parallelism, before it converts the model."""
+    transformers = pytest.importorskip("transformers")
+    if Version(transformers.__version__) < Version("5.16"):
+        pytest.skip("transformers' expert-parallel load shards the experts as DTensors from 5.16")
+    cpu_dist_workers.run(_test_kv_search_refuses_a_dense_layer_sharded_tensor_parallel)
 
 
 def _test_kv_resume_with_one_stale_expert_shard(rank, size, directory):

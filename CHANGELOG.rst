@@ -17,7 +17,7 @@ Changelog
 - Add ``context_quant_level`` to KL-divergence AutoQuantize (``method={"method": "kl_div", "context_quant_level": "lowest"}``, or ``method_options: {context_quant_level: lowest}`` in a recipe): each candidate is scored with every other searched layer at its lowest-bit format (an int picks the format by its 0-based index from the lowest), so low-bit budgets go to the layers whose error compounds most once the whole model is quantized. ``"lowest"`` is a good default; a context nearer the target budget measured the same in our tests.
 - GPTQ calibration is 25-35% faster in our MoE-expert and dense-MLP tests, with the GGML IQ formats and with NVFP4 under ``fused: true``. Results change only at round-off.
 - GPTQ now defaults to ``fused=True``, running the fused Triton update for static NVFP4 weights on SM89+ (4/6 scaling and other formats keep the unfused loop). Set ``fused: false`` to restore the previous behavior.
-- ``mtq.auto_quantize``, KV-cache search included, now runs on a model whose routed experts are sharded expert-parallel, and ``examples/hf_ptq/hf_ptq.py`` runs its AutoQuantize recipes under ``torchrun`` with the experts sharded or the model replicated on every rank: each rank scores its own share of the calibration data, and every rank picks the formats one process scoring all of it would.
+- ``mtq.auto_quantize``, KV-cache search included, now runs on a model whose routed experts are sharded expert-parallel, and ``examples/hf_ptq/hf_ptq.py`` runs its AutoQuantize recipes under ``torchrun`` with the experts sharded or the model replicated on every rank: each rank scores its own share of the calibration data, and every rank picks the same formats, those one process scoring all of it would pick except where floating-point order tips a near tie.
 
 *Quantization - QAT / QAD*
 
@@ -53,6 +53,7 @@ Changelog
 - Fixed a KV-cache length mismatch that could interrupt layerwise GPTQ calibration of Hugging Face models such as Qwen3 in ModelOpt 0.48.0.
 - With ``mto.enable_huggingface_checkpointing()`` and transformers before 5.21, ``save_pretrained`` no longer fails on Hugging Face MoE models with quantized fused experts, and ``from_pretrained`` restores them. A Qwen3-VL-MoE checkpoint does not load on those versions, so save and restore the live model with ``mto.save`` and ``mto.restore`` instead.
 - For dense Qwen3.5 checkpoints with an LM-head size mismatch in TensorRT-LLM 1.3.0, use ``model_type/qwen3_5/auto_quantize/w4a8_awq_beta_fp8_at_6p0bits-decoder_only`` to keep the output head unquantized and outside the 6-bit decoder budget. Rerun from the original weights and omit ``--auto_quantize_checkpoint`` or give it a fresh path.
+- AutoQuantize now counts the ``up_proj`` of non-gated fused MoE experts, such as Nemotron-H's, in its effective-bits cost; it left them out, so the budget weighed those experts too low.
 
 *ONNX*
 

@@ -105,10 +105,12 @@ def _get_module_weights(module: nn.Module) -> list[nn.Parameter]:
         return [weight]
 
     # Fused MoE expert containers expose projection tensors directly instead of
-    # a single ``weight`` parameter.
+    # a single ``weight`` parameter: their first projection (``up_proj`` for
+    # non-gated experts such as Nemotron-H's) and ``down_proj``.
+    first_proj = getattr(module, "_first_proj_attr", "gate_up_proj")
     return [
         param
-        for attr in ("gate_up_proj", "down_proj")
+        for attr in (first_proj, "down_proj")
         if (param := getattr(module, attr, None)) is not None
     ]
 

@@ -61,6 +61,7 @@ from .config import QuantizeAlgoCfgType
 from .kv_cache_auto_quant import (
     _KV_QUANTIZER_ATTRS,
     AutoQuantizeKVSearcher,
+    _has_dtensors_outside_experts,
     _validate_parallel_state,
     get_kv_cache_auto_quantize_config,
 )
@@ -789,13 +790,9 @@ def _auto_quantize_kv_cache(
     # Before anything converts the model: an expert-parallel plan without its mesh raises here.
     plan = dist.recorded_distribution_plan(model)
     ep_mesh = expert_parallel_mesh(model) if plan is not None and plan.is_expert_parallel else None
-    # From transformers 5.16 the expert-parallel load leaves the routed experts' weights DTensors.
-    if (
-        dist.size() > 1
-        and dist.is_dtensor_sharded(model)
-        and not dist.is_fsdp2_model(model)
-        and ep_mesh is None
-    ):
+    # From transformers 5.16 the expert-parallel load leaves the routed experts' weights DTensors:
+    # only theirs are exempt, so a dense layer a caller shards with tensor parallelism stays refused.
+    if dist.size() > 1 and not dist.is_fsdp2_model(model) and _has_dtensors_outside_experts(model):
         raise NotImplementedError(
             "Distributed KV-cache AutoQuantize supports DP/FSDP2 and EP, not TP."
         )
@@ -981,8 +978,9 @@ def auto_quantize(
             used for the effective-bits constraint and supports ``"weight"`` (default),
             ``"active_moe"``, and ``"kv_cache"``. The KV-cache cost model dispatches to isolated
             forward-KL scoring over paired K/V formats; BF16/no-quant is its scoring reference but
-            is never solver-selectable. Distributed KV search supports data parallelism and FSDP2:
-            all ranks must use the same candidates and forward-pass count. KL is reduced over all
+            is never solver-selectable. Distributed KV search supports data parallelism, FSDP2 and
+            expert parallelism, not tensor parallelism: all ranks must use the same candidates and
+            forward-pass count. KL is reduced over all
             scored tokens, and rank 0 selects the shared recipe. Additional cost-model parameters
             are provided through the nested ``cost`` dict.
 
@@ -1215,7 +1213,8 @@ def auto_quantize(
         :func:`~modelopt.torch.utils.plugins.model_load_utils.load_pretrained` loads one -- every
         rank calls ``auto_quantize`` on its own share of the data, and must run the same number of
         calibration and scoring batches. The scores are summed over the ranks, so every rank
-        picks the same formats as one process scoring all their data.
+        picks the same formats: those one process scoring all their data would pick, except where
+        the order of the floating-point sums tips a near tie.
 
     .. note::
 
