@@ -274,12 +274,20 @@ class _BypassRunner:
                 for policy in self.policies.values()
                 for binding, state, _, _ in policy.adapters
             }
-            for binding, state in states.items():
-                _validate_quantizer(binding.quantizer)
-                if binding.quantizer.num_bits != state.name:
-                    raise ValueError("The native IQ format changed during repair")
-            _validate_ownership((self.student,), (states,))
+            finalization_error = None
+            try:
+                for binding, state in states.items():
+                    _validate_quantizer(binding.quantizer)
+                    if binding.quantizer.num_bits != state.name:
+                        raise ValueError("The native IQ format changed during repair")
+                _validate_ownership((self.student,), (states,))
+            except Exception as exc:
+                if self.runtime is None:
+                    raise
+                finalization_error = f"{type(exc).__name__}: {exc}"
             del states
+            if self.runtime is not None:
+                self.runtime.synchronize_error(finalization_error)
             for name, policy in self.policies.items():
                 if self.runtime is None:
                     policy.finalize_(weight_access=partial(self._weight_access, name))

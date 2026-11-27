@@ -39,7 +39,6 @@ from modelopt.torch.utils.network import temporarily_remove_accelerate_hook
 if TYPE_CHECKING:
     from collections.abc import Generator
 
-    from torch.distributed.device_mesh import DeviceMesh
 
 # FP8 dtypes do not implement reduction kernels (e.g. ``max_all_cuda``), ``abs``, or
 # elementwise ``maximum``, so tensors of these dtypes must be upcast before amax reduction.
@@ -665,7 +664,9 @@ def _fsdp2_owned_params(
     return owned
 
 
-def _fsdp2_owns(owned: dict[int, _FSDP2ParameterInfo], param: nn.Parameter) -> bool:
+def _fsdp2_owns(
+    owned: dict[int, _FSDP2ParameterInfo] | dict[int, weakref.ref], param: nn.Parameter
+) -> bool:
     """Whether ``param`` itself, not just an object at its address, is among ``owned``."""
     ref = owned.get(id(param))
     if isinstance(ref, _FSDP2ParameterInfo):
