@@ -1,0 +1,118 @@
+[
+  {
+    "id": "full-day0-release-triggers",
+    "question": "Release org/PLACEHOLDER-MODEL at day-0: quantize to NVFP4, validate it's within 1% of the BF16 baseline on the AA suite, and tell me if it's publishable. Run on my cluster.",
+    "expected_skill": "modelopt-day0-release",
+    "expected_script": null,
+    "ground_truth": "The full day-0 release workflow is appropriate. Resolve the placeholder model, cluster, applicable NVFP4 recipe, evaluation set, and threshold before execution; do not claim a completed release without those inputs and measured evidence. The workflow orders setup, PTQ and its checkpoint gate, serving canary with cleanup, baseline and candidate evaluations with run-validation gates, accuracy comparison with uncertainty and external sanity, independent verbosity gate, and closeout. Declare per-task independent-run counts, uncertainty method, and stopping rule before submitting evaluations; use at least two independent full runs per side for Welch and at least eight for SciCode, not in-run repeats. Report ACCEPT, REGRESSION, INDETERMINATE, ANOMALOUS, or INFEASIBLE from the resulting evidence, stopping at failed gates.",
+    "expected_behavior": [
+      "Selects the modelopt-day0-release skill for the full goal-driven release",
+      "Resolves model, recipe/qformat, cluster, eval set, and threshold before starting",
+      "Runs stages in fixed order: setup, PTQ, serving canary, baseline eval, quantized eval, compare, verbosity gate, closeout",
+      "Does not treat the accuracy compare as the final verdict: runs gate_verbosity.py before the closeout and reports both gates",
+      "Runs the gate after each stage and does not advance past a failed gate",
+      "Declares per-task run counts, uncertainty method, and stopping rule before baseline or candidate submission; plans at least two independent full runs per side for Welch and at least eight for SciCode",
+      "Does not count GPQA or IFBench in-run repeats as independent full runs, or assume a single AA-suite invocation suffices for Welch",
+      "Returns a publish decision (ACCEPT / REGRESSION / INDETERMINATE / ANOMALOUS / INFEASIBLE), not just raw scores"
+    ]
+  },
+  {
+    "id": "quantize-only-does-not-trigger-day0",
+    "question": "Quantize org/PLACEHOLDER-MODEL to NVFP4 and save the checkpoint.",
+    "expected_skill": null,
+    "expected_script": null,
+    "ground_truth": "This is a PTQ-only request, not a day-0 release. Route to modelopt-ptq and resolve the placeholder model before quantization. Do not start deployment, accuracy evaluation, or baseline-versus-candidate comparison, and do not claim a checkpoint was produced without execution evidence.",
+    "expected_behavior": [
+      "Selects the ptq skill, not modelopt-day0-release",
+      "Does not start deployment, evaluation, or comparison",
+      "Treats this as a single-stage quantization request"
+    ]
+  },
+  {
+    "id": "evaluate-only-does-not-trigger-day0",
+    "question": "Run MMLU-Pro on the endpoint I already have serving at http://host:8000.",
+    "expected_skill": null,
+    "expected_script": null,
+    "ground_truth": "This is an evaluation-only request for the existing endpoint. Route to modelopt-evaluation rather than modelopt-day0-release. Configure MMLU-Pro against the supplied endpoint, resolving missing execution prerequisites without quantizing or initiating a baseline-versus-candidate comparison. Do not invent completed evaluation results.",
+    "expected_behavior": [
+      "Selects the evaluation skill, not modelopt-day0-release",
+      "Does not quantize or run a baseline-vs-candidate comparison"
+    ]
+  },
+  {
+    "id": "ptq-smoke-test-cleanup",
+    "question": "Run the day-0 workflow for ./source with NVFP4. The quantizer's temporary serving smoke test starts but generation fails; I did not ask to keep it running.",
+    "expected_skill": "modelopt-day0-release",
+    "expected_script": null,
+    "ground_truth": "A failed temporary generation smoke test blocks evaluation. The quantizer owns collecting the failure evidence, stopping its temporary service, and verifying shutdown even on failure or interruption. Cleanup failures remain blockers. Subsequent stages receive only a validated checkpoint and serving configuration after success, never the temporary smoke-test endpoint; with this failure the release must not advance.",
+    "expected_behavior": [
+      "Keeps the quantizer responsible for smoke-test evidence and cleanup",
+      "Stops the temporary service and verifies shutdown on failure, as on success or interruption",
+      "Reports cleanup failures as blockers and does not proceed to evaluation after a failed smoke test",
+      "Hands off the checkpoint and validated serving configuration, never the smoke-test endpoint"
+    ]
+  },
+  {
+    "id": "ptq-gate-blocks-on-coverage-miss",
+    "question": "Run the day-0 workflow for org/PLACEHOLDER-MODEL with nvfp4, but the PTQ checkpoint came out the same size as the source.",
+    "expected_skill": "modelopt-day0-release",
+    "expected_script": null,
+    "ground_truth": "A same-size checkpoint requires the PTQ validation gate before any evaluation. Zero quantized-layer coverage blocks advancement; classify MODEL_UNSUPPORTED or QUANT_COVERAGE_FAILURE from the gate evidence. A size ratio at or above 1.0 fails unless the summary explicitly declares source precision already at or below the target recipe bits and growth stays within the inherent 1.10x allowance. Do not invent summary values, assume the size waiver applies, or evaluate a checkpoint with a failed gate.",
+    "expected_behavior": [
+      "Runs gate_ptq.py on the exported checkpoint before evaluating",
+      "Treats zero quantized-layer coverage and a size ratio at or above 1.0 as gate failures, waiving the size failure only when the summary declares a source precision already at or below the recipe's target bits and the growth stays within the inherent limit (1.10x)",
+      "Does not evaluate a checkpoint that failed the PTQ gate",
+      "Branches on the failure_class (e.g. MODEL_UNSUPPORTED or QUANT_COVERAGE_FAILURE) rather than silently continuing"
+    ]
+  },
+  {
+    "id": "regression-reports-and-stops-in-v1",
+    "question": "Day-0 release for org/PLACEHOLDER-MODEL nvfp4; validated comparable GPQA runs completed the declared plan, external sanity passed, and signed loss Candidate - Baseline is -3 pp with valid two-sided 95% CI [-4,-2] pp against margin -1 pp.",
+    "expected_skill": "modelopt-day0-release",
+    "expected_script": null,
+    "ground_truth": "The candidate is REGRESSION and must not be published: its valid GPQA signed-loss confidence interval [-4,-2] pp lies wholly below the -1 pp margin. Report the -3 pp loss, interval, and affected task. Use gate_compare.py as the preliminary accuracy check, not as a substitute for interval assessment. The v1 workflow stops and reports the regression rather than automatically choosing and rerunning another recipe.",
+    "expected_behavior": [
+      "Runs gate_compare.py with the accuracy threshold",
+      "Classifies the CI wholly below the margin as REGRESSION, not merely the beyond-threshold mean",
+      "Reports which tasks regressed and by how much",
+      "Does NOT auto-select a new recipe and re-run in v1 (that loop is deferred)"
+    ]
+  },
+  {
+    "id": "unresolved-uncertainty-blocks-release",
+    "question": "Assess three separate day-0 candidates against M=-1 pp. All runs are validated and comparable, with external sanity passed. Candidate A has signed loss -0.5 pp, valid 95% CI [-1.5,0.5] pp; B has signed loss -3 pp, valid 95% CI [-8,2] pp. Both completed their declared run plans. C has one full run per side and no justified task-specific uncertainty method. Can any be published?",
+    "expected_skill": "modelopt-day0-release",
+    "expected_script": null,
+    "ground_truth": "None of A, B, or C is publishable. A and B are INDETERMINATE because their valid confidence intervals cross the -1 pp margin, regardless of their point estimates. C is INDETERMINATE because one run per side without a justified task-specific method provides no valid uncertainty assessment. Report unresolved evidence and do-not-publish; do not label A ACCEPT or B REGRESSION from means or gate_compare.py alone, or automatically select another recipe.",
+    "expected_behavior": [
+      "Returns INDETERMINATE and do-not-publish for A and B because both intervals cross the margin",
+      "Reports uncertainty unavailable and returns INDETERMINATE with do-not-publish for C",
+      "Does not promote A to ACCEPT or B to REGRESSION based on point estimates or gate_compare.py alone",
+      "Reports unresolved tasks and missing evidence rather than auto-selecting a new recipe"
+    ]
+  },
+  {
+    "id": "within-margin-needs-verbosity",
+    "question": "The day-0 candidate completed all declared runs and passed validation, comparability, and external sanity. Every task's valid signed-loss 95% CI is wholly above M=-1 pp (GPQA: [-0.8,0.2] pp). No verbosity check has run. Is it publishable?",
+    "expected_skill": "modelopt-day0-release",
+    "expected_script": null,
+    "ground_truth": "The candidate passes the accuracy assessment only: each valid signed-loss interval is wholly above the -1 pp margin, including GPQA [-0.8,0.2] pp. It is not yet publishable. Run the independent Step 5b verbosity gate and require it to pass before Step 6 closeout or a publish recommendation; do not invent a verbosity result.",
+    "expected_behavior": [
+      "Returns accuracy-only ACCEPT because all task intervals are Within margin",
+      "Requires Step 5b verbosity gate before Step 6 or a publish recommendation"
+    ]
+  },
+  {
+    "id": "exploratory-stopping-and-selection",
+    "question": "I kept adding runs and checking ordinary Welch CIs until one of several NVFP4 candidates cleared the margin. I retained every run. Can day-0 release accept the winning candidate now?",
+    "expected_skill": "modelopt-day0-release",
+    "expected_script": null,
+    "ground_truth": "The winning candidate cannot yet receive confidence-based ACCEPT. Repeated looks, result-dependent extra runs, and selection among candidates make the results exploratory; retaining all runs does not restore nominal confidence-interval coverage. Require independent confirmation under a fresh declared plan or a justified sequential and selection-aware method. Until that evidence exists, report INDETERMINATE and do-not-publish.",
+    "expected_behavior": [
+      "Labels result-dependent reruns, repeated looks, and candidate selection exploratory",
+      "Does not claim retaining every run preserves nominal coverage",
+      "Requires independent confirmation under a fresh declared plan or a justified sequential/selection-aware method before confidence-based ACCEPT",
+      "Keeps the release INDETERMINATE and do-not-publish without that evidence"
+    ]
+  }
+]

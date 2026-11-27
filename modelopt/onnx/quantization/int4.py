@@ -352,11 +352,21 @@ def quantize_rtn(
             for name in scales:
                 scales[name] = np.asnumpy(scales[name])
         scales = reshape_scales_for_per_channel_nodes(scales, block_size, layer_info)
-        qdq.insert_qdq_nodes(graph, scales, weight_map=gemm_tensors, layer_info=layer_info)
+        qdq.insert_qdq_nodes(
+            graph,
+            scales,
+            weight_map=gemm_tensors,
+            layer_info=layer_info,
+            attributes={"axis": 0, "block_size": block_size},
+        )
         if gather_w_map is not None:
             assert gather_s_map is not None, "scale-map not found for quantizable gather nodes"
             qdq.insert_qdq_nodes(
-                graph, gather_s_map, weight_map=gather_w_map, layer_info=layer_info
+                graph,
+                gather_s_map,
+                weight_map=gather_w_map,
+                layer_info=layer_info,
+                attributes={"axis": gather_quantize_axis, "block_size": gather_block_size},
             )
 
     logger.info(f"RTN quantization completed in {time.time() - t_start:.2f} seconds")
@@ -738,21 +748,25 @@ def get_act_scale(x):
     return x.__abs__().mean(0)
 
 
+def _normalize_weight_blocks(weight, block_size, damping):
+    """Normalize consecutive axis-0 blocks while preserving trailing dimensions."""
+    original_rows = weight.shape[0]
+    if original_rows % block_size != 0:
+        weight = _pad(weight, block_size)
+    padded_shape = weight.shape
+    weight = weight.reshape(padded_shape[0] // block_size, block_size, *padded_shape[1:])
+    block_amax = weight.__abs__().max(axis=1, keepdims=True)
+    weight = weight.__abs__() / (block_amax + damping)
+    return weight.reshape(padded_shape)[:original_rows]
+
+
 def get_weight_scale(weight, block_size=None):
     """Get scale tensors for weights."""
-    org_shape = weight.shape
-    slice_after_padding = None
     if block_size:
-        if org_shape[0] % block_size != 0:
-            slice_after_padding = slice(org_shape[0])
-            weight = _pad(weight, block_size)
-            org_shape = weight.shape
-        weight = weight.reshape(block_size, -1)
-    weight_abs_amax = weight.__abs__().max(axis=0, keepdims=True)
-    scale = weight.__abs__() / (weight_abs_amax + np.finfo(weight_abs_amax.dtype).tiny)
-    scale = scale.reshape(org_shape)
-    if slice_after_padding is not None:
-        scale = scale[slice_after_padding, ...]
+        scale = _normalize_weight_blocks(weight, block_size, np.finfo(weight.dtype).tiny)
+    else:
+        weight_abs_amax = weight.__abs__().max(axis=0, keepdims=True)
+        scale = weight.__abs__() / (weight_abs_amax + np.finfo(weight_abs_amax.dtype).tiny)
     scale = scale.mean(1)
     return scale
 
@@ -784,6 +798,9 @@ def run_awq_scale_search_per_node(
 ):
     """Method that iterates over each quantizable node for scale search."""
     assert len(awq_lite) == len(wa_pack)
+    reuse_activations = kwargs.get("awqlite_reuse_activations", False)
+    cached_activation = None
+    cached_activation_name = None
     for i in tqdm(
         range(len(wa_pack)),
         desc="Running AWQ scale search per node" + tqdm_msg_append_str,
@@ -802,7 +819,7 @@ def run_awq_scale_search_per_node(
                 # want to free system RAM asap since that data is here copied to GPU for this node
                 output_data[j][i] = None
             output_dicts[act_tensor.name] = node_inputs
-        else:
+        elif cached_activation_name != act_tensor.name:
             # First capture all the  activation values after calibration data sweep
             for inp_d in inputs:
                 np_inp_d = {name: numpy.asarray(tensor) for name, tensor in inp_d.items()}
@@ -818,9 +835,12 @@ def run_awq_scale_search_per_node(
             w = w.T
         w = np.asarray(w)
 
-        x = np.concatenate(output_dicts[act_tensor.name], axis=0).reshape(
-            (-1, w.shape[0])
-        )  # n_token, ci
+        if cached_activation is not None and cached_activation_name == act_tensor.name:
+            x = cached_activation.reshape((-1, w.shape[0]))
+        else:
+            x = np.concatenate(output_dicts[act_tensor.name], axis=0).reshape(
+                (-1, w.shape[0])
+            )  # n_token, ci
         # Updating the block size as for 8bit quantization, per-channel quantization is used.
         num_bits = get_num_bits(layer_info, weight_tensor.name)
         block_size_updated = update_block_size(block_size, layer_info, weight_tensor.name, w=w)
@@ -854,6 +874,18 @@ def run_awq_scale_search_per_node(
             awq_clip = AWQClipHelper(w, block_size_updated, **kwargs)
             _clip_search(x, w, awq_clip, num_bits=num_bits, **kwargs)
             clip_alphas[weight_tensor.name] = awq_clip.best_alpha
+        # Share only the current activation with adjacent consumers; release it before the next input.
+        if (
+            reuse_activations
+            and not enable_fast_path_using_high_sysram
+            and i + 1 < len(wa_pack)
+            and wa_pack[i + 1][0].name == act_tensor.name
+        ):
+            cached_activation = x
+            cached_activation_name = act_tensor.name
+        else:
+            cached_activation = None
+            cached_activation_name = None
         del x, w, out_actual, output_dicts
         if has_cupy:
             np.get_default_memory_pool().free_all_blocks()
@@ -919,12 +951,8 @@ def get_x_w_mean_for_subgraph(
         np.get_default_memory_pool().free_all_blocks()
 
     assert w_concatenated is not None
-    org_shape = w_concatenated.shape
-    w_concatenated = w_concatenated.reshape(block_size, -1)
-    div_by = np.amax(np.abs(w_concatenated), axis=0)
-    div_by = div_by + 1e-6  # damping factor 1e-6 is taken from AutoAWQ
-    w_concatenated = np.abs(w_concatenated) / div_by
-    w_concatenated = w_concatenated.reshape(org_shape)
+    # Damping factor 1e-6 is taken from AutoAWQ.
+    w_concatenated = _normalize_weight_blocks(w_concatenated, block_size, 1e-6)
     w_m = np.mean(w_concatenated, axis=1)
 
     del w_concatenated
@@ -1486,6 +1514,14 @@ def quantize(
 
                 - **awqlite_alpha_step** (float): Step size to find best Alpha in awq-lite.Range: [0, 1].
                                               Default: 0.1.
+                - **awqlite_reuse_activations** (bool): Reuse calibration activations across adjacent
+                                              weights sharing an input in per-node AWQ Lite/Full.
+                                              Default: False. Independent per-weight captures require
+                                              per-node mode with enable_fast_path_using_high_sysram=False.
+                                              Enable only when sharing activation samples is acceptable;
+                                              this does not change random operators, seeds, or backend determinism.
+                                              For stochastic graphs, reuse changes which samples adjacent
+                                              weights share compared with independent calibration.
                 - **awqclip_alpha_step** (float): Step size to find best Alpha in awq-clip.
                                               Default: 0.05
                 - **awqclip_alpha_min** (float): Minimum threshold for weight-clipping in awq-clip.

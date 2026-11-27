@@ -25,6 +25,7 @@ import math
 import os
 import re
 import sys
+import threading
 import warnings
 from collections import defaultdict
 from contextlib import contextmanager
@@ -41,7 +42,7 @@ from huggingface_hub import snapshot_download
 from packaging.version import parse
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Container, Iterable
 from safetensors.torch import safe_open
 from torch.distributed import device_mesh
 from torch.distributed.checkpoint import HuggingFaceStorageReader
@@ -62,6 +63,7 @@ from transformers import (
 from transformers.conversion_mapping import get_model_conversion_mapping
 from transformers.core_model_loading import (
     WeightConverter,
+    WeightTransform,
     build_glob_alternation,
     dot_natural_key,
     rename_source_key,
@@ -69,10 +71,11 @@ from transformers.core_model_loading import (
 from transformers.dynamic_module_utils import get_class_from_dynamic_module
 from transformers.models.auto.modeling_auto import MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES
 
+from modelopt import env
 from modelopt.torch.export.model_utils import get_language_model_from_vl
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 from modelopt.torch.utils import distributed as dist
-from modelopt.torch.utils import env, moe
+from modelopt.torch.utils import moe
 from modelopt.torch.utils.distributed import (
     DistributionPlan,
     ParallelState,
@@ -224,16 +227,104 @@ def _conversion_plan(model: nn.Module, conversions: list | None = None) -> dict 
     }
 
 
-def _resolve_target(plan: dict, key: str) -> tuple[str, str | None]:
-    """Resolve a checkpoint key to ``(target param name, matched converter source pattern)``.
+def _resolve_target(plan: dict, key: str) -> tuple[str, str | None, list]:
+    """Resolve a checkpoint key to ``(target param name, converter source pattern, conversions)``.
 
-    No tensors are read. ``source_pattern`` is ``None`` for a plain (non-fused) key.
+    No tensors are read. ``source_pattern`` is ``None`` for a plain (non-fused) key, and
+    ``conversions`` holds the plan's conversions that produced the target name.
     """
+    meta_state_dict = plan["meta_state_dict"]
+    original_key = key
     for old, new in plan["legacy_renames"].items():
         key = re.sub(old, new, key)
-    return rename_source_key(
-        key, plan["renamings"], plan["converters"], plan["prefix"], plan["meta_state_dict"]
-    )
+    # transformers' ``rename_source_key``, rule by rule so the rules that rename the key are known:
+    # every matching renaming in turn, then the first matching converter.
+    applied, source_pattern = [], None
+    for renaming in plan["renamings"]:
+        key, pattern = renaming.rename_source_key(key)
+        if pattern is not None:
+            applied.append(renaming)
+    for converter in plan["converters"]:
+        key, source_pattern = converter.rename_source_key(key)
+        if source_pattern is not None:
+            applied.append(converter)
+            break
+    target = rename_source_key(key, [], [], plan["prefix"], meta_state_dict)[0]
+    # As transformers' own loader does: a key that already names a model parameter but is renamed
+    # away from it keeps its name. The mapping recurses into submodules, so a VLM picks up its text
+    # sub-model's rules (Qwen3.5 on transformers 5.5: ``model.language_model.`` -> ``model.``),
+    # which only apply when that sub-model is loaded on its own.
+    if target not in meta_state_dict and original_key in meta_state_dict:
+        target = rename_source_key(original_key, [], [], plan["prefix"], meta_state_dict)[0]
+        return target, None, []
+    return target, source_pattern, applied
+
+
+# The hook below is installed on Transformers' classes, so process-wide: blocks that overlap in
+# time take turns, or one restoring the methods would drop the hook another still counts on. A load
+# that needs it also holds this across prepare_model_for_loading, whose hooks are process-wide too.
+_CONVERSION_HOOK_LOCK = threading.RLock()
+
+
+def _tracks_used_conversions() -> bool:
+    """Whether Transformers records which conversions a load used (``was_used``) by itself."""
+    return callable(getattr(WeightTransform, "was_used", None))
+
+
+@contextmanager
+def _flagging_used_conversions(defer_to_was_used: bool = True):
+    """Flag each conversion as a key in the block is matched with it, as ``was_used`` does.
+
+    Transformers keeps the record of a load's conversions to those some key matched
+    (``was_used``), and the export reverts that record. One without ``was_used`` (5.5) keeps every
+    conversion, and the export then reverts renames no key took: Gemma3's tied ``lm_head``, which
+    its checkpoint has no tensor for, comes out as ``language_model.model.lm_head``. There the flag
+    is set here, where Transformers matches each key, so the load's own matching decides it,
+    whatever files and keys it read.
+
+    Yields the conversions matched in the block, by id, or ``None`` when Transformers keeps
+    ``was_used`` itself and ``defer_to_was_used``; :func:`_used_conversions` reads either.
+    """
+    if defer_to_was_used and _tracks_used_conversions():
+        yield None
+        return
+    with _CONVERSION_HOOK_LOCK:
+        # Holding each keeps its id from going to a later object while the record is filtered.
+        matched: dict[int, WeightTransform] = {}
+        classes, pending = [], [WeightTransform]
+        while pending:
+            cls = pending.pop()
+            pending.extend(cls.__subclasses__())
+            if "rename_source_key" in vars(cls):
+                classes.append(cls)
+
+        def flagging(rename):
+            def rename_source_key(self, source_key):
+                renamed, source_pattern = rename(self, source_key)
+                if source_pattern is not None:
+                    matched[id(self)] = self
+                return renamed, source_pattern
+
+            return rename_source_key
+
+        originals = {cls: vars(cls)["rename_source_key"] for cls in classes}
+        try:
+            for cls, rename in originals.items():
+                cls.rename_source_key = flagging(rename)
+            yield matched
+        finally:
+            for cls, rename in originals.items():
+                cls.rename_source_key = rename
+
+
+def _used_conversions(conversions: list, matched: dict | None) -> list:
+    """The ``conversions`` a load matched a key with.
+
+    ``matched`` is what :func:`_flagging_used_conversions` yielded for the load.
+    """
+    if matched is None:
+        return [c for c in conversions if c.was_used()]
+    return [c for c in conversions if id(c) in matched]
 
 
 def _conversion_plans(model: nn.Module) -> list[dict]:
@@ -262,7 +353,7 @@ def _convert_keys(plan: dict, state: dict) -> dict:
     result: dict = {}
     collected: dict = {}  # target -> (converter, {source_pattern: [(sort_key, tensor)]})
     for key in sorted(state, key=dot_natural_key):
-        renamed, source_pattern = _resolve_target(plan, key)
+        renamed, source_pattern, _ = _resolve_target(plan, key)
         if source_pattern is None:  # plain rename, no fusion
             result[renamed] = state[key]
             continue
@@ -440,6 +531,7 @@ def _broadcast_load_group(
 
 def _group_sources_by_layer(
     ckpt_keys: "Iterable[str]",
+    indexed: "Container[str]",
     plans: list[dict],
     model_param_names: set[str],
     layer_prefixes: list[str],
@@ -452,6 +544,10 @@ def _group_sources_by_layer(
     has no home for (an MTP head, an auxiliary tower). The names are kept, not just counted, so the
     export can copy them through: PTQ never touches them, but the exported checkpoint is still
     expected to contain them. ``targets`` holds the parameter names some key loads into.
+
+    Only keys the index lists (``indexed``) are bucketed, as only those are read. One only a shard's
+    header has is unplaced if its target isn't in the model, and otherwise left out: it supplies no
+    parameter, so one no indexed key supplies is reported as unsourced rather than left unloaded.
     """
     layer_sources: dict[int, list[str]] = {i: [] for i in range(len(layer_prefixes))}
     non_layer_sources: list[str] = []
@@ -461,6 +557,8 @@ def _group_sources_by_layer(
         target = _target_param(plans, ckpt_key, model_param_names)
         if target is None:
             unplaced.append(ckpt_key)
+            continue
+        if ckpt_key not in indexed:
             continue
         targets.add(target)
         for i, prefix in enumerate(layer_prefixes):
@@ -1142,11 +1240,18 @@ def load_pretrained(
                     stacklevel=2,
                 )
             whole = None if auto_class in (AutoModel, AutoModelForCausalLM) else auto_class
-            with prepare_model_for_loading(
-                model_type, ckpt_path, trust_remote_code, model_class=whole
+            with (
+                contextlib.nullcontext() if _tracks_used_conversions() else _CONVERSION_HOOK_LOCK,
+                prepare_model_for_loading(
+                    model_type, ckpt_path, trust_remote_code, model_class=whole
+                ),
+                _flagging_used_conversions() as matched,
             ):
                 model = auto_class.from_pretrained(ckpt_path, **hub_options, **kwargs)
         keys = None
+        if matched is not None and getattr(model, "_weight_conversions", None):
+            # A Transformers without was_used kept every conversion; keep the ones the load used.
+            model._weight_conversions = _used_conversions(model._weight_conversions, matched)
     set_distribution_plan(model, plan)
     unplaced = record_unplaced_source_keys(model, ckpt_path, keys)
     if unplaced:
@@ -1595,6 +1700,7 @@ def parallel_load_and_prepare_fsdp2(
     # conversions of its own, so the stock plan is the only one.
     layer_sources, non_layer_sources, unplaced, sourced_targets = _group_sources_by_layer(
         checkpoint_tensor_files(resolved_path),
+        weight_map,
         [plan] if plan else [],
         model_param_names,
         layer_prefixes,
@@ -1609,12 +1715,23 @@ def parallel_load_and_prepare_fsdp2(
     # it came from. Not a state dict: holding these tensors from load to export would waste the
     # memory this loader exists to save.
     record_unplaced_source_keys(model, resolved_path, unplaced)
-    # What from_pretrained records: the conversions some checkpoint key used, or all of them on a
-    # Transformers without ``was_used``. The export reverts these and would otherwise query the
-    # wrapped class, which has lost them.
-    model._weight_conversions = [
-        c for c in (plan["conversions"] if plan else []) if getattr(c, "was_used", lambda: True)()
-    ]
+    # What from_pretrained records: the conversions some checkpoint key used. The export reverts
+    # these and would otherwise query the wrapped class, which has lost them. They are matched over
+    # exactly the keys the reads below convert -- the bucketed ones, all in weight_map, which is what
+    # read_safetensors_subset selects from -- so a rename only an unread key matches, such as one
+    # with no parameter that is only carried over, doesn't rename the export. Transformers'
+    # was_used isn't used even where it exists: the placement pass above set it for every key. Nor
+    # is a hook on each rule's matching: a key that already names a parameter keeps that name even
+    # where a rule matched it (a VLM's text sub-model rule), so only the rules that named the target
+    # count.
+    model._weight_conversions = []
+    if plan:
+        used = {
+            id(conversion)
+            for key in chain(non_layer_sources, *layer_sources.values())
+            for conversion in _resolve_target(plan, key)[2]
+        }
+        model._weight_conversions = [c for c in plan["conversions"] if id(c) in used]
     _check_every_param_sourced(model, sourced_targets)
 
     _materialize_meta_model(model, torch.device("cpu") if cpu_offload else device)
@@ -2376,9 +2493,11 @@ def _patch_finegrained_fp8_dequant(target_dtype=None):
     else derived), then crop to the weight shape -- correct for both full and partial last blocks,
     2-D dense linears and (leading-dim-broadcast) per-expert tensors. Idempotent.
 
-    The override takes block-FP8 weights only. Any other weight goes to transformers' own dequant,
-    which from 5.9 unpacks packed FP4 (``float4_e2m1fn_x2``, or ``int8``) itself: DeepSeek-V4 declares
-    block FP8 but stores its routed experts that way, with ``[1, 32]`` scales.
+    A block-FP8 weight reaches the dequant in fp8, or already in the model dtype: transformers loads
+    a tensor that no converter renames in that dtype, taking safetensors' "F8_E4M3" for a float, as
+    it does DeepSeek-V3's ``kv_a_proj_with_mqa``. Packed FP4 (``float4_e2m1fn_x2``, or ``int8``) goes
+    to transformers' own dequant, which unpacks it from 5.9: DeepSeek-V4 declares block FP8 but
+    stores its routed experts that way, with ``[1, 32]`` scales.
 
     transformers >= 5.10.1 keeps its own dequant. Upstream fixed two of the show-stoppers there -- the
     loader's expert ``tensor_idx`` check became ``any(op is MergeModulelist ...)`` (bug 1) and
@@ -2403,10 +2522,8 @@ def _patch_finegrained_fp8_dequant(target_dtype=None):
     if _FINEGRAINED_FP8_PATCHED:
         return
 
-    fp8_dtypes = {
-        getattr(torch, name)
-        for name in ("float8_e4m3fn", "float8_e5m2", "float8_e4m3fnuz", "float8_e5m2fnuz")
-        if hasattr(torch, name)
+    packed_fp4 = {
+        getattr(torch, name) for name in ("int8", "float4_e2m1fn_x2") if hasattr(torch, name)
     }
     if parse(transformers.__version__) >= parse("5.10.1"):
         # Re-importing this module loses its flag, and the wrapper calls the method it replaces:
@@ -2417,7 +2534,7 @@ def _patch_finegrained_fp8_dequant(target_dtype=None):
         _stock_dequantize_one = _fp8.Fp8Dequantize._dequantize_one
 
         def _dequantize_partial_blocks(self, quantized, scales, *args, **kwargs):
-            if quantized.dim() < 2 or scales.dim() < 2 or quantized.dtype not in fp8_dtypes:
+            if quantized.dim() < 2 or scales.dim() < 2 or quantized.dtype in packed_fp4:
                 return _stock_dequantize_one(self, quantized, scales, *args, **kwargs)
             rows, cols = quantized.shape[-2:]
             block = getattr(
@@ -2429,11 +2546,14 @@ def _patch_finegrained_fp8_dequant(target_dtype=None):
             ):
                 return _stock_dequantize_one(self, quantized, scales, *args, **kwargs)
             pad_rows, pad_cols = ceil_grid[0] * block[0] - rows, ceil_grid[1] * block[1] - cols
-            # Padded in its own fp8 dtype, through a same-size uint8 view (pad has no fp8 kernel), so
-            # transformers' dequant gets the input it is written for, without an fp32 copy.
-            padded = torch.nn.functional.pad(
-                quantized.view(torch.uint8), (0, pad_cols, 0, pad_rows)
-            ).view(quantized.dtype)
+            # Padded in its own dtype, so transformers' dequant gets the input it is written for,
+            # without an fp32 copy; fp8 through a same-size uint8 view, as pad has no fp8 kernel.
+            if quantized.element_size() == 1:
+                padded = torch.nn.functional.pad(
+                    quantized.view(torch.uint8), (0, pad_cols, 0, pad_rows)
+                ).view(quantized.dtype)
+            else:
+                padded = torch.nn.functional.pad(quantized, (0, pad_cols, 0, pad_rows))
             out = _stock_dequantize_one(self, padded, scales, *args, **kwargs)
             return out[..., :rows, :cols]
 
@@ -2456,9 +2576,9 @@ def _patch_finegrained_fp8_dequant(target_dtype=None):
         out_dtype = (
             output_dtype or getattr(type(self), "_modelopt_dequant_dtype", None) or torch.bfloat16
         )
-        if quantized.dtype not in fp8_dtypes:
-            # Block FP8 only: read as fp8, packed FP4 (two values a byte) would come out at half its
-            # width and wrong. transformers' own dequant unpacks it.
+        if quantized.dtype in packed_fp4:
+            # Read as block FP8, packed FP4 (two values a byte) would come out at half its width and
+            # wrong. transformers' own dequant unpacks it.
             if stock is None:
                 raise ValueError(f"block-FP8 dequant: a {quantized.dtype} weight is not block FP8.")
             return stock(self, quantized, scales).to(out_dtype)

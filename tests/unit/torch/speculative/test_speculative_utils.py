@@ -21,6 +21,7 @@ was 2 (field count) and every conversation got dropped by the num_input_tokens <
 
 import hashlib
 import sys
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -34,6 +35,7 @@ from modelopt.torch.speculative.utils import (
     KIMI_K2_PACKAGE_NAME,
     _setup_kimi_k2_decoder,
     get_conversation_input_ids,
+    is_speculative_config,
 )
 
 CONVERSATIONS = [
@@ -145,3 +147,20 @@ def test_kimi_k2_decoder_drops_failed_module(tmp_path, monkeypatch):
         with pytest.raises(ImportError):
             _setup_kimi_k2_decoder()
         assert f"{KIMI_K2_PACKAGE_NAME}.modeling_deepseek" not in sys.modules
+
+
+@pytest.mark.parametrize(
+    ("architectures", "expected"),
+    [
+        (["LlamaForCausalLMEagle3"], True),
+        (["EagleLlamaForCausalLM"], True),
+        (["MedusaLlamaForCausalLM"], True),
+        # The draft keeps its base model's model_type; only the architecture differs.
+        (["LlamaForCausalLM"], False),
+        ([], False),
+        (None, False),
+    ],
+)
+def test_is_speculative_config(architectures, expected):
+    config = SimpleNamespace(model_type="llama", architectures=architectures)
+    assert is_speculative_config(config) is expected

@@ -30,7 +30,7 @@ import torch
 import triton
 import triton.language as tl
 
-from ..common.nvfp4_quant import fp4_round_magnitude
+from ..common.nvfp4_quant import fp4_normalize_magnitude, fp4_round_magnitude
 from ._fp8_scale_candidates import fp8_scale_candidates
 from .fp4_kernel import compute_fp4_scales
 
@@ -87,7 +87,7 @@ def _fp8_scale_sweep_kernel(
         # Avoid divide-by-zero when global_amax == 0; in that case w_abs is also zero
         # (global_amax = max|w|), so the loss is zero for every candidate either way.
         scale_safe = tl.where(scale == 0.0, 1.0, scale)
-        q_mag = fp4_round_magnitude(w_abs / scale_safe)
+        q_mag = fp4_round_magnitude(fp4_normalize_magnitude(w_abs, scale_safe))
         diff = w_abs - q_mag * scale_safe
         loss = tl.sum(diff * diff, axis=1)  # [BLOCKS_PER_PROGRAM]
         is_better = loss < best_loss
@@ -208,7 +208,7 @@ def _fp8_scale_sweep_hessian_kernel(
     for k in tl.range(NUM_CANDIDATES):
         scale = tl.load(candidate_scales_ptr + k).to(tl.float32)
         scale_safe = tl.where(scale == 0.0, 1.0, scale)  # scale == 0 only if global_amax == 0
-        q_mag = fp4_round_magnitude(w_abs / scale_safe)
+        q_mag = fp4_round_magnitude(fp4_normalize_magnitude(w_abs, scale_safe))
         dw = w_sign * (w_abs - q_mag * scale_safe)  # = w - quant(w), [ROWS, BS]
         # dwᵀ H dw per row (H symmetric); allow_tf32=False keeps it true fp32 vs the reference.
         hdw = tl.dot(dw, hessian, allow_tf32=False)  # [ROWS, BS]

@@ -30,10 +30,16 @@ from modelopt.torch.opt.mode import ModeDescriptor
 from .config import QuantizeConfig
 from .conversion import restore_quantizer_state, update_quantize_metadata
 from .mode import QuantizeModeRegistry
-from .nn import QuantModule, QuantModuleRegistry
+from .nn import QuantModule, QuantModuleRegistry, TensorQuantizer
 from .qtensor import QTensorWrapper
 
-__all__ = ["QuantLoRAConfig", "enable_quant_lora", "merge_quant_lora"]
+__all__ = [
+    "QuantLoRAConfig",
+    "enable_quant_input_gradients",
+    "enable_quant_lora",
+    "has_quant_lora",
+    "merge_quant_lora",
+]
 
 
 class QuantLoRAConfig(ModeloptBaseConfig):
@@ -110,16 +116,72 @@ def enable_quant_lora(model: nn.Module, config: dict | QuantLoRAConfig | None = 
     The forward quantizes ``W + (alpha / rank) * B @ A``. Save and restore using
     ModelOpt checkpoint APIs to reconstruct adapters before loading tensor/optimizer state.
     """
-    if any(isinstance(module, _QuantLoRALinear) for module in model.modules()):
+    if has_quant_lora(model):
         raise ValueError("Quantization-aware LoRA is already enabled.")
     return apply_mode(model, [("quant_lora", config or {})], registry=QuantizeModeRegistry)
 
 
 def merge_quant_lora(model: nn.Module) -> nn.Module:
     """Merge adapters into floating-point weights, retaining quantizers for deployment export."""
-    if not any(isinstance(module, _QuantLoRALinear) for module in model.modules()):
+    if not has_quant_lora(model):
         return model
     return apply_mode(model, "quant_lora_export", registry=QuantizeModeRegistry)
+
+
+def has_quant_lora(model: nn.Module) -> bool:
+    """Return whether the model contains unmerged quantization-aware LoRA adapters."""
+    return any(isinstance(module, _QuantLoRALinear) for module in model.modules())
+
+
+def enable_quant_input_gradients(model: nn.Module) -> nn.Module:
+    """Enable activation gradients, recording their wrappers for ModelOpt restoration.
+
+    Call before DDP and optimizer construction. This does not change parameter
+    trainability; the training recipe still selects parameters on every launch.
+    Raise if no registered activation boundary or quantizer is available.
+    """
+    _validate_quant_input_gradients(model)
+    if not any(
+        not isinstance(module, _QuantLoRAInput) and type(module) in QuantLoRAInputRegistry
+        for module in model.modules()
+    ):
+        return model
+    return apply_mode(model, "quant_input_gradients", registry=QuantizeModeRegistry)
+
+
+def _validate_quant_input_gradients(model):
+    if not any(
+        isinstance(module, _QuantLoRAInput) or type(module) in QuantLoRAInputRegistry
+        for module in model.modules()
+    ):
+        types = ", ".join(sorted({type(module).__name__ for module in model.modules()}))
+        raise ValueError(f"No registered activation-gradient boundary for module types: {types}")
+    if not any(isinstance(module, TensorQuantizer) for module in model.modules()):
+        raise ValueError("Activation-gradient setup requires a quantized model with quantizers.")
+
+
+def _enable_quant_input_gradients(model):
+    """Install registered wrappers within the owning activation-gradient or LoRA mode."""
+    for module in list(model.modules()):
+        if not isinstance(module, _QuantLoRAInput) and type(module) in QuantLoRAInputRegistry:
+            QuantLoRAInputRegistry[type(module)].convert(module)
+    return model
+
+
+def _convert_quant_input_gradients(model, config):
+    """Wrap activation boundaries and retain the current quantizer metadata."""
+    _validate_quant_input_gradients(model)
+    _enable_quant_input_gradients(model)
+    metadata = {}
+    _update_quant_metadata(model, config, metadata)
+    return model, metadata
+
+
+def _restore_quant_input_gradients(model, config, metadata):
+    """Restore quantizers and activation wrappers before checkpoint tensors are loaded."""
+    _validate_quant_input_gradients(model)
+    restore_quantizer_state(model, QuantizeConfig(), metadata)
+    return _enable_quant_input_gradients(model)
 
 
 def _convert_quant_lora(model, config):
@@ -153,11 +215,9 @@ def _convert_quant_lora(model, config):
     model.requires_grad_(False)
     for module in targets:
         QuantLoRARegistry[type(module)].convert(module, config=config)
-    for module in list(model.modules()):
-        if type(module) in QuantLoRAInputRegistry:
-            QuantLoRAInputRegistry[type(module)].convert(module)
+    _enable_quant_input_gradients(model)
     metadata = {}
-    _update_quant_lora(model, config, metadata)
+    _update_quant_metadata(model, config, metadata)
     return model, metadata
 
 
@@ -167,8 +227,8 @@ def _restore_quant_lora(model, config, metadata):
     return _convert_quant_lora(model, config)[0]
 
 
-def _update_quant_lora(model, config, metadata):
-    """Record quantizer metadata for adapter and merged checkpoints."""
+def _update_quant_metadata(model, config, metadata):
+    """Record quantizer metadata for activation-gradient and LoRA checkpoints."""
     update_quantize_metadata(model, QuantizeConfig(), metadata)
 
 
@@ -180,7 +240,7 @@ def _merge_quant_lora(model, config):
         elif isinstance(module, _QuantLoRAInput):
             module.export()
     metadata = {}
-    _update_quant_lora(model, config, metadata)
+    _update_quant_metadata(model, config, metadata)
     return model, metadata
 
 
@@ -188,6 +248,25 @@ def _restore_merged_quant_lora(model, config, metadata):
     """Remove reconstructed factors before restoring the merged checkpoint state."""
     model = _merge_quant_lora(model, config)[0]
     return restore_quantizer_state(model, QuantizeConfig(), metadata)
+
+
+@QuantizeModeRegistry.register_mode
+class QuantInputGradientsModeDescriptor(ModeDescriptor):
+    """Restore differentiable activation boundaries independently of LoRA adapters."""
+
+    name = "quant_input_gradients"
+    config_class = ModeloptBaseConfig
+    next_prohibited_modes = {
+        "quant_lora",
+        "quantize",
+        "auto_quantize",
+        "real_quantize",
+        "quant_input_gradients",
+    }
+    convert = staticmethod(_convert_quant_input_gradients)
+    restore = staticmethod(_restore_quant_input_gradients)
+    update_for_save = staticmethod(_update_quant_metadata)
+    update_for_new_mode = staticmethod(_update_quant_metadata)
 
 
 @QuantizeModeRegistry.register_mode
@@ -200,8 +279,8 @@ class QuantLoRAModeDescriptor(ModeDescriptor):
     next_prohibited_modes = {"quant_lora", "quantize", "auto_quantize", "real_quantize"}
     convert = staticmethod(_convert_quant_lora)
     restore = staticmethod(_restore_quant_lora)
-    update_for_save = staticmethod(_update_quant_lora)
-    update_for_new_mode = staticmethod(_update_quant_lora)
+    update_for_save = staticmethod(_update_quant_metadata)
+    update_for_new_mode = staticmethod(_update_quant_metadata)
 
 
 @QuantizeModeRegistry.register_mode
@@ -213,5 +292,5 @@ class QuantLoRAExportModeDescriptor(ModeDescriptor):
     is_export_mode = True
     convert = staticmethod(_merge_quant_lora)
     restore = staticmethod(_restore_merged_quant_lora)
-    update_for_save = staticmethod(_update_quant_lora)
-    update_for_new_mode = staticmethod(_update_quant_lora)
+    update_for_save = staticmethod(_update_quant_metadata)
+    update_for_new_mode = staticmethod(_update_quant_metadata)

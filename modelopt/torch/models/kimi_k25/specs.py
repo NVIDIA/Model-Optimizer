@@ -19,14 +19,15 @@ Kimi-K2.5 (Kimi-K2.6 and Kimi-K2.7-Code share its model type): the compressed-ex
 ``kimi_vl`` -- same swap to a native deepseek_v3 language model, plus on-the-fly decompression of
 its packed experts at load.
 
-Only the expert-parallel section is registered under ``kimi_k25``: the MoE and export sections stay
-``deepseek_v3``'s, so lookups by ``kimi_k25`` find neither yet. Nor do ``is_moe``'s name and structure
-fallbacks recognize the native ``DeepseekV3MoE`` blocks ``prepare`` installs, so the HF export's
-MoE-block handling skips them. Sharing the sections is left to a follow-up.
+Only the expert-parallel and PTQ sections are registered under ``kimi_k25``: the MoE and export sections
+stay ``deepseek_v3``'s, so lookups by ``kimi_k25`` find neither yet. Nor do ``is_moe``'s name and
+structure fallbacks recognize the native ``DeepseekV3MoE`` blocks ``prepare`` installs, so the HF
+export's MoE-block handling skips them. Sharing the sections is left to a follow-up.
 """
 
+from ..deepseek.specs import GENERATION_UNSUPPORTED
 from ..deepseek_v3.specs import BASE_MODEL_EP_PLAN
-from ..specs import EPSpec, ModelSpec, register
+from ..specs import EPSpec, ModelSpec, PTQSpec, register
 from .ep import DECOMPRESSED_FORMATS, make_buildable, prepare, prepare_refusal
 
 __all__: list[str] = []
@@ -53,5 +54,7 @@ register(
             decompressed_formats=DECOMPRESSED_FORMATS,
             requires_transformers="5.8",
         ),
+        # The language model is a kimi_k2, a DeepSeek-V3 architecture: the same generation limit.
+        ptq_spec=PTQSpec(generation_unsupported=GENERATION_UNSUPPORTED),
     )
 )

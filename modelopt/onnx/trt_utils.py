@@ -127,7 +127,10 @@ def get_custom_layers(
         Dictionary containing tensors information: {'tensor_name': {'shape': tensor.shape, 'dtype': tensor.dtype}}
     """
     if not TRT_PYTHON_AVAILABLE:
-        raise ImportError("TensorRT Python bindings are required for custom-layer introspection.")
+        raise ImportError(
+            "TensorRT Python bindings could not be imported and are required for custom-layer "
+            "introspection. Install or repair a compatible TensorRT installation."
+        )
 
     logger.debug("Checking for custom TensorRT ops")
 

@@ -42,9 +42,11 @@ from .codebooks import iq2_xxs_grid_bytes
 from .common import (
     GGML_BLOCK_SIZE,
     GGMLFormat,
+    ScaleFit,
     choice_blocks,
     chunk_importance,
     dequantize_blocks,
+    encode_every_choice,
     importance_blocks,
     iq2_tile_terms,
     leading_fp16_scales,
@@ -53,7 +55,9 @@ from .common import (
     validate_block_chunk_size,
     validate_packed_weights,
     validate_weight,
+    with_leading_fp16_scales,
 )
+from .scale_fields import NativeScaleSpec
 
 __all__ = [
     "IQ2_XXS_BLOCK_BYTES",
@@ -178,26 +182,7 @@ def _encode_blocks(
     sign_bits = torch.arange(8, dtype=torch.int64, device=x.device)
     sign_mask = (encoded_negative.to(torch.int64) << sign_bits).sum(dim=-1) & 0x7F
 
-    signs = sign_mask.reshape(block_count, _IQ2_XXS_SUBBLOCKS, _IQ2_XXS_GROUPS_PER_SUBBLOCK)
-    aux = (
-        signs[:, :, 0]
-        | (signs[:, :, 1] << 7)
-        | (signs[:, :, 2] << 14)
-        | (signs[:, :, 3] << 21)
-        | (selected_local << 28)
-    )
-
-    body = torch.empty((block_count, _IQ2_XXS_SUBBLOCKS, 8), dtype=torch.uint8, device=x.device)
-    body[:, :, 0:4] = (
-        selected_entry.reshape(block_count, _IQ2_XXS_SUBBLOCKS, _IQ2_XXS_GROUPS_PER_SUBBLOCK)
-    ).to(torch.uint8)
-    for byte in range(4):
-        body[:, :, 4 + byte] = ((aux >> (8 * byte)) & 0xFF).to(torch.uint8)
-
-    packed = torch.empty((block_count, IQ2_XXS_BLOCK_BYTES), dtype=torch.uint8, device=x.device)
-    packed[:, :2] = d.contiguous().view(torch.uint8).reshape(block_count, 2)
-    packed[:, 2:] = body.reshape(block_count, -1)
-    return torch.where((d_float == 0).unsqueeze(1), 0, packed)
+    return _pack_fields(selected_entry, sign_mask, selected_local, d)
 
 
 @torch.no_grad()
@@ -208,6 +193,7 @@ def quantize_iq2_xxs(
     importance: torch.Tensor | None = None,
     choices: torch.Tensor | None = None,
     scales: torch.Tensor | None = None,
+    every_choice: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Pack a floating-point weight into GGML-compatible IQ2_XXS blocks.
 
@@ -219,12 +205,14 @@ def quantize_iq2_xxs(
     ``[*weight.shape[:-1], weight.shape[-1] // 256, 8]``, fixes each 32-value sub-block's 4-bit
     local scale.
     ``scales``, one FP16 super-block scale per block, replaces the predicted ones.
+    ``every_choice`` returns every choice's payload instead, each with that choice in every
+    group, ``[num_choices, *packed shape]``.
     """
     validate_weight(weight, "IQ2_XXS")
     validate_block_chunk_size(block_chunk_size)
     block_importance = importance_blocks(importance, weight, "IQ2_XXS")
     block_choices = choice_blocks(
-        choices, weight, _IQ2_XXS_SUBBLOCKS, _IQ2_XXS_LOCAL_SCALES, "IQ2_XXS"
+        choices, weight, _IQ2_XXS_SUBBLOCKS, _IQ2_XXS_LOCAL_SCALES, "IQ2_XXS", every_choice
     )
 
     logical_shape = torch.tensor(weight.shape, dtype=torch.int64)
@@ -242,10 +230,20 @@ def quantize_iq2_xxs(
         extension = get_cuda_ext_ggml()
         if extension is not None:
             packed = extension.iq2_xxs_pack(
-                blocks, grid, block_scales, block_importance, block_choices
+                blocks, grid, block_scales, block_importance, block_choices, every_choice
             )
-            return packed.reshape(packed_shape), logical_shape
+            return packed.reshape(*packed.shape[:-2], *packed_shape), logical_shape
 
+    if every_choice:
+        return encode_every_choice(
+            quantize_iq2_xxs,
+            weight,
+            _IQ2_XXS_SUBBLOCKS,
+            _IQ2_XXS_LOCAL_SCALES,
+            block_chunk_size=block_chunk_size,
+            importance=importance,
+            scales=scales,
+        )
     chunks = [
         _encode_blocks(
             blocks[start : start + block_chunk_size],
@@ -291,31 +289,72 @@ def dequantize_iq2_xxs(
     ).reshape(shape)
 
 
+def _unpack_fields(
+    packed: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Read grid entries, sign or delta bits, local scales, and the shared FP16 scale."""
+    count = packed.shape[0]
+    d = packed[:, :2].contiguous().view(torch.float16).reshape(-1).float()
+    body = packed[:, 2:].long().reshape(count, 8, 8)
+    # Keep the strided vector axes so decoding does not copy the grid indices.
+    entries = body[..., :4]
+    bits = body[..., 4] | (body[..., 5] << 8) | (body[..., 6] << 16) | (body[..., 7] << 24)
+    auxiliary = (bits.unsqueeze(-1) >> (torch.arange(4, device=packed.device) * 7)) & 127
+    local = bits >> 28
+    return entries, auxiliary, local, d
+
+
+def _pack_fields(
+    entries: torch.Tensor, auxiliary: torch.Tensor, local: torch.Tensor, d: torch.Tensor
+) -> torch.Tensor:
+    """Pack native fields without searching the codebook; round the shared scale to FP16."""
+    entries, auxiliary, local = entries.long(), auxiliary.long(), local.long()
+    count = entries.shape[0]
+    packed = torch.empty((count, IQ2_XXS_BLOCK_BYTES), dtype=torch.uint8, device=entries.device)
+    native_d = d.clamp(-65504, 65504).to(torch.float16)
+    packed[:, :2] = native_d.contiguous().view(torch.uint8).reshape(count, 2)
+    body = packed[:, 2:].reshape(count, 8, 8)
+    body[..., :4] = entries.reshape(count, 8, 4).to(torch.uint8)
+    bits = (auxiliary.reshape(count, 8, 4) << (torch.arange(4, device=entries.device) * 7)).sum(-1)
+    bits |= local << 28
+    body[..., 4:] = ((bits.unsqueeze(-1) >> (torch.arange(4, device=entries.device) * 8)) & 255).to(
+        torch.uint8
+    )
+    return torch.where((native_d == 0).unsqueeze(-1), 0, packed)
+
+
 def _unpack_int8(blocks: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """Signed grid levels (±8, ±25, ±43) and the step of each 32-value sub-block."""
-    count = blocks.shape[0]
     bit_positions = torch.arange(8, dtype=torch.int64, device=blocks.device)
-    sign_shifts = 7 * torch.arange(
-        _IQ2_XXS_GROUPS_PER_SUBBLOCK, dtype=torch.int64, device=blocks.device
-    )
-    d = blocks[:, :2].contiguous().view(torch.float16).reshape(-1).float()
-    body = blocks[:, 2:].reshape(count, _IQ2_XXS_SUBBLOCKS, 8).to(torch.int64)
-    entries = body[:, :, 0:4]
-    aux = body[:, :, 4] | (body[:, :, 5] << 8) | (body[:, :, 6] << 16) | (body[:, :, 7] << 24)
-    # Top nibble is the sub-block scale; the low 28 bits are four 7-bit sign indices.
-    steps = d.unsqueeze(-1) * (0.5 + ((aux >> 28) & 0xF).float()) * 0.25
-    sign_index = (aux.unsqueeze(-1) >> sign_shifts) & 0x7F
+    entries, sign_index, local, d = _unpack_fields(blocks)
     folded = sign_index ^ (sign_index >> 4)
     folded ^= folded >> 2
     folded ^= folded >> 1
     sign_mask = sign_index | ((folded & 1) << 7)
     signs = 1.0 - 2.0 * ((sign_mask.unsqueeze(-1) >> bit_positions) & 1).float()
+    steps = d.unsqueeze(-1) * (0.5 + local.float()) * 0.25
     levels = iq2_xxs_grid(blocks.device)[entries] * signs
-    return levels.reshape(count, IQ2_XXS_BLOCK_SIZE), steps
+    return levels.reshape(-1, IQ2_XXS_BLOCK_SIZE), steps
+
+
+def _read_local_scales(blocks: torch.Tensor) -> torch.Tensor:
+    return blocks[:, 9::8].int() >> 4
+
+
+def _write_local_scales(blocks: torch.Tensor, local: torch.Tensor) -> None:
+    blocks[:, 9::8] = (blocks[:, 9::8] & 15) | (local.to(torch.uint8) << 4)
 
 
 IQ2_XXS_FORMAT = GGMLFormat(
     name="iq2_xxs",
+    scale_spec=NativeScaleSpec(
+        local_max=15,
+        local_multiplier=2,
+        local_bias=1,
+        divisor=8,
+        read_local=_read_local_scales,
+        write_local=_write_local_scales,
+    ),
     block_size=IQ2_XXS_BLOCK_SIZE,
     block_bytes=IQ2_XXS_BLOCK_BYTES,
     quantize=quantize_iq2_xxs,
@@ -324,10 +363,15 @@ IQ2_XXS_FORMAT = GGMLFormat(
     decode_chunk_size=_DEFAULT_DECODE_CHUNK_SIZE,
     int8_group_size=_IQ2_XXS_INT8_GROUP_SIZE,
     unpack_int8=_unpack_int8,
+    pack_fields=_pack_fields,
+    unpack_fields=_unpack_fields,
     weighted=True,
     choice_groups=_IQ2_XXS_SUBBLOCKS,
     num_choices=_IQ2_XXS_LOCAL_SCALES,
     payload_scales=leading_fp16_scales,
+    # Fit at llama.cpp's levels 1, 3, 5, the odd steps its grid's 8, 25, 43 (in eighths) round to.
+    scale_fit=ScaleFit(top=31, levels=((1.0, 3.0, 5.0),)),
+    replace_payload_scales=with_leading_fp16_scales,
 )
 
 # Kept for callers of the per-format entry point. The record captured quantize_iq2_xxs and

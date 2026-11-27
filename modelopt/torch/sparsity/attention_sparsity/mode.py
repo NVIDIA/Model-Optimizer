@@ -23,6 +23,7 @@ from modelopt.torch.opt.mode import (
     UpdateEntrypoint,
     _ModeRegistryCls,
 )
+from modelopt.torch.opt.searcher import BaseSearcher
 
 from .config import SparseAttentionConfig
 from .conversion import (
@@ -30,6 +31,7 @@ from .conversion import (
     restore_sparse_attention_model,
     update_sparse_attention_metadata,
 )
+from .searcher import SparseAttentionSearcher
 
 # Create registry for sparse attention modes
 SparseAttentionModeRegistry = _ModeRegistryCls("sparse_attention")
@@ -54,15 +56,9 @@ class SparseAttentionModeDescriptor(ModeDescriptor):
         return SparseAttentionConfig
 
     @property
-    def next_prohibited_modes(self) -> set[str] | None:
-        """Modes that should not be applied after this mode."""
-        # Can work with quantization but not with weight sparsity
-        return {"sparsity"}
-
-    @property
-    def export_mode(self) -> str | None:
-        """The mode that corresponds to the export mode of this mode."""
-        return "export_sparse_attention"
+    def search_algorithm(self) -> type[BaseSearcher]:
+        """Specifies the search algorithm for the mode."""
+        return SparseAttentionSearcher
 
     @property
     def convert(self) -> ConvertEntrypoint:

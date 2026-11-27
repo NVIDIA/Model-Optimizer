@@ -19,7 +19,6 @@ import contextlib
 import copy
 import importlib
 import json
-import os
 import re
 import tempfile
 import traceback
@@ -36,12 +35,14 @@ import torch.nn as nn
 from safetensors import safe_open
 from safetensors.torch import save_file
 
+from modelopt import env
 from modelopt.torch.models import hf_model_type, is_moe
 from modelopt.torch.utils.plugins.hf_checkpoint_utils import (
     copy_non_model_files,
     copy_off_index_safetensors,
     locate_source_keys,
     off_index_safetensors_files,
+    resolve_checkpoint_file,
     sanitize_hf_config_for_deployment,
 )
 
@@ -74,6 +75,11 @@ try:
 except ImportError:
     _TRANSFORMERS_MODEL_TYPES = ()
     _TRANSFORMERS_CONFIG_TYPES = ()
+
+try:
+    from transformers.configuration_utils import remap_legacy_layer_types
+except ImportError:  # transformers without the layer type renames has nothing to restore
+    remap_legacy_layer_types = None
 
 
 from modelopt.torch.opt.conversion import ModeloptStateManager, modelopt_state
@@ -141,6 +147,7 @@ from .quant_format import (
 )
 from .quant_utils import (
     _get_kv_cache_postprocess_config,
+    _get_uncalibrated_static_input_module_names,
     fuse_prequant_layernorm,
     fuse_prequant_to_linear,
     get_activation_scaling_factor,
@@ -1129,6 +1136,19 @@ def _process_hf_model_for_export(
     return quant_config
 
 
+def _diffusion_quantization_target_types(model: nn.Module) -> list[str]:
+    """Return stable type targets for homogeneous NVFP4 diffusion modules."""
+    target_types = set()
+    for sub_module in model.modules():
+        if get_quantization_format(sub_module) != QUANTIZATION_NVFP4:
+            continue
+        if any(cls.__name__ == "WanCausalConv3d" for cls in type(sub_module).__mro__):
+            target_types.add("Conv3d")
+        elif is_quantlinear(sub_module):
+            target_types.add("Linear")
+    return sorted(target_types)
+
+
 def _export_transformers_checkpoint(
     model: nn.Module,
     dtype: torch.dtype | None = None,
@@ -1377,6 +1397,24 @@ def _export_diffusers_checkpoint(
         name: comp for name, comp in all_components.items() if isinstance(comp, nn.Module)
     }
 
+    # Refuse before any component is fused, packed or written.
+    uncalibrated = {
+        name: module_names
+        for name, comp in module_components.items()
+        if (module_names := _get_uncalibrated_static_input_module_names(comp))
+    }
+    if uncalibrated:
+        details = "; ".join(
+            f"{name}: {len(module_names)} layer(s), e.g. {module_names[0]}"
+            for name, module_names in uncalibrated.items()
+        )
+        raise ValueError(
+            f"Static input quantizers were never calibrated ({details}): the checkpoint would "
+            "declare their input scales without containing them. Calibrate with data that runs "
+            "these layers, or leave the layers unquantized by disabling both their weight and "
+            "input quantizers."
+        )
+
     # Best-effort diffusers pipeline check (kept for folder layout + model_index.json behavior)
     is_diffusers_pipe = False
     if HAS_DIFFUSERS:
@@ -1431,6 +1469,16 @@ def _export_diffusers_checkpoint(
             )
             _fuse_qkv_linears_diffusion(component, strict=is_qwen_component or is_wan_i2v_component)
 
+            target_types = _diffusion_quantization_target_types(component)
+            if "Conv3d" in target_types and (
+                kwargs.get("padding_strategy") is not None
+                or kwargs.get("enable_swizzle_layout", False)
+            ):
+                raise NotImplementedError(
+                    "NVFP4 GEMM padding/swizzling is not defined for Conv3d exports. "
+                    "Export without padding_strategy/enable_swizzle_layout."
+                )
+
             # Process quantized modules (convert weights, register scales)
             _process_quantized_modules(component, component_dtype, is_modelopt_qlora=False)
 
@@ -1458,7 +1506,9 @@ def _export_diffusers_checkpoint(
                         if svdquant_rank is not None:
                             quantization_details["lora_rank"] = svdquant_rank
                 hf_quant_config = (
-                    convert_hf_quant_config_format(quant_config) if quant_config else None
+                    convert_hf_quant_config_format(quant_config, target_types=target_types)
+                    if quant_config
+                    else None
                 )
 
                 # Save the component
@@ -1729,6 +1779,12 @@ def _write_hf_export_config(
     original_config = f"{export_dir}/config.json"
     with open(original_config) as file:
         config_data = json.load(file)
+    if remap_legacy_layer_types is not None:
+        # Before the sanitize step: it trims trailing MTP entries from layer_types, and the
+        # restore only matches a list that is still exactly the remap of the source's.
+        _restore_source_layer_types(
+            config_data, _source_config_json(model), getattr(model, "config", None)
+        )
     sanitize_hf_config_for_deployment(config_data, model)
     if quantization_config is not None:
         config_data["quantization_config"] = quantization_config
@@ -1796,6 +1852,60 @@ def _source_checkpoint(model: nn.Module) -> str | None:
         or getattr(getattr(model, "config", None), "_name_or_path", None)
         or None
     )
+
+
+def _source_config_json(model: nn.Module) -> Any:
+    """The source checkpoint's ``config.json`` as parsed, or ``{}`` if it cannot be read.
+
+    Read through ``resolve_checkpoint_file``, which keeps the file inside the checkpoint directory
+    and bounds its size.
+    """
+    ckpt = _source_checkpoint(model)
+    # RuntimeError: a symlink loop on Python < 3.13, and the RecursionError of a deeply nested file.
+    with contextlib.suppress(OSError, ValueError, RuntimeError):
+        if ckpt:
+            return json.loads(
+                resolve_checkpoint_file(Path(ckpt), "config.json").read_text(encoding="utf-8")
+            )
+    return {}
+
+
+def _remapped_layer_types(layer_types: list) -> list | None:
+    """Transformers' remap of ``layer_types``, or ``None`` when it cannot be applied.
+
+    The remap is a transformers internal, and this runs on the last write of an export, so a
+    changed contract warns and leaves the config as transformers wrote it.
+    """
+    if remap_legacy_layer_types is None or not all(isinstance(t, str) for t in layer_types):
+        return None
+    try:
+        return remap_legacy_layer_types(layer_types)
+    except Exception as exc:
+        warnings.warn(f"Could not restore the source layer_types spelling ({exc}).")
+        return None
+
+
+def _restore_source_layer_types(config_data: dict, source: Any, config: Any) -> None:
+    """Spell ``layer_types`` as the source ``config.json`` does, in the config and its sub-configs.
+
+    transformers renames some layer types on load (``deepseek_sparse_attention`` becomes
+    ``indexed_attention`` in 5.18), and runtimes validate against the names the checkpoint ships.
+    The source's list is restored only where it is exactly what transformers' remap turns it into,
+    so a list the export edited or trimmed keeps its handling. Only the live config nodes are
+    followed, not any dict that happens to sit in the file.
+    """
+    if not isinstance(source, dict):
+        return
+    for key in ("layer_types", "mtp_layer_types"):  # the lists transformers' remap rewrites
+        source_types = source.get(key)
+        remapped = _remapped_layer_types(source_types) if isinstance(source_types, list) else None
+        if remapped is not None and remapped == config_data.get(key):
+            config_data[key] = source_types
+    for key, sub_config in getattr(config, "__dict__", {}).items():
+        if isinstance(sub_config, _TRANSFORMERS_CONFIG_TYPES) and isinstance(
+            config_data.get(key), dict
+        ):
+            _restore_source_layer_types(config_data[key], source.get(key), sub_config)
 
 
 def carryable_unplaced_keys(model: nn.Module) -> list[str]:
@@ -2041,17 +2151,8 @@ def _write_base_config(model: nn.Module, export_dir: Path) -> None:
 
 
 def _no_gather_export_asked() -> bool:
-    """Whether ``MODELOPT_FSDP2_EXPORT`` picks the no-gather writer for an FSDP2-sharded export.
-
-    ``nogather`` picks it; unset, empty or ``streaming`` keeps the default streaming path. Any other
-    value raises: a misspelled one would otherwise quietly take the path it was set to avoid.
-    """
-    value = os.environ.get("MODELOPT_FSDP2_EXPORT") or "streaming"
-    if value not in ("nogather", "streaming"):
-        raise ValueError(
-            f"MODELOPT_FSDP2_EXPORT={value!r}: expected 'nogather', or 'streaming', the default."
-        )
-    return value == "nogather"
+    """Whether ``MODELOPT_FSDP2_EXPORT`` picks the no-gather writer for an FSDP2-sharded export."""
+    return env.fsdp2_export() == "nogather"
 
 
 def export_hf_checkpoint(

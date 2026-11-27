@@ -105,13 +105,14 @@ static_assert(Format::kPayloadBytes == 56, "IQ1_M blocks are 56 bytes");
 } // namespace
 
 at::Tensor iq1_m_pack_cuda(at::Tensor input, at::Tensor grid, at::Tensor scales,
-                           std::optional<at::Tensor> importance,
-                           std::optional<at::Tensor> choices) {
+                           std::optional<at::Tensor> importance, std::optional<at::Tensor> choices,
+                           bool every_choice) {
   check_scaled_pack_inputs("IQ1_M", input, grid, Format::kEntries, scales);
   if (importance.has_value())
     check_importance("IQ1_M", input, *importance);
-  return iq1_encode_blocks<Format>(input, grid, scales, importance,
-                                   checked_choices("IQ1_M", input, choices, Format::kGroups));
+  return iq1_encode_blocks<Format>(
+      input, grid, scales, importance,
+      checked_choices("IQ1_M", input, choices, Format::kGroups, every_choice), every_choice);
 }
 
 at::Tensor iq1_m_unpack_cuda(at::Tensor packed, at::Tensor grid, at::ScalarType dtype) {

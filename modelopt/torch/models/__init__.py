@@ -27,9 +27,16 @@ and read its sections.
 The per-model file is named for what it holds, not for who reads it: a model's spec is
 general model data, and export is only its first consumer.
 
-A package may also hold ``modeling_ptq.py``, the model-specific PTQ wrappers. It is not imported
-here; the HF quantization plugin imports it (see ``README.md``).
+A package may also hold ``modeling_ptq.py`` and ``modeling_ptq_vllm.py``, the model-specific PTQ
+wrappers for transformers and vLLM. They are not imported here; the HF and vLLM quantization
+plugins import them with ``import_model_modules`` (see ``README.md``).
 """
+
+import importlib
+import importlib.util
+import pkgutil
+
+from modelopt.torch.utils import import_plugin
 
 from .moe import is_moe
 from .specs import (
@@ -37,7 +44,9 @@ from .specs import (
     ExportSpec,
     ModelSpec,
     MoESpec,
+    PTQSpec,
     SpecSection,
+    get_ptq_spec,
     get_spec,
     get_specs,
     hf_model_type,
@@ -57,10 +66,13 @@ __all__ = [
     "ExportSpec",
     "MoESpec",
     "ModelSpec",
+    "PTQSpec",
     "SpecSection",
+    "get_ptq_spec",
     "get_spec",
     "get_specs",
     "hf_model_type",
+    "import_model_modules",
     "is_moe",
     "list_all_possible",
     "match_class_names",
@@ -72,9 +84,13 @@ __all__ = [
 # Importing the model packages registers every spec as a side effect.
 from . import (  # isort: skip
     arctic,
+    bart,
+    deci,
     deepseek,
     deepseek_v3,
+    deepseek_v32,
     deepseek_v4,
+    diffusion_gemma,
     falcon,
     gemma,
     gemma2,
@@ -82,18 +98,25 @@ from . import (  # isort: skip
     gemma4,
     gemma4_text,
     gpt_oss,
+    kimi_k2,
     llama,
+    llava_llama,
     llama4,
+    llama_nemotron_nano_vl,
     minimax,
     mixtral,
     phimoe,
     nemotron,
     nemotron_h,
+    nemotron_h_nano_vl_v2,
+    nemotron_nas,
+    nemotron_parse,
     minimax_m3_vl,
     llama4_text,
     kimi_vl,
     kimi_k25,
     nemotron_h_omni,
+    nemotron_h_nano_omni_reasoning_v3,
     qwen2_moe,
     qwen3,
     qwen3_5_moe,
@@ -103,4 +126,24 @@ from . import (  # isort: skip
     qwen4_exp,
     step3p5,
     step3p7,
+    t5,
+    whisper,
 )
+
+
+def import_model_modules(module_name: str) -> None:
+    """Import ``<model_type>/<module_name>.py`` from every model package that has one.
+
+    The quantization plugins load the model-specific PTQ wrappers this way (``modeling_ptq`` for
+    transformers, ``modeling_ptq_vllm`` for vLLM), so they name no model: such a module registers
+    its wrappers on import, and adding one needs no list entry. Packages are visited in name
+    order, so the registration order is the same on every run, and each import is guarded on its
+    own, so a module that fails to import leaves the others registered. Packages and modules are
+    found through the import system rather than as files on disk, so a zipped or bytecode-only
+    install finds them too.
+    """
+    for package in sorted(name for _, name, is_pkg in pkgutil.iter_modules(__path__) if is_pkg):
+        module = f"{__name__}.{package}.{module_name}"
+        with import_plugin(f"{package} {module_name}"):
+            if importlib.util.find_spec(module) is not None:
+                importlib.import_module(module)
