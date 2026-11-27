@@ -1,0 +1,479 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""AutoQuantize invariants for modules opted into per-weight search, across methods and flows."""
+
+import copy
+import os
+
+import pytest
+import torch
+import torch.nn.functional as F
+
+import modelopt.torch.quantization as mtq
+from modelopt.torch.quantization.algorithms import (
+    QuantRecipe,
+    _iter_tensor_quantizers,
+    _per_weight_compression,
+    _resolve_best_recipe,
+    _tensor_quantizer_format_signature,
+)
+from modelopt.torch.quantization.config import QuantizerAttributeConfig
+from modelopt.torch.quantization.nn import QuantModule, QuantModuleRegistry, TensorQuantizer
+from modelopt.torch.utils import safe_load, safe_save
+
+
+class _Experts(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.w1 = torch.nn.Parameter(torch.randn(2, 16, 32) * 0.1)
+        self.w2 = torch.nn.Parameter(torch.randn(2, 32, 16) * 0.1)
+
+    def forward(self, x):
+        return torch.bmm(torch.relu(torch.bmm(x, self.w1)), self.w2)
+
+
+class _QuantExperts(QuantModule):
+    _auto_quantize_per_weight_quantizers = True
+
+    def _setup(self):
+        for name in ("w1", "w2"):
+            setattr(self, f"{name}_input_quantizer", TensorQuantizer())
+            setattr(self, f"{name}_weight_quantizer", TensorQuantizer())
+        # Only one weight has an output quantizer: unquantized, its weights still match.
+        self.w1_output_quantizer = TensorQuantizer()
+
+    def forward(self, x):
+        hidden = torch.bmm(self.w1_input_quantizer(x), self.w1_weight_quantizer(self.w1))
+        hidden = self.w2_input_quantizer(torch.relu(self.w1_output_quantizer(hidden)))
+        return torch.bmm(hidden, self.w2_weight_quantizer(self.w2))
+
+
+class _Model(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        torch.manual_seed(0)
+        self.dense = torch.nn.Linear(16, 16)
+        self.experts = _Experts()
+        self.out = torch.nn.Linear(16, 16)
+
+    def forward(self, x):
+        return self.out(self.experts(self.dense(x)))
+
+
+def _deny(*entries):
+    return {"quant_cfg": [{"quantizer_name": "*", "enable": False}, *entries], "algorithm": "max"}
+
+
+_INT4_W = {"num_bits": 4, "block_sizes": {-1: 16}}
+_CANDIDATES = {
+    "int8": mtq.INT8_DEFAULT_CFG,
+    "int4_weight_only": _deny({"quantizer_name": "*weight_quantizer", "cfg": _INT4_W}),
+    "w4a8": _deny(
+        {"quantizer_name": "*weight_quantizer", "cfg": [_INT4_W, {"num_bits": 8, "axis": 0}]},
+        {"quantizer_name": "*input_quantizer", "cfg": {"num_bits": 8, "axis": None}},
+    ),
+    # Full-path glob: matches no module-relative name, so the experts stay BF16 under it.
+    "experts_path_no_op": _deny({"quantizer_name": "*.experts.*weight_quantizer", "cfg": _INT4_W}),
+}
+_METHODS = {
+    "gradient": "gradient",
+    "kl_div": "kl_div",
+    "kl_div_lowest": {"method": "kl_div", "context_quant_level": "lowest"},
+    "aumann_shapley": "aumann_shapley",
+}
+
+
+@pytest.fixture(autouse=True)
+def _registered():
+    QuantModuleRegistry.register({_Experts: "test.PerWeightExperts"})(_QuantExperts)
+    yield
+    QuantModuleRegistry.unregister(_Experts)
+
+
+def _search(method, formats, bits, **kwargs):
+    model = _Model()
+    data = [torch.randn(2, 4, 16) for _ in range(2)]
+    method_name = method if isinstance(method, str) else method["method"]
+    model, state = mtq.auto_quantize(
+        model,
+        constraints={"effective_bits": bits},
+        quantization_formats=[(copy.deepcopy(_CANDIDATES[f]), f) for f in formats],
+        data_loader=data,
+        forward_step=lambda model, batch: model(batch),
+        loss_func=(lambda output, batch: output.sum()) if method_name == "gradient" else None,
+        num_calib_steps=2,
+        num_score_steps=2,
+        method=method,
+        **kwargs,
+    )
+    return model, state
+
+
+def _formats(model, names=("experts", "dense", "out")):
+    """Each searched module's quantizer formats, as the model holds them."""
+    return {
+        f"{name}.{attr}": tuple(
+            _tensor_quantizer_format_signature(q) if q.is_enabled else "disabled"
+            for q in _iter_tensor_quantizers(quantizer)
+        )
+        for name in names
+        for attr, quantizer in vars(model.get_submodule(name))["_modules"].items()
+        if attr.endswith("quantizer")
+    }
+
+
+def _replayed(config):
+    """The frozen config applied as it is used: quantize and calibrate a fresh model."""
+    data = [torch.randn(2, 4, 16) for _ in range(2)]
+
+    def forward_loop(model):
+        for batch in data:
+            model(batch)
+
+    return mtq.quantize(_Model(), config, forward_loop)
+
+
+@pytest.mark.parametrize("method", list(_METHODS))
+@pytest.mark.parametrize("bits", [5.0, 9.0, 16.0])
+def test_per_weight_search_invariants(method, bits, tmp_path):
+    formats = list(_CANDIDATES)
+    checkpoint = str(tmp_path / "search.pth")
+    model, state = _search(_METHODS[method], formats, bits, checkpoint=checkpoint)
+    stats = state["candidate_stats"]["experts.quant_recipe"]
+    [hparam] = model.experts._hparams_for_scoring
+
+    # I1: replaying the frozen config gives every searched module the formats it was scored with.
+    # Dense layers that selected a full-path candidate are excluded: their replay is #3508.
+    checked = ["experts"] + [
+        name
+        for name in ("dense", "out")
+        if not str(state["best"]["recipe"][f"{name}.quant_recipe"]).startswith("experts_path")
+    ]
+    config = mtq.get_auto_quantize_config(state)
+    assert _formats(_replayed(config), checked) == _formats(model, checked)
+
+    # I2: a candidate is costed at BF16 exactly when it leaves the experts' weights unquantized.
+    for recipe, cost in zip(stats["formats"], stats["costs"]):
+        quantizers = hparam._all_quantizer_choices[recipe][model.experts]
+        quantized = any(
+            q.is_enabled
+            for attr, value in quantizers.items()
+            if "weight_quantizer" in attr
+            for q in _iter_tensor_quantizers(value)
+        )
+        assert (cost < stats["uncompressed_cost"]) == quantized, recipe
+
+    # I3: the ladder, and so KL selection, the KL context and the corner, ascend in resolved cost.
+    assert stats["costs"] == sorted(stats["costs"])
+    assert [hparam.get_cost(r, cost_weight=1.0) for r in hparam.ladder] == sorted(
+        hparam.get_cost(r, cost_weight=1.0) for r in hparam.ladder
+    )
+
+    # I4: an offline re-solve, and a resumed search, select what the live search selected.
+    saved = safe_load(checkpoint)
+    assert _resolve_best_recipe(saved, {"effective_bits": bits}) == state["best"]["recipe"]
+    resumed, resumed_state = _search(_METHODS[method], formats, bits, checkpoint=checkpoint)
+    assert resumed_state["best"]["recipe"] == state["best"]["recipe"]
+    assert _formats(resumed) == _formats(model)
+
+
+@pytest.mark.parametrize("method", ["gradient", "kl_div"])
+def test_per_weight_format_shards_merge_into_the_live_search(method, tmp_path):
+    formats = list(_CANDIDATES)
+    _, live = _search(method, formats, 9.0)
+    shards = []
+    for index in range(2):
+        shard = str(tmp_path / f"shard{index}.pth")
+        _search(method, formats, 9.0, checkpoint=shard, format_shard=(index, 2))
+        shards.append(shard)
+    merged = str(tmp_path / "merged.pth")
+    mtq.merge_auto_quantize_checkpoints(shards, merged)
+    _, merged_state = _search(method, formats, 9.0, checkpoint=merged)
+    assert merged_state["best"]["recipe"] == live["best"]["recipe"]
+
+
+@pytest.mark.parametrize(
+    ("rules", "problem"),
+    [
+        # Which config the toggle enables depends on what ran before it.
+        (
+            [
+                {"quantizer_name": "*weight_quantizer", "cfg": _INT4_W, "enable": False},
+                {"quantizer_name": "*weight_quantizer", "enable": True},
+            ],
+            "without a config",
+        ),
+        (
+            [
+                {"quantizer_name": "*weight_quantizer", "cfg": [_INT4_W, {"num_bits": 8}]},
+                {"quantizer_name": "*weight_quantizer.1", "cfg": {"num_bits": 8, "axis": None}},
+            ],
+            "stages",
+        ),
+        (
+            [
+                {
+                    "quantizer_name": "*weight_quantizer",
+                    "parent_class": "test.PerWeightExperts",
+                    "cfg": _INT4_W,
+                }
+            ],
+            "parent_class",
+        ),
+        # The first config's constant amax outlives the second, which replay alone applies.
+        (
+            [
+                {
+                    "quantizer_name": "*weight_quantizer",
+                    "cfg": {"num_bits": 8, "constant_amax": 1.0},
+                },
+                {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+            ],
+            "more than one rule",
+        ),
+        (
+            [
+                {"quantizer_name": "*weight_quantizer", "cfg": [{"num_bits": 8}] * 3 + [_INT4_W]},
+                {"quantizer_name": "*weight_quantizer.3", "enable": False},
+            ],
+            "stages",
+        ),
+    ],
+    ids=["enable_only_last", "stage_rule", "parent_class", "two_configs", "fourth_stage"],
+)
+def test_rule_forms_replay_cannot_reproduce_are_refused(rules, problem):
+    _CANDIDATES["unsupported"] = _deny(*rules)
+    try:
+        with pytest.raises(ValueError, match=problem):
+            _search("gradient", ["unsupported"], 16.0)
+    finally:
+        del _CANDIDATES["unsupported"]
+
+
+def test_a_candidate_must_set_every_per_weight_quantizer():
+    no_deny_all = {"quant_cfg": [{"quantizer_name": "*weight_quantizer", "cfg": _INT4_W}]}
+    _CANDIDATES["partial"] = no_deny_all
+    try:
+        with pytest.raises(ValueError, match="no rule for"):
+            _search("gradient", ["partial"], 16.0)
+    finally:
+        del _CANDIDATES["partial"]
+
+
+def test_path_rules_of_other_modules_leave_unquantized_per_weight_modules_alone():
+    path_rule = _deny(
+        {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+        {"quantizer_name": "experts.w[12]_*_quantizer", "cfg": _INT4_W},
+    )
+    _CANDIDATES["path_rule"] = path_rule
+    try:
+        _, state = _search("gradient", ["path_rule"], 8.0)
+    finally:
+        del _CANDIDATES["path_rule"]
+    best = state["best"]["recipe"]
+    best["experts.quant_recipe"] = QuantRecipe(quant_cfg=None)
+    replayed = _replayed(mtq.get_auto_quantize_config(state))
+    assert set(_formats(replayed, ("experts",)).values()) == {("disabled",)}
+    assert replayed.dense.weight_quantizer.is_enabled
+
+
+def test_per_weight_modules_are_priced_at_their_resolved_weight_format():
+    # The recipe's 4 bits name only a plain weight_quantizer: the experts hold, and cost, 8 bits.
+    int4_with_int8_experts = _deny(
+        {"quantizer_name": "weight_quantizer", "cfg": _INT4_W},
+        {"quantizer_name": "*w[12]_weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+    )
+    _CANDIDATES["int4_int8_experts"] = int4_with_int8_experts
+    try:
+        _, state = _search("gradient", ["int4_int8_experts"], 16.0)
+    finally:
+        del _CANDIDATES["int4_int8_experts"]
+    stats = state["candidate_stats"]["experts.quant_recipe"]
+    [cost] = [c for f, c in zip(stats["formats"], stats["costs"]) if not f.is_no_quant]
+    assert cost == stats["uncompressed_cost"] / 2
+
+
+def test_a_candidate_leaving_per_weight_modules_unquantized_warns():
+    with pytest.warns(UserWarning, match="leaves the weights of .*_Experts unquantized"):
+        _search("gradient", ["experts_path_no_op"], 16.0)
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root ignores modes")
+@pytest.mark.parametrize("saved_before_cost_versions", [False, True])
+def test_a_search_resumes_from_a_read_only_checkpoint(tmp_path, saved_before_cost_versions):
+    checkpoint = tmp_path / "scores" / "search.pth"
+    _, state = _search("gradient", list(_CANDIDATES), 9.0, checkpoint=str(checkpoint))
+    if saved_before_cost_versions:  # its resume refreshes the costs, which it cannot save here
+        saved = safe_load(checkpoint)
+        del saved["cost_version"]
+        safe_save(saved, checkpoint)
+    checkpoint.chmod(0o444)
+    checkpoint.parent.chmod(0o555)
+    try:
+        _, resumed = _search("gradient", list(_CANDIDATES), 9.0, checkpoint=str(checkpoint))
+    finally:
+        checkpoint.parent.chmod(0o755)
+        checkpoint.chmod(0o644)
+    assert resumed["best"]["recipe"] == state["best"]["recipe"]
+
+
+def test_path_rules_of_other_groups_leave_fixed_per_weight_modules_at_their_baseline():
+    path_rule = _deny(
+        {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+        {"quantizer_name": "experts.w[12]_*_quantizer", "cfg": _INT4_W},
+    )
+    data = [torch.randn(2, 4, 16) for _ in range(2)]
+    _, state = mtq.auto_quantize(
+        _Model(),
+        constraints={"effective_bits": 16.0},
+        # The experts stay fixed at this baseline's BF16; only the dense layer is searched.
+        fixed_quantization_config=_deny(),
+        module_search_spaces=[
+            {
+                "module_name_patterns": ["dense"],
+                "quantization_formats": [path_rule],
+                "allow_no_quant": False,
+            }
+        ],
+        data_loader=data,
+        forward_step=lambda model, batch: model(batch),
+        loss_func=lambda output, batch: output.sum(),
+        num_calib_steps=2,
+        num_score_steps=2,
+    )
+    replayed = _replayed(mtq.get_auto_quantize_config(state))
+    assert set(_formats(replayed, ("experts",)).values()) == {("disabled",)}
+    assert replayed.dense.weight_quantizer.is_enabled
+
+
+class _MixedRank(torch.nn.Module):
+    """A plain 2-D weight beside a 3-D expert bank."""
+
+    def __init__(self):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.randn(16, 16) * 0.1)
+        self.w1 = torch.nn.Parameter(torch.randn(2, 16, 16) * 0.1)
+
+    def forward(self, x):
+        return torch.bmm(F.linear(x, self.weight), self.w1)
+
+
+class _QuantMixedRank(QuantModule):
+    _auto_quantize_per_weight_quantizers = True
+
+    def _setup(self):
+        for prefix in ("", "w1_"):
+            setattr(self, f"{prefix}input_quantizer", TensorQuantizer())
+            setattr(self, f"{prefix}weight_quantizer", TensorQuantizer())
+
+    def forward(self, x):
+        hidden = F.linear(self.input_quantizer(x), self.weight_quantizer(self.weight))
+        return torch.bmm(self.w1_input_quantizer(hidden), self.w1_weight_quantizer(self.w1))
+
+
+def test_one_block_format_on_weights_of_different_rank_is_searched():
+    # Calibration lays the 2-D and 3-D weights' blocks out on different axes.
+    blocks = _deny(
+        {
+            "quantizer_name": "*weight_quantizer",
+            "cfg": {"num_bits": 8, "block_sizes": {-1: 8, -2: 8}},
+        }
+    )
+    QuantModuleRegistry.register({_MixedRank: "test.MixedRank"})(_QuantMixedRank)
+    try:
+        model = torch.nn.Sequential(_MixedRank())
+        model, state = mtq.auto_quantize(
+            model,
+            constraints={"effective_bits": 8.0},
+            quantization_formats=[(blocks, "blocks")],
+            data_loader=[torch.randn(2, 4, 16) for _ in range(2)],
+            forward_step=lambda model, batch: model(batch),
+            loss_func=lambda output, batch: output.sum(),
+            num_calib_steps=2,
+            num_score_steps=2,
+        )
+    finally:
+        QuantModuleRegistry.unregister(_MixedRank)
+    stats = state["candidate_stats"]["0.quant_recipe"]
+    assert min(stats["costs"]) == stats["uncompressed_cost"] / 2
+
+
+def test_a_recipes_effective_bits_prices_a_named_weight_format():
+    q8_0 = {"num_bits": "q8_0", "block_sizes": {-1: 32}, "backend": "ggml"}
+    recipe = QuantRecipe(
+        {**_deny({"quantizer_name": "*weight_quantizer", "cfg": q8_0}), "effective_bits": 8.5},
+        name="q8_0",
+    )
+    quantizers = {
+        f"{name}_weight_quantizer": TensorQuantizer(QuantizerAttributeConfig(**q8_0))
+        for name in ("w1", "w2")
+    }
+    assert _per_weight_compression(recipe, quantizers) == 8.5 / 16
+
+
+def test_per_weight_modules_replay_from_fresh_quantizers_over_a_list_config_baseline():
+    # The baseline makes every weight quantizer sequential before the replayed entries land.
+    three_stages = [{"num_bits": 8, "axis": 0}, {"num_bits": 8}, {"num_bits": 8, "axis": 0}]
+    baseline = _deny({"quantizer_name": "*weight_quantizer", "cfg": three_stages})
+    data = [torch.randn(2, 4, 16) for _ in range(2)]
+    model, state = mtq.auto_quantize(
+        _Model(),
+        constraints={"effective_bits": 16.0},
+        fixed_quantization_config=baseline,
+        module_search_spaces=[
+            {
+                "module_name_patterns": ["experts"],
+                "quantization_formats": [_CANDIDATES["w4a8"]],
+                "allow_no_quant": False,
+            }
+        ],
+        data_loader=data,
+        forward_step=lambda model, batch: model(batch),
+        loss_func=lambda output, batch: output.sum(),
+        num_calib_steps=2,
+        num_score_steps=2,
+    )
+    replayed = _replayed(mtq.get_auto_quantize_config(state))
+    assert _formats(replayed, ("experts",)) == _formats(model, ("experts",))
+
+
+class _ExpertsWithUnquantizedWeight(_Experts):
+    def __init__(self):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.zeros(64, 64))  # e.g. a router; never quantized
+
+
+def test_a_weight_without_a_quantizer_is_not_costed():
+    QuantModuleRegistry.register({_ExpertsWithUnquantizedWeight: "test.UnquantizedWeight"})(
+        _QuantExperts
+    )
+    try:
+        model = torch.nn.Sequential(_ExpertsWithUnquantizedWeight())
+        _, state = mtq.auto_quantize(
+            model,
+            constraints={"effective_bits": 16.0},
+            quantization_formats=[(copy.deepcopy(_CANDIDATES["int8"]), "int8")],
+            data_loader=[torch.randn(2, 4, 16) for _ in range(2)],
+            forward_step=lambda model, batch: model(batch),
+            loss_func=lambda output, batch: output.sum(),
+            num_calib_steps=2,
+            num_score_steps=2,
+        )
+    finally:
+        QuantModuleRegistry.unregister(_ExpertsWithUnquantizedWeight)
+    experts = model[0]
+    stats = state["candidate_stats"]["0.quant_recipe"]
+    assert stats["uncompressed_cost"] == experts.w1.numel() + experts.w2.numel()
