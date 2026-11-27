@@ -38,6 +38,7 @@ from modelopt.torch.quantization.repair_partition import (
     native_weight_partition,
     prepare_packed_weights_for_tp,
     validate_native_weight_partition,
+    validate_tp_output_quantizer,
 )
 from modelopt.torch.quantization.utils.native_weight import (
     get_pinned_native_weight,
@@ -543,3 +544,23 @@ def test_native_tp_view_respects_physical_weight_ownership(
             local_shape, intervals = expected
             assert view.local_shape == local_shape
             assert view.intervals() == intervals
+
+
+@pytest.mark.parametrize("rank", [0, 1])
+@pytest.mark.parametrize("quantizing", [False, True])
+def test_colwise_output_refuses_rank_local_calibration(rank, quantizing):
+    quantizer = TensorQuantizer(QuantizerAttributeConfig(num_bits=8, axis=None))
+    quantizer.amax = torch.tensor(8.0)
+    if not quantizing:
+        quantizer.disable_quant()
+    quantizer.enable_calib()
+    # Existing scalar amax is insufficient: actual calibration replaces it with
+    # different rank-local maxima, instead of the unsharded maximum of eight.
+    quantizer(torch.tensor([1.0 if rank == 0 else 8.0]))
+    quantizer.load_calib_amax()
+    assert quantizer.amax.item() == (1.0 if rank == 0 else 8.0)
+    view = NativeWeightPartition((4, 16), 0, rank, 2)
+    with pytest.raises(ValueError, match=r"calibration.*disabled"):
+        validate_tp_output_quantizer(quantizer, view)
+    quantizer.disable_calib()
+    validate_tp_output_quantizer(quantizer, view)
