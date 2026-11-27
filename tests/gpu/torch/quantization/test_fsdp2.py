@@ -24,8 +24,9 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 from _test_utils.torch.distributed.utils import bounded_collectives, synchronize_state_dict
+from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard
-from torch.distributed.tensor import DTensor
+from torch.distributed.tensor import DTensor, Replicate, Shard, distribute_tensor
 from torch.utils.data import DataLoader
 
 import modelopt.torch.quantization as mtq
@@ -34,6 +35,7 @@ from modelopt.torch.opt.dynamic import _pytorch_managed
 from modelopt.torch.quantization.nn import StaticBlockScaleQuantizer, TensorQuantizer
 from modelopt.torch.quantization.utils import (
     enable_weight_access_and_writeback,
+    fsdp2_weight_access_and_writeback_context,
     persistent_materialization,
 )
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
@@ -346,7 +348,7 @@ def test_persistent_materialization(dist_workers):
     dist_workers.run(_test_persistent_materialization)
 
 
-def _test_writeback_root_unwrapped(rank, size):
+def _test_writeback_root_unwrapped(rank, size, reshard_after_forward):
     """Writeback works when only the decoder layers are FSDP2-wrapped and the root is unsharded.
 
     The root is only the search boundary: ``enable_weight_access_and_writeback(layer, model)``
@@ -363,12 +365,101 @@ def _test_writeback_root_unwrapped(rank, size):
 
     # Wrap ONLY the "decoder layer" -- intentionally NO ``fully_shard(model)`` on the root,
     # mirroring fsdp2_wrap. ``root_model`` (model) is therefore not an FSDPModule.
-    fully_shard(model[0])
+    mesh = (
+        init_device_mesh("cuda", (size // 4, 4), mesh_dim_names=("replicate", "shard"))
+        if reshard_after_forward is not None
+        else None
+    )
+    fully_shard(model[0], mesh=mesh, reshard_after_forward=reshard_after_forward)
     layer = model[0]
     inputs = torch.randn(2, dim).cuda(rank)
 
+    if reshard_after_forward is not None:
+        group = fully_shard.state(layer)._fsdp_param_group
+        for rollback in (False, True):
+            persistent = layer[0].weight
+            before = persistent.to_local().detach().clone()
+            with (
+                fsdp2_weight_access_and_writeback_context(layer[0], model, rollback=rollback),
+                torch.no_grad(),
+            ):
+                layer[0].weight.add_(1)
+            layer.reshard()
+            assert layer[0].weight is persistent
+            torch.testing.assert_close(persistent.to_local(), before + 1, rtol=0, atol=0)
+            model(inputs)
+            assert group.is_sharded_post_forward
+            temporary = layer[0].weight
+            temporary_before = temporary.to_local().detach().clone()
+            with (
+                pytest.raises(ValueError),
+                fsdp2_weight_access_and_writeback_context(layer[0], model, rollback=rollback),
+            ):
+                pytest.fail("A writable window exposed a temporary post-forward shard")
+            assert layer[0].weight is temporary
+            torch.testing.assert_close(temporary.to_local(), temporary_before, rtol=0, atol=0)
+            expected = persistent.detach().full_tensor()
+            with fsdp2_weight_access_and_writeback_context(
+                layer[0], model, writeback=False, rollback=rollback
+            ):
+                assert isinstance(layer[0].weight, nn.Parameter)
+                assert not isinstance(layer[0].weight, DTensor)
+                torch.testing.assert_close(layer[0].weight, expected, rtol=0, atol=0)
+            assert group.is_sharded
+            assert layer[0].weight is persistent
+            torch.testing.assert_close(persistent.to_local(), before + 1, rtol=0, atol=0)
+            retry_before = persistent.to_local().detach().clone()
+            with (
+                fsdp2_weight_access_and_writeback_context(layer[0], model, rollback=rollback),
+                torch.no_grad(),
+            ):
+                layer[0].weight.add_(1)
+            layer.reshard()
+            assert layer[0].weight is persistent
+            torch.testing.assert_close(persistent.to_local(), retry_before + 1, rtol=0, atol=0)
+
+        for native_full, rollback in ((True, False), (True, True), (False, False), (False, True)):
+            model(inputs)
+            if native_full:
+                layer.unshard()
+                if rank != 0:
+                    group._to_sharded_post_forward()
+            elif rank == 0:
+                layer.reshard()
+            originals = dict(layer[0].named_parameters())
+            before = {
+                name: (value.to_local() if isinstance(value, DTensor) else value).detach().clone()
+                for name, value in originals.items()
+            }
+            try:
+                with (
+                    pytest.raises((ValueError, RuntimeError)),
+                    fsdp2_weight_access_and_writeback_context(layer[0], model, rollback=rollback),
+                ):
+                    pytest.fail("An asymmetric temporary FSDP view was exposed")
+                for name, value in originals.items():
+                    assert layer[0].get_parameter(name) is value
+                    local = value.to_local() if isinstance(value, DTensor) else value
+                    torch.testing.assert_close(local, before[name], rtol=0, atol=0)
+            finally:
+                layer.reshard()
+
     # Warmup forward to trigger FSDP2's lazy_init (mirrors layerwise calibration).
     model(inputs)
+
+    layer.unshard()
+    native_weight = layer[0].weight
+    try:
+        with (
+            pytest.raises(ValueError),
+            fsdp2_weight_access_and_writeback_context(layer[0], model, rollback=True),
+        ):
+            pytest.fail("A writable window exposed a temporary native FSDP parameter")
+        assert layer[0].weight is native_weight
+        with fsdp2_weight_access_and_writeback_context(layer[0], model, writeback=False):
+            assert layer[0].weight is native_weight
+    finally:
+        layer.reshard()
 
     # This is the exact call save()/full_restore() make. Before the fix it tripped the
     # ``assert isinstance(root_model, FSDPModule)`` because the root is unwrapped — that's
@@ -383,9 +474,84 @@ def _test_writeback_root_unwrapped(rank, size):
     with enable_weight_access_and_writeback(layer[0], model):
         assert torch.allclose(layer[0].weight, ref_weight + 1.0)
 
+    if reshard_after_forward is None and size % 2 == 0:
+        world_mesh = init_device_mesh("cuda", (size // 2, 2), mesh_dim_names=("dp", "tp"))
+        tp_layer = nn.Linear(dim, dim).cuda(rank)
+        synchronize_state_dict(tp_layer)
+        for name, parameter in list(tp_layer.named_parameters()):
+            tp_layer.register_parameter(
+                name,
+                nn.Parameter(distribute_tensor(parameter.detach(), world_mesh["tp"], [Shard(0)])),
+            )
+        fully_shard(tp_layer, mesh=world_mesh["dp"])
+        persistent = tp_layer.weight
+        before = persistent.to_local().detach().clone()
+        tp_layer.unshard()
+        native = tp_layer.weight
+        full_before = native.to_local().detach().clone()
+        bias_before = tp_layer.bias.to_local().detach().clone()
+        try:
+            with fsdp2_weight_access_and_writeback_context(tp_layer, tp_layer), torch.no_grad():
+                assert tp_layer.weight is native and isinstance(native, DTensor)
+                tp_layer.weight.add_(1)
+            assert tp_layer.weight is native
+            torch.testing.assert_close(native.to_local(), full_before + 1, rtol=0, atol=0)
+            with (
+                pytest.raises(ValueError, match="reshard"),
+                fsdp2_weight_access_and_writeback_context(tp_layer, tp_layer, rollback=True),
+            ):
+                pytest.fail("Rollback exposed a native-full TP registration")
+        finally:
+            # The caller restores its full view before native reshard discards gathered storage.
+            with torch.no_grad():
+                native.to_local().copy_(full_before)
+            tp_layer.reshard()
+        assert tp_layer.weight is persistent
+        torch.testing.assert_close(persistent.to_local(), before, rtol=0, atol=0)
+        expected = nn.functional.linear(inputs, full_before, bias_before)
+        actual = tp_layer(distribute_tensor(inputs, world_mesh["tp"], [Replicate()]))
+        torch.testing.assert_close(actual.to_local(), expected)
 
-def test_writeback_root_unwrapped(dist_workers):
-    dist_workers.run(_test_writeback_root_unwrapped)
+    if reshard_after_forward is None and size >= 4 and size % 2 == 0:
+        hsdp = init_device_mesh("cuda", (2, size // 2), mesh_dim_names=("replicate", "shard"))
+        nested = nn.Sequential(nn.Linear(dim, dim), nn.Linear(dim, dim)).cuda(rank)
+        synchronize_state_dict(nested)
+        fully_shard(nested[0], mesh=hsdp)
+        fully_shard(nested, mesh=hsdp["replicate"])
+        originals = dict(nested.named_parameters())
+        before = {
+            name: parameter.to_local().detach().clone() for name, parameter in originals.items()
+        }
+        for rollback in (False, True):
+            with (
+                pytest.raises(ValueError, match="same sharding mesh"),
+                fsdp2_weight_access_and_writeback_context(nested, nested, rollback=rollback),
+            ):
+                pytest.fail("A parent window exposed a nested HSDP partial shard")
+            for owner in (nested[0], nested[1]):
+                with fsdp2_weight_access_and_writeback_context(owner, nested, rollback=rollback):
+                    assert owner.weight.shape == (dim, dim)
+        for name, parameter in originals.items():
+            assert nested.get_parameter(name) is parameter
+            torch.testing.assert_close(parameter.to_local(), before[name], rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("reshard_after_forward", [None, 2])
+def test_writeback_root_unwrapped(dist_workers, reshard_after_forward):
+    if reshard_after_forward is not None and (
+        dist_workers.world_size < 4 or dist_workers.world_size % 4
+    ):
+        pytest.skip("Integer HSDP resharding requires a multiple of four ranks")
+    timeout, grace = dist_workers.job_timeout, dist_workers.failure_grace
+    try:
+        if reshard_after_forward is not None:
+            dist_workers.job_timeout = 60
+            dist_workers.failure_grace = 2
+        dist_workers.run(
+            partial(_test_writeback_root_unwrapped, reshard_after_forward=reshard_after_forward)
+        )
+    finally:
+        dist_workers.job_timeout, dist_workers.failure_grace = timeout, grace
 
 
 def _test_writeback_cpu_offload(rank, size):

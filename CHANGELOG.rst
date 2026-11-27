@@ -40,6 +40,8 @@ Changelog
 
 **Backward Breaking Changes**
 
+- Writable FSDP2 weight-access windows now skip writeback when any participating rank's body fails, and ranks whose bodies succeeded also raise ``RuntimeError``. Callers that catch a body exception must no longer rely on gathered edits being published; restore any aliased or previously published values from caller-owned backups. Temporary gathered parameters now preserve the original parameter's ``requires_grad`` flag instead of always enabling gradients.
+
 **Deprecations**
 
 **Bug Fixes**

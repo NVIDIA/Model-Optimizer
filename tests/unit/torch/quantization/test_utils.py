@@ -14,13 +14,14 @@
 # limitations under the License.
 
 import weakref
+from contextlib import ExitStack, nullcontext
 from unittest import mock
 
 import pytest
 import torch
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import fully_shard
-from torch.distributed.tensor import DTensor, Shard, distribute_tensor
+from torch.distributed.tensor import DTensor, Replicate, Shard, distribute_tensor
 
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
@@ -414,53 +415,275 @@ def test_disable_fsdp_unshard_reshard_shared_group_and_nesting(cpu_dist_workers)
     cpu_dist_workers.run(_shared_group_override_restores_prior_attributes)
 
 
-def _fsdp2_owns_its_params_in_every_state_job(rank, size):
-    mesh = init_device_mesh("cpu", (size,))
+def _fsdp2_owns_its_params_in_every_state_job(rank, size, asymmetric, native_tp=False):
+    world_mesh = (
+        init_device_mesh("cpu", (size, 1), mesh_dim_names=("dp", "tp")) if native_tp else None
+    )
+    mesh = world_mesh["dp"] if native_tp else init_device_mesh("cpu", (size,))
     model = torch.nn.Module()
     model.dense = torch.nn.Linear(8, 8)
     model.layer = torch.nn.Linear(8, 8)
+    model.shared = torch.nn.Module()
+    model.shared.weight = model.dense.weight
+    model.ignored = torch.nn.Linear(8, 8)
+    if native_tp:
+        for name, parameter in list(model.layer.named_parameters()):
+            model.layer.register_parameter(
+                name,
+                torch.nn.Parameter(
+                    distribute_tensor(parameter.detach(), world_mesh["tp"], [Shard(0)])
+                ),
+            )
     fully_shard(model.layer, mesh=mesh)  # a unit of its own, inside the model's
-    fully_shard(model, mesh=mesh)
+    fully_shard(model, mesh=mesh, ignored_params=set(model.ignored.parameters()))
     layer = model.layer
     sharded = layer.weight
     owned = _fsdp2_owned_params(model)
+    dense_weight = model.dense.weight
+    assert model.shared.weight is dense_weight
     assert _fsdp2_owns(owned, model.dense.weight) and _fsdp2_owns(owned, sharded)
     # An id kept for a parameter does not make another object at that address FSDP2's.
     assert not _fsdp2_owns({id(sharded): weakref.ref(model.dense.weight)}, sharded)
+    shard_before = sharded.to_local().detach().clone()
+    _fsdp2_owned_params(layer)
     layer.unshard()
     unsharded = layer.weight
+    full_before = unsharded.detach().clone()
+    bias_before = layer.bias.detach().clone()
+    if native_tp:
+        try:
+            assert isinstance(unsharded, DTensor)
+            assert torch.distributed.get_process_group_ranks(unsharded.device_mesh.get_group()) != (
+                torch.distributed.get_process_group_ranks(mesh.get_group())
+            )
+            with ExitStack() as window:
+                with pytest.warns(
+                    RuntimeWarning, match="native-full.*weight.*caller.*publish.*reshard"
+                ) as notices:
+                    window.enter_context(fsdp2_weight_access_and_writeback_context(layer, model))
+                assert len(notices) == 1
+                with torch.no_grad():
+                    assert layer.weight is unsharded
+                    layer.weight.add_(1)
+            assert layer.weight is unsharded
+            torch.testing.assert_close(layer.weight, full_before + 1, rtol=0, atol=0)
+            with (
+                pytest.raises(ValueError, match="reshard"),
+                fsdp2_weight_access_and_writeback_context(layer, model, rollback=True),
+            ):
+                pytest.fail("Rollback exposed a native-full TP registration")
+        finally:
+            # Native full views belong to their outer caller; reshard does not publish edits.
+            with torch.no_grad():
+                unsharded.copy_(full_before)
+            layer.reshard()
+        assert layer.weight is sharded
+        torch.testing.assert_close(sharded.to_local(), shard_before, rtol=0, atol=0)
+        inputs = torch.ones(2, 8)
+        expected = torch.nn.functional.linear(
+            inputs, full_before.to_local(), bias_before.to_local()
+        )
+        actual = layer(distribute_tensor(inputs, world_mesh["tp"], [Replicate()]))
+        torch.testing.assert_close(actual.to_local(), expected)
+        return
     try:
         assert unsharded is not sharded, "FSDP2 registered the same parameter when unsharded"
+        if not asymmetric:
+            # Discover the native registration once, then keep the warm ownership cache.
+            with (
+                mock.patch.object(
+                    core_utils, "_fsdp2_param_groups", wraps=_fsdp2_param_groups
+                ) as scans,
+                mock.patch.object(
+                    torch.distributed, "all_reduce", wraps=torch.distributed.all_reduce
+                ) as collectives,
+            ):
+                for _ in range(2):
+                    with fsdp2_weight_access_and_writeback_context(layer, model):
+                        assert layer.weight is unsharded
+            assert scans.call_count == 1
+            assert collectives.call_count == 6
         assert _fsdp2_owns(_fsdp2_owned_params(model, refresh=True), unsharded)
+        if asymmetric and rank != 0:
+            layer.reshard()
+        registered = dict(layer.named_parameters())
+        reached = False
+        with (
+            pytest.raises((ValueError, RuntimeError)),
+            fsdp2_weight_access_and_writeback_context(layer, model, rollback=True),
+        ):
+            reached = True
+        assert not reached
+        assert all(layer.get_parameter(name) is parameter for name, parameter in registered.items())
+        torch.testing.assert_close(sharded.to_local(), shard_before, rtol=0, atol=0)
+        if not asymmetric:
+            with fsdp2_weight_access_and_writeback_context(layer, model, writeback=False):
+                assert layer.weight is unsharded
     finally:
         layer.reshard()
+    assert layer.weight is sharded
+    torch.testing.assert_close(sharded.to_local(), shard_before, rtol=0, atol=0)
+    with fsdp2_weight_access_and_writeback_context(layer, model, rollback=True), torch.no_grad():
+        layer.weight.add_(1)
+    layer.unshard()
+    try:
+        torch.testing.assert_close(layer.weight, full_before + 1, rtol=0, atol=0)
+        inputs = torch.ones(2, 8)
+        expected = torch.nn.functional.linear(inputs, full_before + 1, bias_before)
+        torch.testing.assert_close(layer(inputs), expected)
+    finally:
+        layer.reshard()
+    torch.testing.assert_close(sharded.to_local(), shard_before + 1, rtol=0, atol=0)
+    with fsdp2_weight_access_and_writeback_context(model.dense, model):
+        assert not isinstance(model.dense.weight, DTensor)
     # The set is kept for the unit: opening the window again costs the module's parameters only.
     with mock.patch.object(core_utils, "_fsdp2_param_groups", wraps=_fsdp2_param_groups) as scans:
         for _ in range(3):
             with fsdp2_weight_access_and_writeback_context(model.dense, model):
                 pass
     assert scans.call_count == 0
+    model.unshard()
+    try:
+        ignored = model.ignored.weight
+        with fsdp2_weight_access_and_writeback_context(model.ignored, model, rollback=True):
+            assert model.ignored.weight is ignored
+    finally:
+        model.reshard()
 
 
-def test_fsdp2_owns_its_parameters_in_every_shard_state(cpu_dist_workers):
+@pytest.mark.parametrize(
+    ("asymmetric", "native_tp"),
+    [
+        (False, False),
+        (True, False),
+        (False, True),
+    ],
+)
+def test_fsdp2_owns_its_parameters_in_every_shard_state(cpu_dist_workers, asymmetric, native_tp):
     """FSDP2 registers another parameter object once a unit is unsharded (or resharded after the
     forward, under HSDP), and the weight-access window gathers by ownership: each counts as FSDP2's,
     or a weight it does own would be left sharded in the window. So do the parameters of a unit
     nested in it. The window keeps the set per unit rather than scanning it on every entry."""
-    cpu_dist_workers.run(_fsdp2_owns_its_params_in_every_state_job)
+    if asymmetric:
+        # Import and initialize on the workers before applying the collective-hang bound.
+        cpu_dist_workers.run(_fsdp2_owns_its_params_in_every_state_job, False)
+    timeout, grace = cpu_dist_workers.job_timeout, cpu_dist_workers.failure_grace
+    try:
+        if asymmetric:
+            cpu_dist_workers.job_timeout = 15
+            cpu_dist_workers.failure_grace = 2
+        cpu_dist_workers.run(_fsdp2_owns_its_params_in_every_state_job, asymmetric, native_tp)
+    finally:
+        cpu_dist_workers.job_timeout, cpu_dist_workers.failure_grace = timeout, grace
 
 
-def _window_leaves_what_fsdp2_does_not_own_job(rank, size):
+@mock.patch.object(torch.cuda, "is_available", return_value=False)
+def _window_leaves_what_fsdp2_does_not_own_job(rank, size, failure_stage, _cuda_available):
     ep_mesh = init_device_mesh("cpu", (size,), mesh_dim_names=("ep",))
-    dp_mesh = init_device_mesh("cpu", (size,), mesh_dim_names=("dp",))
+    dp_mesh = (
+        init_device_mesh("cpu", (size, 1), mesh_dim_names=("replicate", "dp"))["dp"]
+        if failure_stage
+        in ("singleton_body", "singleton_default", "nested_same", "nested_disjoint")
+        else init_device_mesh("cpu", (size,), mesh_dim_names=("dp",))
+    )
     layer = torch.nn.Module()
     layer.dense = torch.nn.Linear(8, 8)
+    if failure_stage == "plain_ignored":
+        layer.dense.adapter = torch.nn.Parameter(torch.randn(8))
+    if failure_stage.startswith("nested_"):
+        layer.other = torch.nn.Linear(8, 8)
     layer.experts = torch.nn.Module()
     for name in ("gate_up_proj", "down_proj"):
         weight = distribute_tensor(torch.randn(2 * size, 8), ep_mesh, [Shard(0)])
         layer.experts.register_parameter(name, torch.nn.Parameter(weight))
-    fully_shard(layer, mesh=dp_mesh, ignored_params=set(layer.experts.parameters()))
-    with fsdp2_weight_access_and_writeback_context(layer, layer):
+    layer.requires_grad_(False)
+    ignored = set(layer.experts.parameters())
+    if failure_stage == "plain_ignored":
+        ignored.add(layer.dense.adapter)
+    fully_shard(layer, mesh=dp_mesh, ignored_params=ignored)
+    if failure_stage == "plain_ignored":
+        _fsdp2_owned_params(layer)
+        adapter = layer.dense.adapter
+        before = adapter.detach().clone()
+        with mock.patch.object(
+            core_utils, "_fsdp2_param_groups", wraps=_fsdp2_param_groups
+        ) as scans:
+            for _ in range(3):
+                with fsdp2_weight_access_and_writeback_context(layer.dense, layer):
+                    assert layer.dense.adapter is adapter
+                    assert not isinstance(layer.dense.weight, DTensor)
+        assert scans.call_count == 0
+        torch.testing.assert_close(adapter, before, rtol=0, atol=0)
+        return
+    if failure_stage.startswith("nested_"):
+        parameters = dict(layer.named_parameters())
+        before = {name: value.to_local().detach().clone() for name, value in parameters.items()}
+        same = failure_stage == "nested_same"
+        try:
+            with fsdp2_weight_access_and_writeback_context(layer.dense, layer), torch.no_grad():
+                outer_weight = layer.dense.weight
+                if same:
+                    entered = False
+                    with (
+                        pytest.raises(ValueError, match="overlap"),
+                        fsdp2_weight_access_and_writeback_context(
+                            layer.dense, layer, rollback=True
+                        ),
+                    ):
+                        entered = True
+                        layer.dense.weight.add_(1)
+                        raise RuntimeError("nested body modified the outer alias")
+                    assert not entered
+                else:
+                    with fsdp2_weight_access_and_writeback_context(
+                        layer.other, layer, rollback=True
+                    ):
+                        layer.other.weight.add_(2)
+                assert layer.dense.weight is outer_weight
+        finally:
+            for name, parameter in parameters.items():
+                assert layer.get_parameter(name) is parameter
+                delta = 2 if not same and name == "other.weight" else 0
+                torch.testing.assert_close(
+                    parameter.to_local(), before[name] + delta, rtol=0, atol=0
+                )
+        with fsdp2_weight_access_and_writeback_context(layer.dense, layer, rollback=True):
+            pass
+        return
+    if failure_stage == "ignored_only":
+        originals = dict(layer.experts.named_parameters())
+        before = {name: parameter.to_local().clone() for name, parameter in originals.items()}
+        with (
+            mock.patch.object(
+                torch.distributed, "all_reduce", wraps=torch.distributed.all_reduce
+            ) as collectives,
+            fsdp2_weight_access_and_writeback_context(layer.experts, layer),
+        ):
+            assert all(
+                layer.experts.get_parameter(name) is value for name, value in originals.items()
+            )
+        assert collectives.call_count == 0
+        for name, parameter in originals.items():
+            assert layer.experts.get_parameter(name) is parameter
+            torch.testing.assert_close(parameter.to_local(), before[name], rtol=0, atol=0)
+        return
+    dense_storage = layer.dense.weight.to_local().untyped_storage().data_ptr()
+    group_type = type(fully_shard.state(layer)._fsdp_param_group)
+    with (
+        mock.patch.object(
+            group_type,
+            "is_unsharded",
+            new_callable=mock.PropertyMock,
+            side_effect=AttributeError("Opt-in native state is unavailable"),
+        )
+        if failure_stage == "singleton_default"
+        else nullcontext(),
+        fsdp2_weight_access_and_writeback_context(layer, layer),
+    ):
+        if failure_stage == "singleton_default":
+            assert layer.dense.weight.untyped_storage().data_ptr() == dense_storage
+        assert not layer.dense.weight.requires_grad
+        assert not layer.dense.bias.requires_grad
         assert not isinstance(layer.dense.weight, DTensor)  # FSDP2's own: gathered
         for weight in layer.experts.parameters():
             assert isinstance(weight, DTensor)
@@ -474,10 +697,285 @@ def _window_leaves_what_fsdp2_does_not_own_job(rank, size):
     assert scans.call_count == 1
     assert all(weight.to_local().shape[0] == 2 for weight in layer.experts.parameters())
 
+    if failure_stage in ("none", "singleton_default"):
+        return
+    originals = dict(layer.named_parameters())
+    before = {name: parameter.to_local().detach().clone() for name, parameter in originals.items()}
+    if failure_stage in (
+        "rank0_discovery",
+        "rank0_first_copy_default",
+        "rank0_final_copy_default",
+        "rank0_final_copy",
+        "rank0_restore",
+        "rank0_last_prepare_default",
+    ):
+        failure = RuntimeError("rank-local FSDP discovery/publication failure")
+        discover = core_utils._fsdp2_owned_params
+        set_parameter = core_utils._set_parameter
+        copy_tensor = torch.Tensor.copy_
+        target_name = "dense.weight" if "first_copy" in failure_stage else "dense.bias"
+        target = originals[target_name].to_local()
+        target_pointer = target.untyped_storage().data_ptr()
+        armed = True
 
-def test_fsdp2_weight_access_leaves_parameters_fsdp2_does_not_own(cpu_dist_workers):
+        def discover_once(*args, **kwargs):
+            nonlocal armed
+            if failure_stage == "rank0_discovery" and rank == 0 and armed:
+                armed = False
+                raise failure
+            return discover(*args, **kwargs)
+
+        def copy_once(tensor, source, *args, **kwargs):
+            nonlocal armed
+            if (
+                failure_stage
+                not in ("rank0_discovery", "rank0_restore", "rank0_last_prepare_default")
+                and rank == 0
+                and armed
+                and tensor.untyped_storage().data_ptr() == target_pointer
+            ):
+                armed = False
+                raise failure
+            return copy_tensor(tensor, source, *args, **kwargs)
+
+        def restore_once(owner, name, value):
+            nonlocal armed
+            if (
+                failure_stage in ("rank0_restore", "rank0_last_prepare_default")
+                and rank == 0
+                and armed
+                and name == target_name
+                and (value is originals[name]) == (failure_stage == "rank0_restore")
+            ):
+                armed = False
+                raise failure
+            return set_parameter(owner, name, value)
+
+        error = None
+        entered = False
+        try:
+            with (
+                mock.patch.object(core_utils, "_fsdp2_owned_params", discover_once),
+                mock.patch.object(torch.Tensor, "copy_", copy_once),
+                mock.patch.object(core_utils, "_set_parameter", restore_once),
+                fsdp2_weight_access_and_writeback_context(
+                    layer, layer, rollback=failure_stage == "rank0_final_copy"
+                ),
+                torch.no_grad(),
+            ):
+                entered = True
+                if failure_stage == "rank0_last_prepare_default":
+                    torch.distributed.barrier()
+                layer.dense.weight.add_(1)
+                layer.dense.bias.add_(2)
+        except RuntimeError as exc:
+            error = exc
+        assert error is not None, "A rank-local failure must fail every participating rank"
+        if failure_stage == "rank0_last_prepare_default":
+            assert not entered, "Final preparation must fail every rank before the body"
+        if rank == 0:
+            assert error is failure
+        if failure_stage == "rank0_restore" and rank == 0:
+            assert layer.get_parameter(target_name) is not originals[target_name]
+            # The caller repairs a reported incomplete restoration before opening another window.
+            set_parameter(layer, target_name, originals[target_name])
+        assert all(layer.get_parameter(name) is parameter for name, parameter in originals.items())
+        for name, parameter in originals.items():
+            delta = 0
+            if failure_stage not in ("rank0_discovery", "rank0_last_prepare_default"):
+                if name == "dense.weight":
+                    delta = 0 if "first_copy" in failure_stage and rank == 0 else 1
+                elif name == "dense.bias" and (
+                    ("final_copy" in failure_stage and rank != 0)
+                    or failure_stage == "rank0_restore"
+                ):
+                    delta = 2
+            torch.testing.assert_close(parameter.to_local(), before[name] + delta, rtol=0, atol=0)
+        # Do not let a retry accidentally match the peer's stranded entry collective.
+        if failure_stage == "rank0_last_prepare_default":
+            torch.distributed.barrier()
+        if failure_stage != "rank0_discovery":
+            with fsdp2_weight_access_and_writeback_context(layer, layer):
+                assert not isinstance(layer.dense.weight, DTensor)
+        return
+    failure = RuntimeError("FSDP weight access " + failure_stage)
+    body_failure = RuntimeError("original context body failure")
+    redistribute = DTensor.redistribute
+    armed = True
+
+    def fail_once(tensor, *args, **kwargs):
+        nonlocal armed
+        if failure_stage == "entry" and tensor is originals["dense.bias"] and armed:
+            armed = False
+            with torch.no_grad():
+                layer.dense.weight.add_(7)
+            raise failure
+        result = redistribute(tensor, *args, **kwargs)
+        if (
+            failure_stage == "rank0_entry"
+            and rank == 0
+            and tensor is originals["dense.weight"]
+            and armed
+        ):
+            armed = False
+            raise failure
+        if (
+            failure_stage
+            not in ("entry", "rank0_body", "rank0_body_default", "singleton_body", "rank0_entry")
+            and tensor.placements[0].is_replicate()
+            and armed
+        ):
+            # Both ranks finish this collective before the injected failure.
+            armed = False
+            raise failure
+        return result
+
+    error = None
+    try:
+        with (
+            mock.patch.object(DTensor, "redistribute", fail_once),
+            fsdp2_weight_access_and_writeback_context(
+                layer, layer, rollback=failure_stage != "rank0_body_default"
+            ),
+            torch.no_grad(),
+        ):
+            layer.dense.weight.add_(1)
+            layer.dense.bias.add_(2)
+            if failure_stage in ("body_writeback", "singleton_body") or (
+                failure_stage in ("rank0_body", "rank0_body_default") and rank == 0
+            ):
+                raise body_failure
+    except RuntimeError as exc:
+        error = exc
+    assert all(layer.get_parameter(name) is parameter for name, parameter in originals.items())
+    if failure_stage in (
+        "entry",
+        "body_writeback",
+        "singleton_body",
+        "rank0_entry",
+        "rank0_body",
+        "rank0_body_default",
+    ):
+        for name, parameter in originals.items():
+            torch.testing.assert_close(parameter.to_local(), before[name], rtol=0, atol=0)
+    assert error is not None, "A peer's body failure must fail the context on every rank"
+    if not (failure_stage in ("rank0_entry", "rank0_body", "rank0_body_default") and rank != 0):
+        assert error is (
+            body_failure
+            if failure_stage
+            in ("body_writeback", "rank0_body", "rank0_body_default", "singleton_body")
+            else failure
+        )
+    if failure_stage == "writeback":
+        # Transactional staging coordination stops later owners from publishing after failure.
+        torch.testing.assert_close(
+            originals["dense.weight"].to_local(), before["dense.weight"], rtol=0, atol=0
+        )
+        torch.testing.assert_close(
+            originals["dense.bias"].to_local(), before["dense.bias"], rtol=0, atol=0
+        )
+    with fsdp2_weight_access_and_writeback_context(layer, layer):
+        assert not isinstance(layer.dense.weight, DTensor)
+
+
+@pytest.mark.parametrize(
+    "failure_stage",
+    [
+        "none",
+        "ignored_only",
+        "plain_ignored",
+        "entry",
+        "writeback",
+        "body_writeback",
+        "rank0_body",
+        "rank0_body_default",
+        "singleton_body",
+        "singleton_default",
+        "nested_same",
+        "nested_disjoint",
+        "rank0_entry",
+        "rank0_discovery",
+        "rank0_first_copy_default",
+        "rank0_final_copy_default",
+        "rank0_final_copy",
+        "rank0_restore",
+        "rank0_last_prepare_default",
+    ],
+)
+def test_fsdp2_weight_access_leaves_parameters_fsdp2_does_not_own(cpu_dist_workers, failure_stage):
     """An expert-parallel weight is a DTensor sharded over the experts that fully_shard was told to
     ignore. The weight-access window gathers FSDP2's parameters only, so it stays sharded: gathering
     it would hand every rank every expert. Each such weight misses the window's kept set, which it
     scans again once, not once per weight."""
-    cpu_dist_workers.run(_window_leaves_what_fsdp2_does_not_own_job)
+    bounded = failure_stage in (
+        "rank0_entry",
+        "rank0_body_default",
+        "ignored_only",
+        "rank0_discovery",
+        "rank0_first_copy_default",
+        "rank0_final_copy_default",
+        "rank0_final_copy",
+        "rank0_restore",
+        "rank0_last_prepare_default",
+    )
+    if bounded:
+        # Warm imports before bounding the injected collective-order failure.
+        cpu_dist_workers.run(_window_leaves_what_fsdp2_does_not_own_job, "none")
+    timeout, grace = cpu_dist_workers.job_timeout, cpu_dist_workers.failure_grace
+    try:
+        if bounded:
+            cpu_dist_workers.job_timeout = 15
+            cpu_dist_workers.failure_grace = 2
+        cpu_dist_workers.run(_window_leaves_what_fsdp2_does_not_own_job, failure_stage)
+    finally:
+        cpu_dist_workers.job_timeout, cpu_dist_workers.failure_grace = timeout, grace
+
+
+def _nested_fsdp_mesh_mismatch_job(rank, size, rollback, hsdp_prefix):
+    if hsdp_prefix:
+        child_mesh = init_device_mesh("cpu", (1, size), mesh_dim_names=("replicate", "dp"))
+        parent_mesh = child_mesh["replicate"]
+    else:
+        child_mesh = init_device_mesh("cpu", (size,), mesh_dim_names=("dp",))
+        parent_mesh = init_device_mesh("cpu", (size, 1), mesh_dim_names=("replicate", "dp"))["dp"]
+    model = torch.nn.Sequential(torch.nn.Linear(8, 8), torch.nn.Linear(8, 8))
+    fully_shard(model[0], mesh=child_mesh)
+    fully_shard(model, mesh=parent_mesh)
+    # Model a cache built before FSDP introduced the child's current parameter objects.
+    cached = _fsdp2_owned_params(model)
+    for parameter in model[0].parameters():
+        cached.pop(id(parameter), None)
+    originals = dict(model.named_parameters())
+    before = {name: value.to_local().clone() for name, value in originals.items()}
+    with (
+        mock.patch.object(
+            DTensor, "redistribute", autospec=True, side_effect=DTensor.redistribute
+        ) as redistributes,
+        pytest.raises(ValueError, match="same sharding mesh"),
+        fsdp2_weight_access_and_writeback_context(model, model, rollback=rollback),
+    ):
+        pytest.fail(f"A writable window exposed nested weight shape {tuple(model[0].weight.shape)}")
+    assert redistributes.call_count == 0
+    for name, value in originals.items():
+        assert model.get_parameter(name) is value
+        torch.testing.assert_close(value.to_local(), before[name], rtol=0, atol=0)
+    # Accessing each unit on its actual mesh remains supported.
+    for owner in (model[0], model[1]):
+        with fsdp2_weight_access_and_writeback_context(owner, model, rollback=rollback):
+            assert not isinstance(owner.weight, DTensor)
+
+
+@pytest.mark.parametrize("rollback", [False, True])
+@pytest.mark.parametrize("hsdp_prefix", [False, True])
+def test_writable_nested_fsdp_requires_same_sharding_mesh(cpu_dist_workers, rollback, hsdp_prefix):
+    if hsdp_prefix:
+        # Warm worker imports before bounding any mismatched-collective regression.
+        cpu_dist_workers.run(_nested_fsdp_mesh_mismatch_job, rollback, False)
+    timeout, grace = cpu_dist_workers.job_timeout, cpu_dist_workers.failure_grace
+    try:
+        if hsdp_prefix:
+            cpu_dist_workers.job_timeout = 15
+            cpu_dist_workers.failure_grace = 2
+        cpu_dist_workers.run(_nested_fsdp_mesh_mismatch_job, rollback, hsdp_prefix)
+    finally:
+        cpu_dist_workers.job_timeout, cpu_dist_workers.failure_grace = timeout, grace
