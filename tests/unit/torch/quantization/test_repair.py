@@ -18,6 +18,7 @@
 
 import copy
 
+import numpy as np
 import pytest
 import torch
 from torch import nn
@@ -74,12 +75,28 @@ def test_iq_plan_protects_frozen_owners_and_allows_shared_nonwrite_parameters(al
         ("resident_parameter", True),
         ("sparse_buffer", False),
         ("independent_sparse_buffer", False),
+        ("numpy_parameter", False),
+        ("numpy_buffer", False),
+        ("numpy_disjoint", False),
     ],
 )
 def test_iq_plan_refuses_shared_weights_outside_selected_boundaries(alias, offload):
     model = nn.ModuleList([nn.Linear(256, 2, bias=False) for _ in range(2)])
     mtq.quantize(model, {**_config([_iq("0.weight_quantizer", "iq1_s")]), "algorithm": None})
-    if alias in ("sparse_buffer", "independent_sparse_buffer"):
+    if alias.startswith("numpy_"):
+        array = np.arange(1024, dtype=np.float32)
+        model[0].weight = nn.Parameter(torch.from_numpy(array[:512]).reshape(2, 256))
+        offset = 512 if alias == "numpy_disjoint" else 256
+        other = torch.from_numpy(array[offset : offset + 512]).reshape(2, 256)
+        assert other.untyped_storage().data_ptr() != model[0].weight.untyped_storage().data_ptr()
+        if alias == "numpy_buffer":
+            model[1].register_buffer("frozen_weight", other)
+        else:
+            model[1].weight = nn.Parameter(other)
+        if alias == "numpy_disjoint":
+            plan_iq_repair([model[0]], root_model=model)
+            return
+    elif alias in ("sparse_buffer", "independent_sparse_buffer"):
         values = model[0].weight.detach().view(-1)
         if alias == "independent_sparse_buffer":
             values = values.clone()

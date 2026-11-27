@@ -102,14 +102,14 @@ def _storage_span(tensor):
         tensor = tensor.to_local()
     if tensor.is_meta or not tensor.numel():
         return None
-    start = tensor.storage_offset() * tensor.element_size()
+    start = tensor.untyped_storage().data_ptr() + tensor.storage_offset() * tensor.element_size()
     size = (
         1
         + sum(
             (n - 1) * abs(stride) for n, stride in zip(tensor.shape, tensor.stride(), strict=True)
         )
     ) * tensor.element_size()
-    return (tensor.device, tensor.untyped_storage().data_ptr()), start, start + size
+    return tensor.device, start, start + size
 
 
 def _storage_spans(tensor):
@@ -144,20 +144,18 @@ def _validate_ownership(units, plans):
     for bindings in plans:
         for binding in bindings:
             selected.setdefault(binding.module, set()).add(id(binding.quantizer))
-    seen_tensors = {}
+    seen_tensors, seen_slots = {}, {}
     quantizers = {identity for identities in selected.values() for identity in identities}
     seen_quantizers = set()
     storage_ranges = {}
     seen_modules = set()
     for unit in units:
-        backings = {}
-        if any(t.is_meta for t in chain(unit.parameters(), unit.buffers())) and any(
-            hasattr(module, "_hf_hook") for module in unit.modules()
-        ):
+        backings, slots = {}, {}
+        if any(hasattr(module, "_hf_hook") for module in unit.modules()):
             # Accelerate is optional; its shared CPU backings outlive meta placeholders.
             from .plugins.accelerate import _offloaded_tensor_backings
 
-            backings = _offloaded_tensor_backings(unit)
+            backings, slots = _offloaded_tensor_backings(unit)
         for _, module in unit.named_modules(remove_duplicate=False):
             seen_modules.add(module)
             if id(module) in quantizers:
@@ -172,15 +170,37 @@ def _validate_ownership(units, plans):
             for name, tensor in chain(module._parameters.items(), module._buffers.items()):
                 if tensor is None:
                     continue
-                if tensor.is_meta:
-                    tensor = backings.get((module, name), tensor)
+                owner = (module, name)
                 write = name in module._parameters and name in owners
-                identity = id(tensor)
-                if identity in seen_tensors and (write or seen_tensors[identity]):
-                    raise ValueError("Selected Bypass boundaries share physical weight ownership")
-                seen_tensors[identity] = write
-                for key, start, stop in _storage_spans(tensor):
-                    storage_ranges.setdefault(key, []).append((start, stop, write))
+                for slot in slots.get(owner, ()):
+                    previous = seen_slots.get(slot)
+                    if previous is not None and previous[0] != owner and (write or previous[1]):
+                        raise ValueError("Selected Bypass owners share an offload publication slot")
+                    seen_slots[slot] = (owner, write or (previous is not None and previous[1]))
+                # A resident execution value and its retained backing are one logical owner.
+                # Inspect both, merging their intervals before comparing with other owners.
+                representations = {
+                    id(value): value for value in (tensor, backings.get(owner)) if value is not None
+                }
+                local_ranges = {}
+                for identity, value in representations.items():
+                    if identity in seen_tensors and (write or seen_tensors[identity]):
+                        raise ValueError(
+                            "Selected Bypass boundaries share physical weight ownership"
+                        )
+                    seen_tensors[identity] = write
+                    for key, start, stop in _storage_spans(value):
+                        local_ranges.setdefault(key, []).append((start, stop))
+                for key, ranges in local_ranges.items():
+                    merged = []
+                    for start, stop in sorted(ranges):
+                        if merged and start <= merged[-1][1]:
+                            merged[-1] = (merged[-1][0], max(stop, merged[-1][1]))
+                        else:
+                            merged.append((start, stop))
+                    storage_ranges.setdefault(key, []).extend(
+                        (start, stop, write) for start, stop in merged
+                    )
     if selected.keys() - seen_modules:
         raise ValueError("The ownership root does not contain all selected Bypass modules")
     _validate_storage_ranges(storage_ranges)

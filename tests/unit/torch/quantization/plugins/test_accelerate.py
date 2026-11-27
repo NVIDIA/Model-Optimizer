@@ -1292,6 +1292,12 @@ def test_weight_access_rollback_checks_backing_aliases_before_body(alias_kind):
         "custom_dict",
         "conflicting_hooks",
         "same_backing_hooks",
+        "resident_shared_slot",
+        "resident_shared_slot_missing",
+        "resident_shared_backing",
+        "resident_independent",
+        "active_shared_slot",
+        "active_independent",
     ],
 )
 def test_iq_plan_checks_resident_offload_mapping_backings(mapping_mode, monkeypatch):
@@ -1354,8 +1360,15 @@ def test_iq_plan_checks_resident_offload_mapping_backings(mapping_mode, monkeypa
                 weights_map=parent_weights,
             ),
         )
-    for owner, weights in zip(model, mappings, strict=True):
-        if mapping_mode == "shared_userdict":
+    resident_values = [owner.weight.detach().clone() for owner in model]
+    if mapping_mode in (
+        "resident_shared_slot",
+        "resident_shared_slot_missing",
+        "active_shared_slot",
+    ):
+        mappings[1] = mappings[0]
+    for index, (owner, weights) in enumerate(zip(model, mappings, strict=True)):
+        if mapping_mode in ("shared_userdict", "resident_shared_backing"):
             weights["weight"] = shared
         if mapping_mode in ("custom_userdict", "custom_dict"):
             mapping_class = (
@@ -1372,9 +1385,24 @@ def test_iq_plan_checks_resident_offload_mapping_backings(mapping_mode, monkeypa
                 weights_map=LazyWeights() if mapping_mode == "unknown" else weights,
             ),
         )
-    if mapping_mode in ("independent_userdict", "same_backing_hooks"):
-        plan_iq_repair([model[0]], root_model=model)
-    else:
-        with pytest.raises(ValueError):
+        if mapping_mode.startswith("resident_"):
+            owner.weight = nn.Parameter(resident_values[index])
+    if mapping_mode == "resident_shared_slot_missing":
+        del mappings[0]["weight"]
+    active = mapping_mode.startswith("active_")
+    context = enable_weight_access_and_writeback(model, model) if active else nullcontext()
+    with context:
+        if active:
+            assert all(not owner._hf_hook.offload for owner in model)
+            for owner, value in zip(model, resident_values, strict=True):
+                owner.weight = nn.Parameter(value)
+        if mapping_mode in (
+            "independent_userdict",
+            "same_backing_hooks",
+            "resident_independent",
+            "active_independent",
+        ):
             plan_iq_repair([model[0]], root_model=model)
-
+        else:
+            with pytest.raises(ValueError):
+                plan_iq_repair([model[0]], root_model=model)

@@ -41,12 +41,16 @@ __all__ = ["init_quantized_weights"]
 _ROLLBACK_RECEIPTS = WeakKeyDictionary()
 
 
-def _get_offload_hook(hook):
-    if isinstance(hook, AlignDevicesHook) and hook.offload and hook.weights_map is not None:
+def _get_offload_hook(hook, *, include_suspended=False):
+    if (
+        isinstance(hook, AlignDevicesHook)
+        and (hook.offload or (include_suspended and hasattr(hook, "original_devices")))
+        and hook.weights_map is not None
+    ):
         return hook
     elif isinstance(hook, SequentialHook):
         for h in hook.hooks:
-            align_hook = _get_offload_hook(h)
+            align_hook = _get_offload_hook(h, include_suspended=include_suspended)
             if align_hook is not None:
                 return align_hook
     return None
@@ -83,10 +87,10 @@ def _managed_tensors(module, include_buffers=True, recurse=False):
 
 
 def _offloaded_tensor_backings(module):
-    """Return resident CPU parameter and buffer backings without paging disk weights."""
-    backings = {}
+    """Inspect CPU backings and publication slots for meta or resident registrations."""
+    backings, slots = {}, {}
     for owner in module.modules():
-        hook = _get_offload_hook(getattr(owner, "_hf_hook", None))
+        hook = _get_offload_hook(getattr(owner, "_hf_hook", None), include_suspended=True)
         if hook is None:
             continue
         weights_map, prefix = _weights_map_and_prefix(hook)
@@ -98,17 +102,19 @@ def _offloaded_tensor_backings(module):
             for name, tensor in chain(
                 child._parameters.items(), child._buffers.items() if hook.offload_buffers else ()
             ):
-                if tensor is None or not tensor.is_meta:
+                if tensor is None or name in child._non_persistent_buffers_set:
                     continue
                 if resident is None:
                     resident = _resident_weights_map(weights_map)
-                tensor = resident.get(prefix + (f"{path}." if path else "") + name)
+                key = prefix + (f"{path}." if path else "") + name
+                slots.setdefault((child, name), set()).add((id(resident), key))
+                tensor = resident.get(key)
                 if isinstance(tensor, torch.Tensor) and tensor.device.type == "cpu":
                     if backings.setdefault((child, name), tensor) is not tensor:
                         raise ValueError(
                             "Accelerate hooks have conflicting backings for one tensor"
                         )
-    return backings
+    return backings, slots
 
 
 def _needs_materialize(module, hook):

@@ -570,6 +570,18 @@ def _fsdp2_param_groups(module: nn.Module):
     }.values()
 
 
+def _fsdp2_persistent_parameters(module: nn.Module) -> dict[tuple[nn.Module, str], nn.Parameter]:
+    """Map logical registrations to persistent shards without retaining unsharded views."""
+    parameters = {}
+    for group in _fsdp2_param_groups(module):
+        for parameter in group.fsdp_params:
+            info = parameter._module_info
+            parameters[info.module, info.param_name] = parameter.sharded_param
+            for owner, name in zip(info.shared_modules, info.shared_param_names, strict=True):
+                parameters[owner, name] = parameter.sharded_param
+    return parameters
+
+
 # Per FSDP2 unit, the parameters _fsdp2_owned_params found: the weight-access window opens once per
 # quantized module, and a scan walks the unit's whole parameter group.
 _FSDP2_OWNED_PARAMS: "weakref.WeakKeyDictionary[nn.Module, dict[int, weakref.ref]]" = (
