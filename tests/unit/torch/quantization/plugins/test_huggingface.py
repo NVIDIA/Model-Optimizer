@@ -717,7 +717,7 @@ def test_transposed_native_fields_keep_master_gradients_and_ordinary_ste():
         QuantizerAttributeConfig(num_bits="iq1_m", backend="ggml", block_sizes={-1: 256})
     )
     quantizer(weight.T.contiguous())
-    state = IQScaleState(quantizer, weight.T.contiguous(), weight.T.shape)
+    state = IQScaleState(quantizer, weight.T.contiguous(), weight.T.shape, "weight_quantizer")
     object.__setattr__(quantizer, "_fake_quantize", state)
     quantizer._local_repair_active = True
     try:

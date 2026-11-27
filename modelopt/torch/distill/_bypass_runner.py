@@ -365,7 +365,7 @@ class _BypassRunner:
             for module in self.teacher.modules()
             for name, parameter in module.named_parameters(recurse=False, remove_duplicate=False)
         ]
-        error = None
+        primary_error = None
         try:
             self.student.eval()
             self.teacher.eval().requires_grad_(False)
@@ -453,7 +453,7 @@ class _BypassRunner:
                 _LOG.info("Bypass execution: %s", self.student._modelopt_bypass_execution)
             return self.student
         except BaseException as exc:
-            error = exc
+            primary_error = exc
             raise
         finally:
             cleanup_error = None
@@ -483,7 +483,7 @@ class _BypassRunner:
             for module, mode in modes.items():
                 module.training = mode
             if cleanup_error is not None:
-                if error is not None:
-                    error.add_note(f"Bypass cleanup also failed: {cleanup_error!r}")
+                if primary_error is not None:
+                    primary_error.add_note(f"Bypass cleanup also failed: {cleanup_error!r}")
                 else:
                     raise cleanup_error
