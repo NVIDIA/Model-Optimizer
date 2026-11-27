@@ -318,7 +318,8 @@ class TransformersBypassAdapter(ModuleBypassAdapter):
         if not isinstance(positions, torch.Tensor) or positions.ndim != 3:
             yield from super().microbatches(batch, size)
             return
-        if positions.shape[1:] != batch["input_ids"].shape:
+        inputs = batch.get("input_ids", batch.get("inputs_embeds"))
+        if not isinstance(inputs, torch.Tensor) or positions.shape[1:] != inputs.shape[:2]:
             raise ValueError("mRoPE positions must have [axes,batch,sequence] shape")
         rest = {k: v for k, v in batch.items() if k != "position_ids"}
         for index, microbatch in enumerate(super().microbatches(rest, size)):

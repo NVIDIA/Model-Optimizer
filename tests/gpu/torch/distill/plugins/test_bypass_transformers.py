@@ -194,20 +194,36 @@ def _moe():
     return Qwen3MoeForCausalLM(config).eval()
 
 
-def test_transformers_teacher_replay_accepts_embeddings_without_token_ids():
-    teacher = _moe()
+@pytest.mark.parametrize("mrope", [False, True])
+def test_transformers_teacher_replay_accepts_embeddings_without_token_ids(mrope):
+    from _test_utils.transformers_families import build_model, cases, hf_torch_kernels
+
+    teacher = build_model(cases(["qwen3_vl_moe"])[0], "cpu") if mrope else _moe()
     adapter = TransformersBypassAdapter()
     adapter.student = copy.deepcopy(teacher)
-    units = [BypassUnit("mlp", "model.layers.0.mlp", "model.layers.0.mlp")]
+    path = next(name for name, _ in teacher.named_modules() if name.endswith("layers.0.mlp"))
+    units = [BypassUnit("mlp", path, path)]
     ids = torch.randint(3, 32, (2, 8))
     inputs = teacher.get_input_embeddings()(ids).detach()
     targets = []
     for batch in ({"input_ids": ids}, {"inputs_embeds": inputs}):
+        if mrope:
+            batch["position_ids"] = torch.arange(8).expand(3, 2, -1).clone()
+            with pytest.raises(ValueError):
+                list(
+                    adapter.microbatches(
+                        {**batch, "position_ids": batch["position_ids"][..., :-1]}, 1
+                    )
+                )
         adapter.validate_batch(batch, mtd.BypassConfig(sequence_length=8))
+        with pytest.raises(ValueError, match="sequence_length"):
+            adapter.validate_batch(batch, mtd.BypassConfig(sequence_length=7))
         current = []
-        adapter.teacher_microbatch(
-            teacher, units, batch, lambda unit, record: current.append(record.target)
-        )
+        with hf_torch_kernels(teacher):
+            for microbatch in adapter.microbatches(batch, 1):
+                adapter.teacher_microbatch(
+                    teacher, units, microbatch, lambda unit, record: current.append(record.target)
+                )
         targets.append(torch.cat(current))
     torch.testing.assert_close(targets[1], targets[0], rtol=0, atol=0)
 
