@@ -15,6 +15,9 @@
 
 """CPU unit tests for DFlash offline training support."""
 
+import pytest
+import torch
+import torch.distributed as dist
 from _test_utils.torch.speculative.dflash import get_dflash_config
 from _test_utils.torch.transformers_models import get_tiny_llama
 
@@ -23,6 +26,7 @@ from modelopt.recipe.config import ModelOptDFlashRecipe
 
 NUM_BASE_LAYERS = 4
 NUM_DRAFT_LAYERS = 2
+SEQ_LEN = 16
 
 
 def test_convert_online_keeps_base_layers():
@@ -71,3 +75,74 @@ def test_dflash_recipe_derives_offline_from_data():
     # offline_data_path absent → offline=False
     recipe = ModelOptDFlashRecipe(dflash=dflash_section)
     assert recipe.dflash.dflash_offline is False
+
+
+def _loss_and_grads(model, input_ids, features, seed):
+    model.zero_grad()
+    torch.manual_seed(seed)  # seeds the anchor sampling
+    loss = model(input_ids=input_ids, base_model_outputs=features).loss
+    loss.backward()
+    grads = {name: p.grad.clone() for name, p in model.dflash_module.named_parameters()}
+    return loss.detach(), grads
+
+
+def _context_parallel_parity_job(rank, size, gradient_checkpointing):
+    model = get_tiny_llama(num_hidden_layers=NUM_BASE_LAYERS, dtype=torch.float32)
+    model.config.num_orig_hidden_layers = NUM_BASE_LAYERS
+    mtsp.convert(model, [("dflash", get_dflash_config(offline=True))])
+    model.train()
+    if gradient_checkpointing:
+        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+
+    generator = torch.Generator().manual_seed(0)
+    hidden_size = model.config.hidden_size
+    input_ids = torch.randint(1, model.config.vocab_size, (2, SEQ_LEN), generator=generator)
+    features = {
+        "aux_hidden_states": torch.randn(
+            2, SEQ_LEN, NUM_DRAFT_LAYERS * hidden_size, generator=generator
+        ),
+        "base_model_hidden_states": torch.randn(2, SEQ_LEN, hidden_size, generator=generator),
+    }
+    expected_loss, expected_grads = _loss_and_grads(model, input_ids, dict(features), seed=0)
+
+    model.enable_context_parallel(dist.group.WORLD)
+    model.shard_context(features)
+    assert features["aux_hidden_states"].shape[1] == SEQ_LEN // size
+    # Ranks seeded apart must still draft the blocks rank 0 samples.
+    loss, grads = _loss_and_grads(model, input_ids, features, seed=rank)
+
+    torch.testing.assert_close(loss, expected_loss)
+    for name, grad in grads.items():
+        dist.all_reduce(grad)  # the trainer averages gradients over the ranks
+        torch.testing.assert_close(
+            grad / size, expected_grads[name], rtol=1e-4, atol=1e-5, msg=name
+        )
+
+
+@pytest.mark.parametrize("gradient_checkpointing", [False, True])
+def test_context_parallel_matches_single_rank(cpu_dist_workers, gradient_checkpointing):
+    """Two ranks with half the context each reproduce the one-rank loss and gradients."""
+    cpu_dist_workers.run(_context_parallel_parity_job, gradient_checkpointing)
+
+
+@pytest.mark.parametrize(
+    ("setting", "value", "match"),
+    [
+        ("dflash_offline", False, "online training"),
+        ("dflash_use_torch_compile", True, "torch_compile"),
+        ("dflash_architecture_config", {"projector_type": "dspark"}, "dspark"),
+        ("dflash_architecture_config", {"attention_dropout": 0.1}, "attention_dropout"),
+    ],
+)
+def test_context_parallel_rejects_unsupported_setups(setting, value, match):
+    config = get_dflash_config(offline=True)
+    if setting == "dflash_architecture_config":
+        value = {**config[setting], **value}
+    config[setting] = value
+    model = get_tiny_llama(num_hidden_layers=NUM_BASE_LAYERS)
+    model.config.num_orig_hidden_layers = NUM_BASE_LAYERS
+    mtsp.convert(model, [("dflash", config)])
+
+    with pytest.raises(ValueError, match=match):
+        model.enable_context_parallel(None)
+    assert not model.context_parallel_enabled

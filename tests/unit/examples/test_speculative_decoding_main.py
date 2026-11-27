@@ -224,6 +224,14 @@ def test_context_parallelism_is_rejected(main_mod, stub_tokenizers):
         )
 
 
+@pytest.mark.parametrize(("mode", "seq_len"), [("streaming", 128), ("offline", 129)])
+def test_dflash_context_parallel_needs_divisible_offline_data(main_mod, mode, seq_len):
+    recipe = types.SimpleNamespace(data=types.SimpleNamespace(mode=mode))
+    args = types.SimpleNamespace(cp_size=2, training_seq_len=seq_len)
+    with pytest.raises(ValueError, match="cp_size"):
+        main_mod.check_dflash_context_parallel(None, recipe, args)
+
+
 def test_caller_supplied_base_tokenizer_is_used(main_mod, monkeypatch):
     """The fresh path already holds the base tokenizer; it must not be re-fetched."""
     calls = []

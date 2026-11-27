@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import contextlib
 import inspect
 import random
 from collections.abc import Callable
@@ -339,6 +340,17 @@ class EagleTrainerWithAccLog(Trainer):
             return super().training_step(*args, **kwargs)
         finally:
             self.accelerator.gradient_accumulation_steps = accumulation_steps
+
+    def _prepare_context_parallel_inputs(self, model, inputs):
+        """Let a DFlash draft shard its own context, without torch's ring attention.
+
+        Ring attention covers causal self-attention only, and shards the token inputs that
+        every DFlash rank needs whole.
+        """
+        if getattr(self.model, "context_parallel_enabled", False):
+            self.model.shard_context(inputs["base_model_outputs"])
+            return contextlib.nullcontext, inputs
+        return super()._prepare_context_parallel_inputs(model, inputs)
 
     def compute_loss(self, *args, **kwargs):
         """Override compute_loss to save train accs and per-component losses in trainer state."""

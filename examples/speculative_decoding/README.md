@@ -95,6 +95,8 @@ Megatron EAGLE supports the same mode: set `eagle_mix_hidden_states=True` and
 `eagle_mix_hidden_states_mode="uniform_layer_sample"` in the `EagleConfig` passed to `mtsp.convert`.
 
 To enable context parallelism for long-context training, add `training.cp_size=<N>`.
+DFlash supports it only for the plain DFlash draft trained offline (`data.offline_data_path`),
+without `dflash_use_torch_compile`; `training_seq_len` must be divisible by `cp_size`.
 The saved modelopt checkpoint is similar in architecture to HF models. It can be further optimized through **ModelOpt**, e.g., PTQ and QAT.
 
 ## Training Draft Model with Offline Base Model
