@@ -487,6 +487,8 @@ def validate_tp_output_quantizer(quantizer, view):
                 ) from exc
         if not enabled:
             continue
+        if member._if_calib:
+            raise ValueError("Colwise TP output calibration must be disabled before placement.")
         if any(
             isinstance(getattr(member, name, None), torch.Tensor)
             and getattr(member, name).numel() > 1
