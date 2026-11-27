@@ -251,7 +251,8 @@ def bypass(session):
         [
             *glob.glob("tests/gpu/torch/distill/*bypass*.py"),
             *glob.glob("tests/gpu/torch/distill/plugins/*bypass*.py"),
-            "tests/gpu/torch/quantization/test_bypass_fields.py",
+            "tests/gpu/torch/quantization/test_repair.py",
+            "tests/gpu/torch/quantization/test_repair_formats.py",
         ],
         ["tests/examples/bypass"],
     )
