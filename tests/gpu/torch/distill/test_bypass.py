@@ -614,6 +614,15 @@ def test_native_valid_token_mse_bounds_saved_state(noncurrent):
                 torch.testing.assert_close(observed[-1], expected[1], rtol=0, atol=0)
                 if prediction_grad:
                     torch.testing.assert_close(observed[0], expected[0].to(dtype), rtol=0, atol=0)
+    prediction = torch.ones(2, 3, device=device, dtype=torch.bfloat16, requires_grad=True)
+    target = torch.zeros_like(prediction, requires_grad=True)
+    loss, count = mse_statistics(
+        prediction, target, torch.zeros(2, device=device, dtype=torch.bool)
+    )
+    assert loss == count == 0
+    for gradient in torch.autograd.grad(loss.sqrt(), (prediction, target)):
+        torch.testing.assert_close(gradient, torch.zeros_like(gradient), rtol=0, atol=0)
+
     prediction = torch.empty(2, 3, 0, device=device, dtype=torch.bfloat16, requires_grad=True)
     target = torch.empty_like(prediction, dtype=torch.float32, requires_grad=True)
     loss, count = mse_statistics(
