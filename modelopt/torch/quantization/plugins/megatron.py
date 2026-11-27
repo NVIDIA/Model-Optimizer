@@ -16,7 +16,9 @@
 """Support quantization for megatron linear layers."""
 
 import ast
+import dataclasses
 import inspect
+import math
 import re
 import textwrap
 import types
@@ -29,6 +31,7 @@ import megatron.core.tensor_parallel.layers as megatron_parallel
 import megatron.core.transformer.mlp as megatron_mlp
 import megatron.core.transformer.moe.experts as megatron_moe
 import torch
+from megatron.core.dist_checkpointing.mapping import ShardedTensorFactory
 from megatron.core.dist_checkpointing.utils import replace_prefix_for_sharding
 from megatron.core.extensions.transformer_engine import (
     TEColumnParallelGroupedLinear,
@@ -211,11 +214,38 @@ def quant_module_get_extra_state(self) -> dict:
             quantizer_state[name] = module.get_modelopt_state()
 
     extra_state["modelopt_quantizer_state"] = quantizer_state
+    if not getattr(self, "_legacy_swiglu_quantizer_state", False) and _saves_swiglu_rows(self):
+        # This gated linear_fc1's per-row weight quantizer state is saved in Megatron's SwiGLU layout.
+        extra_state["modelopt_swiglu_quantizer_state"] = True
 
     # Handle real_quantizer_state and q_tensor_state
     extra_state.update(real_quant_module_get_extra_state(self))
 
     return extra_state
+
+
+def _saves_swiglu_rows(module) -> bool:
+    """Whether ``module`` saves weight quantizer state in Megatron's SwiGLU layout.
+
+    That is per-row state of a gated linear_fc1 (see ``_QuantMegatronMLP._is_swiglu_row_state``).
+    """
+    quantizer = getattr(module, "weight_quantizer", None)
+    if not getattr(module, "_modelopt_gated_fc1", False) or quantizer is None:
+        return False
+    return any(
+        name.rpartition(".")[2] in ("_amax", "_scale")
+        and _has_swiglu_rows(b, module.weight.shape[0])
+        for name, b in quantizer.named_buffers()
+    )
+
+
+def _has_swiglu_rows(tensor: torch.Tensor, rows: int) -> bool:
+    """Whether ``tensor`` has a gated linear_fc1 weight's ``rows``: gate, then up.
+
+    Each row's blocks may be flattened (e.g. compressed INT4 AWQ's scale); per-tensor or
+    per-column state has no rows.
+    """
+    return tensor.dim() > 0 and tensor.shape[0] >= rows and tensor.shape[0] % rows == 0
 
 
 def real_quant_module_set_extra_state(self, state: Any):
@@ -310,6 +340,7 @@ def quant_module_set_extra_state(self, state: Any):
                 maybe_promote_nvfp4_static_quantizer(module, quantizer_substate)
                 module.set_from_modelopt_state(quantizer_substate, properties_only=False)
         self.modelopt_post_restore()
+    _read_swiglu_layout(self, state)
 
     # Handle real_quantizer_state and q_tensor_state
     real_quant_module_set_extra_state(self, state)
@@ -527,6 +558,15 @@ class _MegatronParallelLinear(_ParallelLinear):
 
         super()._setup()
 
+    def modelopt_read_checkpoint_layout(self, state: dict):
+        """Read how a checkpoint loaded into this converted module laid out its state."""
+        _read_swiglu_layout(self, state)
+
+    def modelopt_forget_checkpoint_layout(self):
+        """Plan keys in this module's own layout again, as once a checkpoint's tensors load."""
+        self._legacy_swiglu_quantizer_state = False
+        self.__dict__.pop("_legacy_swiglu_tp_ratios", None)
+
     def _process_quantizer_amax(self, k, v, quantizer_state_dict):
         if v.ndim == 4:
             quantizer_state_dict[k] = v.squeeze(1).squeeze(-1)
@@ -596,6 +636,10 @@ class _MegatronParallelLinear(_ParallelLinear):
             name = k.split(prefix)[-1] if prefix else k
             state_dict[k] = state_dict[k].view_as(self.state_dict()[name])
         super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
+        # The restore's first load has only the extra state; once the tensors load they are in this
+        # rank's layout, so the next save writes the current one.
+        if any(k.startswith(prefix) and not k.endswith("_extra_state") for k in state_dict):
+            self.modelopt_forget_checkpoint_layout()
 
 
 @QuantModuleRegistry.register(
@@ -683,9 +727,113 @@ class _QuantMegatronMLP(_MegatronMLP):
     """Module to support special handling of `linear_fc1` in `sharded_state_dict()` of MCore `MLP`."""
 
     _modelopt_state_keys = [
-        r"weight_quantizer\.(\d+\.)*_amax$",
-        r"weight_quantizer\.(\d+\.)*_scale$",
+        r".*weight_quantizer\.(\d+\.)*_amax$",
+        r".*weight_quantizer\.(\d+\.)*_scale$",
     ]
+
+    def _setup(self):
+        super()._setup()
+        # Lets linear_fc1 mark the layout it saves its state in (see quant_module_get_extra_state).
+        self.linear_fc1._modelopt_gated_fc1 = self.config.gated_linear_unit
+
+    def _is_swiglu_state(self, key, sharded_tensor) -> bool:
+        # Legacy checkpoints have only the quantizer state in the old layout (e.g. not LoRA's B).
+        return self._is_swiglu_row_state(key, sharded_tensor) and not (
+            "_quantizer." in key
+            and getattr(self.linear_fc1, "_legacy_swiglu_quantizer_state", False)
+        )
+
+    def _is_swiglu_row_state(self, key, sharded_tensor) -> bool:
+        if not super()._is_swiglu_state(key, sharded_tensor):
+            return False
+        if "_quantizer." not in key:
+            return True
+        # Classified by the quantizer's own buffer, as its extra state is marked: the saved view may
+        # be reshaped to rows (e.g. a per-input-channel amax).
+        buffers = dict(self.linear_fc1.named_buffers())
+        tensor = buffers.get(key.rpartition("linear_fc1.")[2], sharded_tensor.data)
+        return _has_swiglu_rows(tensor, self.linear_fc1.weight.shape[0])
+
+    def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
+        sharded_state_dict = super().sharded_state_dict(prefix, sharded_offsets, metadata)
+        # A legacy checkpoint saved at another TP size (see the TODO in quant_module_set_extra_state).
+        tp_ratios = getattr(self.linear_fc1, "_legacy_swiglu_tp_ratios", None)
+        if self.config.gated_linear_unit and tp_ratios:
+            for k, v in sharded_state_dict.items():
+                name = k.rpartition("linear_fc1.")[2]
+                if name in tp_ratios and self._is_swiglu_row_state(k, v):
+                    sharded_state_dict[k] = _legacy_swiglu_load_factory(v, *tp_ratios[name])
+        return sharded_state_dict
+
+
+def _read_swiglu_layout(module, state):
+    """Note how ``state``'s checkpoint laid out a gated linear_fc1's per-row quantizer state."""
+    # TODO: Drop the legacy layout (checkpoints saved before ModelOpt 0.49) in a future release.
+    module._legacy_swiglu_quantizer_state = "modelopt_swiglu_quantizer_state" not in state
+    module.__dict__.pop("_legacy_swiglu_tp_ratios", None)
+    if not module._legacy_swiglu_quantizer_state:
+        return
+    saved_numels = {
+        f"{name}.{buffer}": math.prod(meta["shape"])
+        for name, substate in (state.get("modelopt_quantizer_state") or {}).items()
+        if name.split(".")[0] == "weight_quantizer"
+        for buffer, meta in substate.get("_pytorch_state_metadata", {}).get("buffers", {}).items()
+    }
+    # State saved at another TP size, by key: tp_size * numel // saved_numel ranks saved it.
+    numels = _weight_quantizer_numels(module)
+    module._legacy_swiglu_tp_ratios = {
+        name: (numels[name], saved)
+        for name, saved in saved_numels.items()
+        if numels.get(name, saved) != saved
+    }
+
+
+def _weight_quantizer_numels(module) -> dict[str, int]:
+    """Size of each weight quantizer buffer of ``module``, by state-dict name."""
+    quantizer = getattr(module, "weight_quantizer", None)
+    if quantizer is None:
+        return {}
+    return {name: b.numel() for name, b in quantizer.named_buffers(prefix="weight_quantizer")}
+
+
+def _legacy_swiglu_load_factory(sharded_tensor, numel, saved_numel):
+    """Load a legacy gated ``linear_fc1`` row state saved at another TP size.
+
+    Legacy checkpoints shard it like any column-parallel state, as each saving rank's ``[gate, up]``
+    rows. Every rank reads all rows and keeps its own gate and up rows.
+    """
+    axis = sharded_tensor.prepend_axis_num
+    tp_size = sharded_tensor.axis_fragmentations[axis]
+    tp_rank = sharded_tensor.global_offset[axis] // sharded_tensor.local_shape[0]
+    saved_tp_size = tp_size * numel // saved_numel
+
+    def build_fn(key, data, replica_id, flattened_range):
+        whole = data.new_empty((sharded_tensor.global_shape[axis], *data.shape[1:]))
+        offset = list(sharded_tensor.global_offset)
+        offset[axis] = 0
+        fragmentations = list(sharded_tensor.axis_fragmentations)
+        fragmentations[axis] = 1
+        replica = replica_id if isinstance(replica_id, tuple) else (replica_id,)
+        # Megatron may remap the factory's key (e.g. to global layer numbers under PP).
+        return dataclasses.replace(
+            sharded_tensor,
+            key=key,
+            data=whole,
+            local_shape=tuple(whole.shape),
+            global_offset=tuple(offset),
+            axis_fragmentations=tuple(fragmentations),
+            replica_id=(tp_rank, *replica),
+        )
+
+    def merge_fn(whole):
+        gate, up = (
+            torch.cat([shard.chunk(2)[i] for shard in whole.chunk(saved_tp_size)]) for i in range(2)
+        )
+        return torch.cat([gate.chunk(tp_size)[tp_rank], up.chunk(tp_size)[tp_rank]])
+
+    return ShardedTensorFactory(
+        sharded_tensor.key, sharded_tensor.data, build_fn, merge_fn, sharded_tensor.replica_id
+    )
 
 
 class _RealQuantMegatronParallelLinear(RealQuantLinear):

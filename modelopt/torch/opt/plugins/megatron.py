@@ -171,12 +171,14 @@ class _MegatronMLP(DynamicModule):
         if not self.config.gated_linear_unit:
             return sharded_state_dict
         for k, v in sharded_state_dict.items():
-            if "linear_fc1" in k and any(
-                re.compile(pattern).match(k) for pattern in self._modelopt_state_keys
-            ):
+            if "linear_fc1" in k and self._is_swiglu_state(k, v):
                 sharded_state_dict[k] = megatron_mlp.apply_swiglu_sharded_factory(
                     v,
                     sharded_offsets,
                     metadata["singleton_local_shards"],
                 )
         return sharded_state_dict
+
+    def _is_swiglu_state(self, key, sharded_tensor) -> bool:
+        """Whether ``linear_fc1`` state ``key`` has gate and up rows, like the weight."""
+        return any(re.compile(pattern).match(key) for pattern in self._modelopt_state_keys)
