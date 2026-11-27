@@ -809,14 +809,18 @@ def test_copy_non_model_files_skips_an_export_inside_the_source(tmp_path):
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges on Windows")
-def test_copy_non_model_files_does_not_write_through_an_export_link(tmp_path):
+def test_export_copies_do_not_write_through_an_export_link(tmp_path):
     source_dir, export_dir, outside = tmp_path / "source", tmp_path / "export", tmp_path / "outside"
     source_dir.mkdir()
     export_dir.mkdir()
     (source_dir / "tokenizer.json").write_text("{}")
-    (export_dir / "tokenizer.json").symlink_to(outside)  # dangling: exists() is False
+    _shard(source_dir, "model.safetensors")
+    (source_dir / "mtp.safetensors").write_text("mtp-bytes")
+    for name in ("tokenizer.json", "mtp.safetensors"):
+        (export_dir / name).symlink_to(outside)  # dangling: exists() is False
 
     assert hf_checkpoint_utils.copy_non_model_files(source_dir, export_dir) == []
+    assert hf_checkpoint_utils.copy_off_index_safetensors(source_dir, export_dir) == []
     assert not outside.exists()
 
 
@@ -1021,9 +1025,9 @@ def test_copy_non_model_files_follows_links_only_within_the_checkpoint(tmp_path)
 
 @pytest.mark.skipif(sys.platform == "win32", reason="requires POSIX symlink support")
 def test_copy_non_model_files_follows_hub_snapshot_links_into_blobs(tmp_path, monkeypatch):
-    """A Hub snapshot's files are links into its repo's ``blobs/``; since hub 1.32 a Xet-backed one
-    goes on into a store the whole cache shares. Inside ``HF_HUB_CACHE`` they may lead anywhere in
-    the cache, and nowhere outside it."""
+    """A Hub snapshot's files are links into the rest of the Hugging Face cache; since hub 1.32 a
+    Xet-backed one goes on through the repo's ``blobs/`` into a store shared by all repos. Inside
+    ``HF_HUB_CACHE`` they may lead anywhere in the cache, and nowhere outside it."""
     cache = tmp_path / "hub"
     monkeypatch.setattr("huggingface_hub.constants.HF_HUB_CACHE", str(cache))
     repo = cache / "models--org--model"
@@ -1058,12 +1062,10 @@ def test_copy_non_model_files_follows_hub_snapshot_links_into_blobs(tmp_path, mo
     with pytest.warns(UserWarning, match="Skipping tokenizer.json: .* outside the checkpoint"):
         assert hf_checkpoint_utils.copy_non_model_files(plain, tmp_path / "plain-export") == []
 
-    # Outside HF_HUB_CACHE a snapshot may still use its repo's blobs/, but not the shared store.
+    # Outside HF_HUB_CACHE the same tree is an ordinary local folder: no link may leave it.
     monkeypatch.setattr("huggingface_hub.constants.HF_HUB_CACHE", str(tmp_path / "elsewhere"))
-    (snapshot / "vocab.json").unlink()  # refused above; its warning would go unmatched here
-    with pytest.warns(UserWarning, match="Skipping tokenizer.json: .* outside the checkpoint"):
-        copied = hf_checkpoint_utils.copy_non_model_files(snapshot, tmp_path / "local")
-    assert copied == ["tokenizer_config.json"]
+    with pytest.warns(UserWarning, match="outside the checkpoint directory"):
+        assert hf_checkpoint_utils.copy_non_model_files(snapshot, tmp_path / "local") == []
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="requires POSIX symlink support")
