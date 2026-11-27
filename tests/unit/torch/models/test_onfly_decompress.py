@@ -26,11 +26,13 @@ import copy
 import importlib.metadata
 import json
 import sys
+import threading
 from concurrent.futures import Future
 from types import SimpleNamespace
 
 import pytest
 import torch
+from _test_utils.torch.misc import ContendedLock
 from safetensors import safe_open
 from safetensors.torch import load_file, save_file
 from torch.distributed.tensor import Shard, distribute_tensor
@@ -355,7 +357,18 @@ def test_install_rewrites_only_the_per_expert_weight_converters(monkeypatch):
     monkeypatch.setattr(mu, "get_model_conversion_mapping", stock_mapping)
     monkeypatch.setattr(onfly, "_read_compression", lambda cfg: compression)
     config = SimpleNamespace()
-    onfly.install_onfly_decompress(config)
+    # It publishes its hook under the lock the Nemotron-H puzzle loader restores its own under.
+    lock = ContendedLock()
+    monkeypatch.setattr(onfly, "CONVERSION_HOOK_LOCK", lock)
+    with lock:
+        install = threading.Thread(
+            target=onfly.install_onfly_decompress, args=(config,), daemon=True
+        )
+        install.start()
+        assert lock.contended.wait(10)
+        assert mu.get_model_conversion_mapping is stock_mapping
+    install.join(10)
+    assert not install.is_alive()
     model = SimpleNamespace(config=config)
 
     # positionally, the way from_pretrained calls it, and a later parameter too

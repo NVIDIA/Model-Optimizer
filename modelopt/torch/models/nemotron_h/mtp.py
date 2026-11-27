@@ -13,25 +13,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Checkpoint loading and calibration support for the Nemotron-H MTP tail."""
+"""Checkpoint loading and calibration support for the Nemotron-H MTP tail and puzzle models."""
 
 import copy
 import inspect
 import json
 import re
+import types
 import weakref
 from contextlib import contextmanager
 from functools import wraps
 from pathlib import Path
 
 import torch
+import transformers
 from huggingface_hub import snapshot_download
 from safetensors import SafetensorError
-from transformers import AutoConfig
+from transformers import AutoConfig, conversion_mapping, modeling_utils
 from transformers.dynamic_module_utils import get_class_from_dynamic_module
 from transformers.masking_utils import create_causal_mask
 from transformers.models.nemotron_h import modeling_nemotron_h
 
+from modelopt.torch.models._onfly_decompress import CONVERSION_HOOK_LOCK
 from modelopt.torch.quantization.model_calib import (
     _needs_activation_forward_for_max_calib,
     _WeightInputHook,
@@ -68,15 +71,28 @@ def has_mtp_weights(checkpoint_path: str) -> bool:
     return _get_mtp_layout(_resolve_checkpoint_path(checkpoint_path)) is not None
 
 
+def _has_puzzle_language_model(config) -> bool:
+    """Whether an Omni config (a dict or a config object) holds a puzzle language model."""
+
+    def get(cfg, key):
+        return cfg.get(key) if isinstance(cfg, dict) else getattr(cfg, key, None)
+
+    language = get(config, "llm_config") or get(config, "text_config")
+    return get(language, "model_type") == "nemotron_h_puzzle"
+
+
 def prefers_bundled_code(hf_config, checkpoint_path: str, config_kwargs: dict) -> bool:
     """True for a remote-code config the built-in Nemotron-H class cannot represent.
 
     Built-in Nemotron-H implements only the MoE variant on some Transformers releases, so a
-    dense checkpoint's config fails to parse as a built-in one and needs its bundled code.
+    dense checkpoint's config fails to parse as a built-in one and needs its bundled code. Nor
+    does it represent a puzzle language model, whose layers differ in size (Nemotron 3.5 Bolt).
     """
-    if getattr(hf_config, "model_type", None) != "nemotron_h":
-        return False
     if not type(hf_config).__module__.startswith("transformers_modules"):
+        return False
+    if _has_puzzle_language_model(hf_config):
+        return True
+    if getattr(hf_config, "model_type", None) != "nemotron_h":
         return False
     builtin_kwargs = {k: v for k, v in config_kwargs.items() if k != "trust_remote_code"}
     try:
@@ -194,13 +210,115 @@ class _NemotronHMTP(torch.nn.Module):
         return self.layers[-1].final_layernorm(mtp_hidden)
 
 
+def _collect_puzzle_conversions(model, *args, **kwargs):
+    """Run transformers' conversion collection on a puzzle Omni model, with its code's renames.
+
+    The collection runs against a private view of transformers' registry, so no other load, in this
+    thread or another, sees a change. In it, transformers' renames for its port of the Omni class,
+    whose class name the checkpoint's class shares, are hidden, so the lookup falls back to the
+    model type the checkpoint's code registers, and the puzzle language model gets the
+    ``backbone.`` -> ``model.`` rename.
+    """
+    lookup = conversion_mapping.get_checkpoint_conversion_mapping
+    hidden = type(model).__name__
+
+    def puzzle_lookup(name):
+        if name == hidden:
+            return None
+        found = lookup(name)
+        if found is None and name == "nemotron_h_puzzle":
+            return [conversion_mapping.WeightRenaming("backbone.", "model.")]
+        return found
+
+    namespace = {
+        **vars(conversion_mapping),
+        "get_checkpoint_conversion_mapping": puzzle_lookup,
+        # transformers skips a remote-code sub-model whose mapping was not registered.
+        "USER_REGISTERED_MAPPINGS": {
+            *getattr(conversion_mapping, "USER_REGISTERED_MAPPINGS", ()),
+            "nemotron_h_puzzle",
+        },
+    }
+    collect = conversion_mapping.get_model_conversion_mapping
+    private = types.FunctionType(
+        collect.__code__, namespace, collect.__name__, collect.__defaults__, collect.__closure__
+    )
+    private.__kwdefaults__ = collect.__kwdefaults__
+    return private(model, *args, **kwargs)
+
+
+@contextmanager
+def _puzzle_renames(config: dict):
+    """Load a puzzle Omni checkpoint (Nemotron 3.5 Bolt) with its own code's weight renames.
+
+    Its code registers them under names transformers 5.18 does not use: none reaches its
+    ``nemotron_h_puzzle`` language model, which so loads none of its ``backbone.*`` weights, and
+    its Omni class's name selects transformers' renames for transformers' own port of that class,
+    which send the projector's weights elsewhere. During the load, transformers' conversion
+    collection gives a model with a puzzle language model its renames and any other model
+    transformers' own. ``from_pretrained`` records the renames it ran, and the export reverts them.
+    """
+    if not _has_puzzle_language_model(config):
+        yield
+        return
+    if not hasattr(conversion_mapping.WeightRenaming("a", "b"), "scope_prefix"):
+        # Unscoped, the export's reverse rename would also rewrite the `model.` of `language_model.`.
+        raise RuntimeError(
+            "Loading a nemotron_h_puzzle language model needs a transformers release that limits a "
+            "sub-model's weight renames to that sub-model (5.9 or later); found "
+            f"{transformers.__version__}."
+        )
+    loading = True
+
+    @wraps(conversion_mapping.get_model_conversion_mapping)
+    def patch(model, *args, **kwargs):
+        if loading and _has_puzzle_language_model(getattr(model, "config", None)):
+            return _collect_puzzle_conversions(model, *args, **kwargs)
+        # Any other model, a native Omni among them, keeps transformers' renames, as does any model
+        # after the load, through a hook installed over this patch during it.
+        return original(model, *args, **kwargs)
+
+    with CONVERSION_HOOK_LOCK:
+        original = modeling_utils.get_model_conversion_mapping
+        if original is not conversion_mapping.get_model_conversion_mapping:
+            # The puzzle model's conversions come from transformers' own collection, bypassing it.
+            raise RuntimeError(
+                "Loading a nemotron_h_puzzle language model needs transformers' own conversion "
+                f"collection, which {original!r} replaces; load the checkpoint in a new process."
+            )
+        modeling_utils.get_model_conversion_mapping = patch
+    try:
+        yield
+    finally:
+        loading = False
+        with CONVERSION_HOOK_LOCK:
+            if modeling_utils.get_model_conversion_mapping is patch:
+                modeling_utils.get_model_conversion_mapping = original
+
+
 @contextmanager
 def prepare_for_loading(checkpoint_path: str, trust_remote_code: bool, *, model_class=None):
-    """Scope MTP construction to the selected class, or resolve the default AutoModel class."""
+    """Scope MTP construction and a puzzle checkpoint's weight renames to the load."""
     local_path = _resolve_checkpoint_path(checkpoint_path)
     layout = _get_mtp_layout(local_path)
     config_path = local_path / "config.json"
     config = json.loads(config_path.read_text()) if config_path.exists() else {}
+    if not trust_remote_code and _has_puzzle_language_model(config):
+        # transformers' own Omni class cannot hold its layers' differing expert counts.
+        raise ValueError(
+            "A nemotron_h_puzzle language model (Nemotron 3.5 Bolt) loads only through its "
+            "checkpoint's own code: pass --trust_remote_code (trust_remote_code=True)."
+        )
+    with (
+        _puzzle_renames(config),
+        _mtp_construction(checkpoint_path, trust_remote_code, model_class, layout, config),
+    ):
+        yield
+
+
+@contextmanager
+def _mtp_construction(checkpoint_path, trust_remote_code, model_class, layout, config):
+    """Scope MTP construction to the selected class, or resolve the default AutoModel class."""
     if layout is None:
         configs = (config, config.get("llm_config") or {}, config.get("text_config") or {})
         if any((cfg.get("num_nextn_predict_layers") or 0) > 0 for cfg in configs):
