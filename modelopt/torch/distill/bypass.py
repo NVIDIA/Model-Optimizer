@@ -57,6 +57,7 @@ def bypass(
             generators; reader generators and worker state advance independently.
             The HF adapter additionally derives default validity from ``_packed_seq_ids``:
             zero denotes padding and positive IDs identify documents. Explicit loss masks win.
+            HF 2D attention masks must be Boolean/integer; floating additive bias uses 4D.
         config: A :class:`BypassConfig`, a dict, or None for the established defaults.
         validation_dataloader: Optional held-out batches for finalized-student valid-token MSE.
             Diagnostic failures propagate after committing training updates to the student.

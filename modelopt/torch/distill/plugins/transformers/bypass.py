@@ -377,6 +377,14 @@ class TransformersBypassAdapter(ModuleBypassAdapter):
         attention = result.get("attention_mask")
         if (
             isinstance(attention, torch.Tensor)
+            and attention.ndim == 2
+            and attention.is_floating_point()
+        ):
+            raise ValueError(
+                "A 2D attention mask must be Boolean or integer; use 4D for floating additive bias."
+            )
+        if (
+            isinstance(attention, torch.Tensor)
             and attention.ndim == 4
             and not (attention.dtype == torch.bool or attention.is_floating_point())
         ):

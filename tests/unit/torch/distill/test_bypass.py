@@ -112,3 +112,21 @@ def test_thinker_without_a_use_cache_argument_keeps_outer_hooks():
     actual = adapter.forward_teacher(model, (inputs,), {})
     torch.testing.assert_close(actual, model.thinker(inputs), rtol=0, atol=0)
     assert calls == [1]
+
+
+@pytest.mark.parametrize("packed", [False, True])
+def test_hf_refuses_ambiguous_floating_2d_attention_mask(packed):
+    model = torch.nn.Linear(1, 1)
+    model.config = SimpleNamespace(_attn_implementation="sdpa")
+    batch = {
+        "input_ids": torch.tensor([[1, 2, 3]]),
+        "attention_mask": torch.tensor([[0.0, 0.0, float("-inf")]]),
+        "valid_mask": torch.ones(1, 3, dtype=torch.bool),
+    }
+    if packed:
+        batch["_packed_seq_ids"] = torch.tensor([[1, 1, 2]])
+        del batch["valid_mask"]
+    adapter = TransformersBypassAdapter()
+    for microbatch in adapter.microbatches(batch, 1):
+        with pytest.raises(ValueError, match="2D attention mask"):
+            adapter.prepare_batch(model, microbatch)
