@@ -20,6 +20,7 @@ optimization of ONNX models using pattern-based region analysis and TensorRT per
 """
 
 import fnmatch
+import os
 import shutil
 import tempfile
 from collections.abc import Callable
@@ -180,7 +181,7 @@ def region_pattern_autotuning_workflow(
     num_schemes_per_region: int = 30,
     pattern_cache_file: str | None = None,
     state_file: str | None = None,
-    quant_type: str = "int8",
+    quant_type: str | None = None,
     default_dq_dtype: str = "float32",
     qdq_baseline_model: str | None = None,
     node_filter_list: list[str] | None = None,
@@ -221,8 +222,8 @@ def region_pattern_autotuning_workflow(
                            from previous runs. Enables warm-start optimization (default: None)
         state_file: Optional path to state file for checkpoint/resume. If None, automatically
                    uses <output_dir>/autotuner_state.yaml (default: None)
-        quant_type: Quantization data type - "int8" for INT8 quantization (default),
-                   "fp8" for FP8 quantization
+        quant_type: Quantization data type - "int8" or "fp8". When None (default),
+                   inherits the saved type from an explicit state_file or defaults to "int8".
         default_dq_dtype: Dtype for DequantizeLinear output; "float32" (default), "float16", or "bfloat16".
         qdq_baseline_model: Optional path to a pre-quantized ONNX model. If provided,
                            extracts Q/DQ insertion patterns and adds them to pattern cache
@@ -236,18 +237,15 @@ def region_pattern_autotuning_workflow(
         QDQAutotuner instance after autotuning
     """
     output_dir_is_temp = output_dir is None
-    if not output_dir:
-        output_dir = Path(tempfile.mkdtemp())
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-    logs_dir = output_dir / "logs"
-    logs_dir.mkdir(exist_ok=True)
-    models_dir = output_dir / "region_models"
-    models_dir.mkdir(exist_ok=True)
-
-    if state_file is None:
-        state_file = str(output_dir / "autotuner_state.yaml")
-    state_path = Path(state_file)
+    if output_dir is not None:
+        output_dir = Path(os.path.abspath(output_dir))
+    state_path = (
+        Path(os.path.abspath(state_file))
+        if state_file is not None
+        else (output_dir / "autotuner_state.yaml" if output_dir is not None else None)
+    )
+    requested_quant_type = quant_type if state_file is not None else (quant_type or "int8")
+    effective_quant_type = requested_quant_type or "int8"
 
     if isinstance(model_or_path, str):
         logger.info(f"Loading model: {model_or_path}")
@@ -268,10 +266,10 @@ def region_pattern_autotuning_workflow(
             logger.warning(f"Pattern cache not found: {pattern_cache_file}")
 
     logger.info(
-        f"Initializing autotuner (quant_type={quant_type}, default_dq_dtype={default_dq_dtype})"
+        f"Initializing autotuner (quant_type={effective_quant_type}, default_dq_dtype={default_dq_dtype})"
     )
     config = Config(
-        default_quant_type=quant_type,
+        default_quant_type=effective_quant_type,
         default_dq_dtype=default_dq_dtype,
         verbose=verbose,
     )
@@ -279,9 +277,20 @@ def region_pattern_autotuning_workflow(
     autotuner = QDQAutotuner(model)
     autotuner.initialize(config, pattern_cache)
 
-    if state_path.exists():
+    if state_path is not None and state_path.exists():
         logger.info(f"Resuming from checkpoint: {state_path}")
         autotuner.load_state(str(state_path))
+        if (
+            model_transform is None
+            and requested_quant_type is not None
+            and autotuner.config.default_quant_type != requested_quant_type
+        ):
+            raise ValueError(
+                f"Checkpoint quant_type={autotuner.config.default_quant_type} does not match "
+                f"requested quant_type={requested_quant_type}. "
+                "Request the checkpoint's quant_type to resume, or start fresh with a new "
+                "output_dir (and omit or change state_file when set)."
+            )
         if model_transform is not None:
             for pattern_schemes in autotuner.profiled_patterns:
                 for scheme in pattern_schemes.schemes:
@@ -292,6 +301,7 @@ def region_pattern_autotuning_workflow(
                     autotuner.pattern_cache.add_pattern_schemes(pattern_schemes)
             autotuner.profiled_patterns.clear()
             autotuner.baseline_latency_ms = None
+            config.default_quant_type = requested_quant_type or autotuner.config.default_quant_type
             autotuner.config = config
             logger.info("Re-profiling checkpoint measurements for transformed models")
     else:
@@ -308,6 +318,18 @@ def region_pattern_autotuning_workflow(
             logger.info("Pattern import complete")
         else:
             logger.warning(f"QDQ baseline not found: {qdq_baseline_model}")
+
+    if output_dir is None:
+        output_dir = Path(tempfile.mkdtemp())
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    logs_dir = output_dir / "logs"
+    logs_dir.mkdir(exist_ok=True)
+    models_dir = output_dir / "region_models"
+    models_dir.mkdir(exist_ok=True)
+
+    if state_path is None:
+        state_path = output_dir / "autotuner_state.yaml"
 
     regions = autotuner.regions
     logger.info(f"Ready to profile {len(regions)} regions")
