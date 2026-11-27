@@ -114,10 +114,14 @@ def pin_native_weight(quantizer, native, source):
     if _has_input_transform(quantizer):
         raise ValueError("Native payload pinning requires disabled input transforms.")
     payload = native._quantized_data
-    quantizer._set_buffer("_native_weight_codes", payload.contiguous().view(torch.uint8).clone())
-    for dtype, label in _SOURCE_DTYPES.items():
-        quantizer._set_buffer("_native_weight_source_" + label, _source_keys(source, dtype))
-    quantizer._native_weight_meta = {
+    buffers = {"_native_weight_codes": payload.contiguous().view(torch.uint8).clone()}
+    buffers.update(
+        {
+            "_native_weight_source_" + label: _source_keys(source, dtype)
+            for dtype, label in _SOURCE_DTYPES.items()
+        }
+    )
+    meta = {
         "class": f"{type(native).__module__}.{type(native).__qualname__}",
         "shape": tuple(native.metadata["shape"]),
         "dtype": native.metadata["dtype"],
@@ -127,7 +131,20 @@ def pin_native_weight(quantizer, native, source):
         "format": _format_key(quantizer, source.shape),
         "native_metadata": dict(native.metadata),
     }
+    previous_buffers = dict(quantizer._buffers)
+    previous_meta = getattr(quantizer, "_native_weight_meta", None)
     _VALIDATED.pop(quantizer, None)
+    try:
+        for name, value in buffers.items():
+            quantizer._set_buffer(name, value)
+        quantizer._native_weight_meta = meta
+    except BaseException:
+        quantizer._buffers = previous_buffers
+        if previous_meta is None:
+            quantizer.__dict__.pop("_native_weight_meta", None)
+        else:
+            quantizer._native_weight_meta = previous_meta
+        raise
 
 
 def get_pinned_native_weight(quantizer, source):
@@ -149,14 +166,19 @@ def get_pinned_native_weight(quantizer, source):
     expected_format = _canonical(meta["format"])
     if _format_key(quantizer, source.shape) != expected_format:
         return None
-    key = _input_cache_key(source)
+    expected = getattr(quantizer, "_native_weight_source_" + _SOURCE_DTYPES[source.dtype])
+    key = (_input_cache_key(source), _input_cache_key(expected))
+    bases = (_cache_base(source), _cache_base(expected))
     previous = _VALIDATED.get(quantizer)
-    if previous is None or previous[0]() is None or previous[1] != key:
-        expected = getattr(quantizer, "_native_weight_source_" + _SOURCE_DTYPES[source.dtype])
+    if (
+        previous is None
+        or any(ref() is not base for ref, base in zip(previous[0], bases))
+        or previous[1] != key
+    ):
         if not torch.equal(_source_keys(source), expected):
             return None
-        if key is not None:
-            _VALIDATED[quantizer] = (weakref.ref(_cache_base(source)), key)
+        if all(value is not None for value in key):
+            _VALIDATED[quantizer] = (tuple(weakref.ref(base) for base in bases), key)
     payload = quantizer._native_weight_codes.view(meta["code_dtype"]).reshape(meta["code_shape"])
     native = get_native_tensor_class(meta["class"])(meta["shape"], meta["dtype"], payload)
     native.metadata.update(meta.get("native_metadata", {}))

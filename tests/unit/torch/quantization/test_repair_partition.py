@@ -26,9 +26,14 @@ from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY, IQ_FORMAT_REGISTRY
 from modelopt.torch.quantization.ggml.common import pin_packed_weight
 from modelopt.torch.quantization.nn import TensorQuantizer
+from modelopt.torch.quantization.qtensor import FP8QTensor
 from modelopt.torch.quantization.repair_partition import (
     NativeWeightPartition,
     native_weight_partition,
+)
+from modelopt.torch.quantization.utils.native_weight import (
+    get_pinned_native_weight,
+    pin_native_weight,
 )
 
 
@@ -298,3 +303,59 @@ def test_dynamic_partition_requires_local_threshold_reductions(axis, dim):
         )
     assert quantizer.state_dict().keys() == before.keys()
     assert all(torch.equal(value, before[name]) for name, value in quantizer.state_dict().items())
+
+
+@pytest.mark.parametrize("dim", [0, 1])
+@pytest.mark.parametrize("provenance", ["global", "missing", "format_drift", "local_stale"])
+def test_native_fp8_partition_requires_matching_pin_provenance(dim, provenance):
+    weight = torch.randn(4, 32)
+    native, scale = FP8QTensor.quantize(weight, axis=0)
+    quantizer = TensorQuantizer(QuantizerAttributeConfig(num_bits=(4, 3), axis=0))
+    quantizer._set_buffer("_scale", scale)
+    quantizer.amax = weight.abs().amax(dim=1, keepdim=True)
+    if provenance == "format_drift":
+        weight = native.dequantize(scale=scale)
+    pin_native_weight(quantizer, native, weight)
+    view = NativeWeightPartition(tuple(weight.shape), dim, 0, 2)
+    if provenance == "local_stale":
+        local = view.select(weight)
+        local_native, local_scale = FP8QTensor.quantize(local, axis=0)
+        quantizer._set_buffer("_scale", local_scale)
+        pin_native_weight(quantizer, local_native, local)
+        with pytest.raises(ValueError):
+            native_weight_partition(quantizer, view, source=local + 1)
+        return
+    if provenance != "global":
+        if provenance == "format_drift":
+            quantizer.num_bits = (5, 2)
+        with pytest.raises(ValueError):
+            native_weight_partition(
+                quantizer, view, source=None if provenance == "missing" else view.select(weight)
+            )
+        return
+    fields, _, _ = native_weight_partition(quantizer, view, source=weight)
+    for name, value in fields.items():
+        quantizer._set_buffer(name, value) if isinstance(value, torch.Tensor) else setattr(
+            quantizer, name, value
+        )
+    local = view.select(weight)
+    assert get_pinned_native_weight(quantizer, local) is not None
+    expected = view.select(native.dequantize(scale=scale))
+    torch.testing.assert_close(quantizer(local), expected, rtol=0, atol=0)
+    stale = copy.deepcopy(quantizer)
+    with torch.no_grad():
+        local.add_(1)
+    assert get_pinned_native_weight(stale, local) is None
+
+
+def test_dynamic_nvfp4_partition_refuses_unavailable_global_maximum():
+    quantizer = TensorQuantizer(
+        QuantizerAttributeConfig(
+            num_bits=(2, 1),
+            type="dynamic",
+            block_sizes={-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+        )
+    )
+    quantizer._set_buffer("_scale", torch.ones(4, 2))
+    with pytest.raises(ValueError):
+        native_weight_partition(quantizer, NativeWeightPartition((4, 32), 1, 0, 2))

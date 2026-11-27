@@ -37,6 +37,7 @@ from modelopt.torch.quantization.utils import (
     disable_weight_cache,
     enable_weight_cache,
     invalidate_weight_cache,
+    native_weight,
     weight_cache_scope,
 )
 from modelopt.torch.quantization.utils.native_weight import (
@@ -386,3 +387,63 @@ def test_native_pin_miss_preserves_threshold_policy(policy, cached):
                 quantizer(source)
         else:
             torch.testing.assert_close(quantizer(source), reference(source), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("phase", ["fingerprint", "install"])
+def test_native_pin_replacement_failure_preserves_previous_payload(monkeypatch, phase):
+    model = _quantized_mlp(num_bits=(4, 3))
+    quantizer, source = model[0].weight_quantizer, model[0].weight
+    native, scale = FP8QTensor.quantize(source.detach(), axis=0)
+    quantizer._set_buffer("_scale", scale)
+    pin_native_weight(quantizer, native, source)
+    other = source.detach().roll(1, -1)
+    replacement, _ = FP8QTensor.quantize(other, axis=0)
+    assert not torch.equal(replacement._quantized_data, native._quantized_data)
+    original = native_weight._source_keys if phase == "fingerprint" else quantizer._set_buffer
+    calls = 0
+
+    def fail(*args):
+        nonlocal calls
+        calls += 1
+        if calls == (1 if phase == "fingerprint" else 2):
+            raise RuntimeError("interrupted pin replacement")
+        return original(*args)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            native_weight if phase == "fingerprint" else quantizer,
+            "_source_keys" if phase == "fingerprint" else "_set_buffer",
+            fail,
+        )
+        with pytest.raises(RuntimeError, match="interrupted pin"):
+            pin_native_weight(quantizer, replacement, other)
+    retained = get_pinned_native_weight(quantizer, source)
+    assert retained is not None
+    assert torch.equal(retained._quantized_data, native._quantized_data)
+
+
+@pytest.mark.parametrize("assign", [False, True])
+def test_native_pin_warm_validation_detects_loaded_fingerprints(assign):
+    quantizer = TensorQuantizer(QuantizerAttributeConfig(num_bits=(4, 3), axis=0))
+    source = torch.randn(4, 16)
+    native, scale = FP8QTensor.quantize(source, axis=0)
+    quantizer._set_buffer("_scale", scale)
+    pin_native_weight(quantizer, native, source)
+    assert get_pinned_native_weight(quantizer, source) is not None
+    replacement = copy.deepcopy(quantizer)
+    other, other_scale = FP8QTensor.quantize(source * 2, axis=0)
+    replacement._set_buffer("_scale", other_scale)
+    pin_native_weight(replacement, other, source * 2)
+    quantizer.load_state_dict(replacement.state_dict(), assign=assign)
+    assert get_pinned_native_weight(quantizer, source) is None
+
+
+def test_uncached_native_pin_keeps_higher_order_straight_through_gradients():
+    quantizer = TensorQuantizer(QuantizerAttributeConfig(num_bits=(4, 3), axis=0))
+    source = torch.randn(4, 16, requires_grad=True)
+    native, scale = FP8QTensor.quantize(source.detach(), axis=0)
+    quantizer._set_buffer("_scale", scale)
+    pin_native_weight(quantizer, native, source)
+    (gradient,) = torch.autograd.grad(quantizer(source).square().sum(), source, create_graph=True)
+    (second,) = torch.autograd.grad(gradient.sum(), source)
+    torch.testing.assert_close(second, torch.full_like(source, 2), rtol=0, atol=0)

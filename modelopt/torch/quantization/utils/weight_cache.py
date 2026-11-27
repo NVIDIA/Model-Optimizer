@@ -83,13 +83,21 @@ class _Session:
             self.stats.invalidations += 1
 
 
-class _CachedIdentity(torch.autograd.Function):
-    """Return the cached payload, passing the gradient straight through to the weight."""
+class _NativeIdentity(torch.autograd.Function):
+    """Return native values with the ordinary straight-through derivative."""
 
     @staticmethod
     def forward(ctx, weight, payload):
         ctx.set_materialize_grads(False)
         return payload
+
+    @staticmethod
+    def backward(ctx, grad):
+        return grad, None
+
+
+class _CachedIdentity(_NativeIdentity):
+    """Shared cached values do not support higher-order gradients."""
 
     @staticmethod
     def backward(ctx, grad):
@@ -287,7 +295,7 @@ def cached_fake_quantize(quantizer, inputs: torch.Tensor, source: torch.Tensor) 
         return (
             quantizer._fake_quantize(inputs)
             if value is None
-            else _CachedIdentity.apply(inputs, value)
+            else _NativeIdentity.apply(inputs, value)
         )
 
     key = _input_key(source)

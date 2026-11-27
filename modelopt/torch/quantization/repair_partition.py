@@ -26,7 +26,12 @@ from .ggml.registry import GGML_FORMAT_REGISTRY
 from .nn import TensorQuantizer
 from .qtensor import FP8QTensor, NVFP4QTensor, QTensorWrapper
 from .qtensor.base_qtensor import get_native_tensor_class
-from .utils.native_weight import pin_native_weight
+from .utils.native_weight import (
+    _canonical,
+    _format_key,
+    get_pinned_native_weight,
+    pin_native_weight,
+)
 
 __all__ = []
 
@@ -85,11 +90,20 @@ def _pinned_native_fields(quantizer, view, fields, source):
     meta = getattr(quantizer, "_native_weight_meta", None)
     if meta is None:
         return
+    if _format_key(quantizer, meta["source_shape"]) != _canonical(meta["format"]):
+        raise ValueError("Pinned native format changed before partitioning.")
     if tuple(meta["source_shape"]) == view.local_shape:
+        if get_pinned_native_weight(quantizer, source) is None:
+            raise ValueError("Pinned local native source changed before partitioning.")
         return
     if tuple(meta["source_shape"]) != view.shape:
         raise ValueError("Pinned native payload does not match its physical weight geometry.")
-    if tuple(source.shape) != view.local_shape:
+    global_source = tuple(source.shape) == view.shape
+    if global_source:
+        if get_pinned_native_weight(quantizer, source) is None:
+            raise ValueError("Pinned native source changed before partitioning.")
+        source = view.select(source)
+    elif tuple(source.shape) != view.local_shape:
         raise ValueError(
             "Partition pinned TP fields before FSDP, or enter the full FSDP weight owner."
         )
@@ -119,8 +133,11 @@ def _pinned_native_fields(quantizer, view, fields, source):
             for name in ("scale", "double_scale", "scale_zeros")
         },
     )
-    if not torch.equal(decoded, source):
-        raise ValueError("Pinned native codes no longer match the partitioned source weight.")
+    if not global_source and not torch.equal(decoded, source):
+        raise ValueError(
+            "Provide the original global source to partition an unrounded native pin; "
+            "a local source must match its decoded staged master."
+        )
     staged = copy.copy(quantizer)
     staged._buffers = dict(quantizer._buffers)
     pin_native_weight(staged, native, source)
@@ -137,7 +154,7 @@ def _pinned_native_fields(quantizer, view, fields, source):
 
 
 def native_weight_partition(quantizer, view, source=None):
-    """Plan native fields and repair-parameter ownership without mutating a quantizer."""
+    """Plan native fields using the original global source or a decoded local staged master."""
     if not quantizer.fake_quant:
         raise ValueError("Stage packed weights before applying tensor parallelism.")
     blocks = {
@@ -229,7 +246,9 @@ def native_weight_partition(quantizer, view, source=None):
             elif importance.numel() != view.local_shape[-1]:
                 raise ValueError("IQ importance does not match global or local input columns")
             fields[importance_name] = importance
-    elif source is not None:
+    elif getattr(quantizer, "_native_weight_meta", None) is not None:
+        if source is None:
+            raise ValueError("Partitioning a native pin requires its source weight.")
         _pinned_native_fields(quantizer, view, fields, source)
     axis = quantizer.axis
     axes = (axis,) if isinstance(axis, int) else axis or ()
@@ -245,7 +264,7 @@ def native_weight_partition(quantizer, view, source=None):
         and not quantizer._use_constant_amax
         and quantizer.backend != "ggml"
         and getattr(quantizer, "_amax", None) is None
-        and "_scale" not in fields
+        and ("_scale" not in fields or quantizer._dynamic)
     ):
         raise ValueError(
             "Native TP fields require calibrated thresholds, shard-local dynamic reductions "
