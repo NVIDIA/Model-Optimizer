@@ -47,6 +47,18 @@ from modelopt.torch._deploy._runtime.tensorrt.engine_builder import (
 )
 from modelopt.torch._deploy.utils import OnnxBytes
 
+_REAL_TRTEXEC_MAJOR = engine_builder._trtexec_major_version.__wrapped__
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_trtexec_version(monkeypatch):
+    """Keep unit tests independent of any host trtexec binary in PATH unless explicitly tested."""
+    monkeypatch.setattr(
+        engine_builder,
+        "_trtexec_major_version",
+        lambda: int(tensorrt.__version__.split(".", maxsplit=1)[0]),
+    )
+
 
 @pytest.fixture
 def setup_mocks(tmp_path):
@@ -306,26 +318,64 @@ def test_trt11_rejects_implicit_precision_before_writing(
         ("fp16", (TensorProto.FLOAT, TensorProto.BFLOAT16), TensorProto.FLOAT16, "default"),
         ("bf16", (TensorProto.FLOAT, TensorProto.FLOAT16), TensorProto.FLOAT16, "aliased"),
         ("bf16", (TensorProto.FLOAT, TensorProto.FLOAT16), TensorProto.FLOAT16, "empty"),
+        ("fp16", (TensorProto.FLOAT,), TensorProto.FLOAT, "upstream_relu"),
+        ("bf16", (TensorProto.FLOAT,), TensorProto.FLOAT, "upstream_relu"),
+        ("fp16", (TensorProto.FLOAT,), TensorProto.FLOAT, "native_discovery"),
     ],
 )
 def test_trt11_preserves_plugin_precision(
     tmp_path, monkeypatch, precision, plugin_types, output_type, layout
 ):
     plugin_type = plugin_types[0]
-    overridable = layout == "aliased"
+    overridable = layout in ("aliased", "native_discovery")
     monkeypatch.setattr(tensorrt, "__version__", "11.4")
+    monkeypatch.setattr(engine_builder, "_trtexec_major_version", lambda: 11)
 
-    def discover_plugin(self):
-        self.custom_ops = {"FloatPlugin"}
+    if layout == "native_discovery":
+        import modelopt.onnx.autocast.graphsanitizer as gs_mod
+        import modelopt.onnx.trt_utils as trt_utils_mod
 
-    # Discovery requires native TensorRT; conversion and boundary casts remain real.
-    monkeypatch.setattr(GraphSanitizer, "find_custom_nodes", discover_plugin)
+        monkeypatch.setattr(tensorrt, "DataType", object, raising=False)
+        for attr in (
+            "float32",
+            "float16",
+            "bfloat16",
+            "int4",
+            "int8",
+            "uint8",
+            "int32",
+            "int64",
+            "bool",
+            "fp8",
+            "fp4",
+        ):
+            monkeypatch.setattr(tensorrt, attr, attr, raising=False)
+        monkeypatch.setattr(trt_utils_mod, "trt", tensorrt, raising=False)
+        monkeypatch.setattr(gs_mod, "TRT_PYTHON_AVAILABLE", True)
+        monkeypatch.setattr(
+            gs_mod,
+            "get_custom_layers",
+            lambda *a, **kw: (["plugin"], {"p": {"dtype": "float32", "shape": (1, 4)}}),
+        )
+    else:
+
+        def discover_plugin(self):
+            self.custom_ops = {"FloatPlugin"}
+
+        # Discovery requires native TensorRT; conversion and boundary casts remain real.
+        monkeypatch.setattr(GraphSanitizer, "find_custom_nodes", discover_plugin)
+    plugin_in = "relu_out" if layout == "upstream_relu" else "x"
+    nodes = (
+        [helper.make_node("Relu", ["x"], ["relu_out"], name="upstream_relu")]
+        if layout == "upstream_relu"
+        else []
+    ) + [
+        helper.make_node("FloatPlugin", [plugin_in], ["p"], domain="test.plugins", name="plugin"),
+        helper.make_node("Cast", ["p"], ["p_cast"], to=plugin_type, name="plugin_output_cast"),
+        helper.make_node("MatMul", ["p_cast", "weight"], ["y"], name="matmul"),
+    ]
     graph = helper.make_graph(
-        [
-            helper.make_node("FloatPlugin", ["x"], ["p"], domain="test.plugins", name="plugin"),
-            helper.make_node("Cast", ["p"], ["p_cast"], to=plugin_type, name="plugin_output_cast"),
-            helper.make_node("MatMul", ["p_cast", "weight"], ["y"], name="matmul"),
-        ],
+        nodes,
         "plugin_precision",
         [helper.make_tensor_value_info("x", plugin_type, [1, 4])],
         [helper.make_tensor_value_info("y", plugin_type, [1, 4])],
@@ -417,3 +467,51 @@ def test_trt11_preserves_plugin_precision(
     )
     assert engine is not None and observed
     assert path.read_bytes() == source
+
+
+@pytest.mark.parametrize(
+    ("py_version", "cli_banner", "with_plugin", "expected_trt11"),
+    [
+        ("10.10", "[TensorRT v110400]\n", False, True),
+        ("11.4", "TensorRT version: 10.10.0\n", False, False),
+        ("10.10", "[TensorRT v110400]\n", True, None),
+        ("11.4", "[TensorRT v110400]\n", True, True),
+        ("10.10", "unrecognized banner\n", False, False),
+        ("10.10", "error", False, False),
+        ("10.10", None, False, False),
+    ],
+)
+def test_trtexec_cli_version_probe_and_mismatch_guard(
+    tmp_path, monkeypatch, py_version, cli_banner, with_plugin, expected_trt11
+):
+    import subprocess as sp
+
+    import modelopt.onnx.quantization.ort_utils as ort_utils
+
+    monkeypatch.setattr(engine_builder, "_trtexec_major_version", _REAL_TRTEXEC_MAJOR)
+    monkeypatch.setattr(tensorrt, "__version__", py_version)
+    if cli_banner is None:
+        monkeypatch.setattr(ort_utils.shutil, "which", lambda _: None)
+    else:
+        monkeypatch.setattr(ort_utils.shutil, "which", lambda _: "/usr/bin/trtexec")
+        if cli_banner == "error":
+            monkeypatch.setattr(
+                ort_utils, "_run_trtexec_command", mock.Mock(side_effect=sp.SubprocessError("boom"))
+            )
+        else:
+            monkeypatch.setattr(
+                ort_utils,
+                "_run_trtexec_command",
+                lambda *a, **kw: sp.CompletedProcess(["trtexec"], 0, stdout=cli_banner, stderr=""),
+            )
+
+    plugins = {"dynamicPlugins": ["plugin.so"]} if with_plugin else None
+    out_dir = tmp_path / "artifacts"
+    if expected_trt11 is None:
+        with pytest.raises(ValueError, match="Mismatched TensorRT major versions"):
+            build_engine(None, trt_mode="fp16", plugin_config=plugins, output_dir=out_dir)
+        assert not out_dir.exists()
+    else:
+        assert engine_builder._resolve_trt11_mode(plugins) is expected_trt11
+        if cli_banner and cli_banner.startswith("[TensorRT") and with_plugin:
+            assert ort_utils._check_for_trtexec("10.0") == "/usr/bin/trtexec"

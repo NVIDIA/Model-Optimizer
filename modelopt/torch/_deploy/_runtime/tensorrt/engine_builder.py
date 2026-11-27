@@ -24,6 +24,7 @@ import onnx
 import tensorrt as trt
 
 from modelopt.onnx.autocast.convert import convert_to_f16
+from modelopt.onnx.quantization.ort_utils import _get_trtexec_version
 from modelopt.onnx.utils import check_model_uses_external_data, save_onnx
 
 from ..._runtime.common import read_bytes, timeit, write_bytes, write_string
@@ -153,6 +154,27 @@ def _default_artifact_dir() -> Path:
     return Path(mkdtemp(prefix="modelopt_trt_"))
 
 
+@functools.cache
+def _trtexec_major_version() -> int | None:
+    version_str = _get_trtexec_version()
+    return int(version_str.split(".", maxsplit=1)[0]) if version_str else None
+
+
+def _resolve_trt11_mode(plugin_config: dict | None = None) -> bool:
+    py_major = int(trt.__version__.split(".", maxsplit=1)[0])
+    cli_major = _trtexec_major_version()
+    has_plugins = bool(
+        plugin_config
+        and (plugin_config.get("staticPlugins") or plugin_config.get("dynamicPlugins"))
+    )
+    if has_plugins and cli_major is not None and cli_major != py_major:
+        raise ValueError(
+            f"Mismatched TensorRT major versions for plugin build: Python tensorrt is "
+            f"{py_major}.x ({trt.__version__}) while 'trtexec' in PATH is {cli_major}.x."
+        )
+    return (cli_major if cli_major is not None else py_major) >= 11
+
+
 def _artifact_dir(output_dir: Path | None) -> Path:
     """Return ``output_dir`` (created if missing), or this process's private temporary directory."""
     if not output_dir:
@@ -226,7 +248,7 @@ def build_engine(
             [If there is subprocess.CalledProcessError, this byte variable is transferred to str]
     """
 
-    trt11 = int(trt.__version__.split(".", maxsplit=1)[0]) >= 11
+    trt11 = _resolve_trt11_mode(plugin_config)
     mode_flags = TRT_MODE_FLAGS[trt_mode]
     if trt11:
         if (

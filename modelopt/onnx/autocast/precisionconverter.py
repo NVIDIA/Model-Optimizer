@@ -330,9 +330,20 @@ class PrecisionConverter:
             if custom_inputs
             else {}
         )
+        low_node_set = set(low_precision_nodes) if custom_inputs else set()
         for node, index, dtype in custom_inputs:
             name = node.input[index]
-            if current_types.get(name) == dtype and name not in self.initializer_map:
+            producers = tensor_to_producers.get(name, ())
+            effective_type = (
+                onnx_utils.get_cast_to_type(producers[0])
+                if producers and producers[0].op_type == "Cast"
+                else (
+                    self.low_precision_type.onnx_type
+                    if producers and producers[0].name in low_node_set
+                    else current_types.get(name)
+                )
+            )
+            if effective_type == dtype and name not in self.initializer_map:
                 continue
             if (name, dtype) not in custom_casts:
                 precision = self._precision_type_from_onnx_type(dtype)

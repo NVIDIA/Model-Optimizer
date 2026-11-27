@@ -80,7 +80,7 @@ else
     echo "CUDA capability is less than 89, skipping fp8 mode!"
     quant_modes=("int8")
 fi
-trt_major=$(python -c 'import tensorrt; print(tensorrt.__version__.split(".")[0])')
+trt_major=$(python -c 'import tensorrt; from modelopt.onnx.quantization.ort_utils import _get_trtexec_version; print((_get_trtexec_version() or tensorrt.__version__).split(".")[0])')
 if [ "$trt_major" -lt 11 ]; then
     quant_modes+=("int8_iq")
 fi

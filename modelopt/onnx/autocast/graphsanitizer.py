@@ -150,6 +150,7 @@ class GraphSanitizer:
                 in custom_layer_names
             }
 
+            inputs = list(self.model.graph.input)
             # Set TensorRT plugin domain info in the graph for ORT compatibility
             if self.trt_plugin_ops:
                 self.model = set_trt_plugin_domain(self.model, self.trt_plugin_ops)
@@ -158,6 +159,8 @@ class GraphSanitizer:
             self.model = infer_types_shapes_tensorrt(
                 self.model, self.trt_plugins, all_tensor_info=all_tensor_info
             )
+            self.model.graph.ClearField("input")
+            self.model.graph.input.extend(inputs)
 
     def remove_disconnected_outputs(self) -> None:
         """Remove disconnected outputs from the model."""
