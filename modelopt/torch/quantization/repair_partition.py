@@ -443,10 +443,14 @@ def validate_native_weight_partition(quantizer, view):
     }
     # Real packed staging will supply a logical master, without changing the native field shapes.
     probe._fake_quant = True
+    # Source proof belongs to actual planning; this probe checks pin geometry below.
+    probe.__dict__.pop("_native_weight_meta", None)
     native_weight_partition(probe, view)
     meta = getattr(quantizer, "_native_weight_meta", None)
     if meta is None:
         return
+    if _format_key(quantizer, meta["source_shape"]) != _canonical(meta["format"]):
+        raise ValueError("Pinned native format changed before partitioning.")
     if tuple(meta["source_shape"]) not in (view.shape, view.local_shape):
         raise ValueError("Pinned native payload does not match its physical weight geometry.")
     cls = get_native_tensor_class(meta["class"])

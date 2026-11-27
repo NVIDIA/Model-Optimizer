@@ -141,6 +141,8 @@ def validate_tp_quantizer_aliases(quantizer, view, aliases):
             },
         )
     probe._fake_quant = True
+    # Alias geometry is data-free; actual field planning validates source provenance.
+    probe.__dict__.pop("_native_weight_meta", None)
     fields, _, _ = native_weight_partition(probe, view)
     meta = getattr(quantizer, "_native_weight_meta", None)
     if meta is not None and tuple(meta["source_shape"]) != view.local_shape:
