@@ -795,7 +795,8 @@ def _awq_on_a_sharded_fsdp2_model_job(rank, size):
     fully_shard(model, mesh=init_device_mesh("cpu", (size,)))
     forward_loop = lambda m: m(m.get_input())  # noqa: E731
     with bounded_collectives():
-        for config in (mtq.W4A8_AWQ_BETA_CFG, INT4_AWQ_FULL_CFG):  # awq_lite, awq_full
+        # awq_lite, awq_full, and svdquant, which runs awq_lite
+        for config in (mtq.W4A8_AWQ_BETA_CFG, INT4_AWQ_FULL_CFG, mtq.NVFP4_SVDQUANT_DEFAULT_CFG):
             with pytest.raises(NotImplementedError, match=f"FSDP2 model sharded over {size} ranks"):
                 mtq.quantize(model, config, forward_loop)
         # AutoQuantize checks every candidate before it calibrates the first one.

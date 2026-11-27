@@ -1251,6 +1251,40 @@ class SVDQuantConfig(QuantizeAlgorithmConfig):
         ),
     )
 
+    fused_group_scale: bool = ModeloptField(
+        default=False,
+        title="Give each fused group its exported smoothing scale during calibration",
+        description=(
+            "The linears that export fuses (q/k/v and gate/up for LLMs, each attention block's "
+            "Q/K/V for diffusers and LTX-2 models) get the mean of their searched "
+            "``pre_quant_scale`` before the SVD and the final max calibration, instead of only at "
+            "export. The activation ranges are then measured under the scale that is exported. "
+            "MoE experts that are separate linears are not covered, each expert's own gate/up pair "
+            "included: export still averages their scales across experts. Supported only when "
+            "calibrating a single model, not a wrapper of diffusion components, in a single "
+            "process, with a forward loop that calls the model rather than its forward method."
+        ),
+    )
+
+    fused_group_svd: bool = ModeloptField(
+        default=False,
+        title="Give each fused group its exported low-rank branch during calibration",
+        description=(
+            "Requires ``fused_group_scale``. Each group export fuses gets one SVD of its "
+            "stacked weights (a shared ``lora_a``) instead of one SVD per linear, and after "
+            "the final max calibration its members share the group max of their input and "
+            "weight amax. Export then keeps these groups as calibrated. It still averages the "
+            "scales of MoE experts that are separate linears, each expert's gate/up pair "
+            "included, and re-fits their low-rank branches."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _fused_group_svd_needs_fused_group_scale(self):
+        if self.fused_group_svd and not self.fused_group_scale:
+            raise ValueError("fused_group_svd requires fused_group_scale=True.")
+        return self
+
 
 class GPTQCalibConfig(_HessianInputDtypeConfig, QuantizeAlgorithmConfig):
     """The config for GPTQ quantization.

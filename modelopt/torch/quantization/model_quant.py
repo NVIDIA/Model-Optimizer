@@ -56,7 +56,7 @@ from .algorithms import (
     merge_auto_quantize_shards,
 )
 from .algorithms import get_auto_quantize_config as _get_auto_quantize_config
-from .config import QuantizeAlgoCfgType
+from .config import QuantizeAlgoCfgType, SVDQuantConfig
 from .kv_cache_auto_quant import (
     _KV_QUANTIZER_ATTRS,
     AutoQuantizeKVSearcher,
@@ -113,6 +113,35 @@ def _names_the_experts_groups(
     return _group_ranks(state.expert_model_parallel_group) == list(expert_parallel) and sorted(
         _group_ranks(state.data_parallel_group)
     ) == list(data_parallel)
+
+
+def _refuse_unsupported_fused_svdquant(model: nn.Module, algorithm: QuantizeAlgoCfgType) -> None:
+    """Refuse SVDQuant's fused-group options where calibration could not match export.
+
+    Called before the model changes.
+    """
+    for mode, options in get_modelike_from_algo_cfg(algorithm):
+        if mode != "svdquant_calibrate":
+            continue
+        config = SVDQuantConfig.model_validate(options)  # fused_group_svd needs fused_group_scale
+        if not config.fused_group_scale:
+            continue
+        if dist.is_distributed_run():
+            # Whatever the model's layout: each process would search the shared scales, and find
+            # the groups to share them, on its own data and forwards.
+            raise NotImplementedError(
+                f"SVDQuant's fused_group_scale is not supported in a run of {dist.size()} "
+                "processes: each would pick its own smoothing scales and fused groups. Calibrate "
+                "in a single process, or without fused_group_scale."
+            )
+        per_block = model_calib._exports_qkv_per_block
+        if not per_block(model) and any(map(per_block, model.modules())):
+            # Export fuses each diffusion component's Q/K/V per attention block, but calibration
+            # would group a wrapper's linears by the LLM rule, across its components' blocks.
+            raise NotImplementedError(
+                "SVDQuant's fused_group_scale does not support a model that wraps diffusion "
+                "components. Quantize each component by itself, as examples/diffusers does."
+            )
 
 
 def _refuse_unsupported_distributed_calibration(
@@ -180,7 +209,8 @@ def _refuse_awq_on_a_sharded_fsdp2_model(
     if dist.size() == 1 or not dist.is_fsdp2_model(model):
         return
     methods = [mode.removesuffix("_calibrate") for mode, _ in get_modelike_from_algo_cfg(algorithm)]
-    awq = [method for method in methods if method in ("awq_lite", "awq_full")]
+    # SVDQuant picks its smoothing scales with awq_lite.
+    awq = [method for method in methods if method in ("awq_lite", "awq_full", "svdquant")]
     if awq:
         # For the message only: the FSDP2 shard mesh can be narrower than the run (HSDP, 2D).
         mesh = _get_fsdp2_mesh(next(m for m in model.modules() if isinstance(m, FSDPModule)))
@@ -188,9 +218,9 @@ def _refuse_awq_on_a_sharded_fsdp2_model(
         what = f"AutoQuantize candidate {candidate!r} calibrates" if candidate else "Calibrating"
         raise NotImplementedError(
             f"{what} with {', '.join(awq)}, which is not supported yet on an FSDP2 model sharded "
-            f"over {ranks} ranks: each rank calibrates on its own data and folds the AWQ scale it "
+            f"over {ranks} ranks: each rank calibrates on its own data and folds the smoothing scale it "
             "picks into its own weight shard, so the shards would not match. Calibrate in a single "
-            "process, or with an algorithm other than AWQ."
+            "process, or with an algorithm other than AWQ and SVDQuant."
         )
 
 
@@ -246,6 +276,7 @@ def calibrate(
     Returns: The calibrated pytorch model.
     """
     _refuse_awq_on_a_sharded_fsdp2_model(model, algorithm)
+    _refuse_unsupported_fused_svdquant(model, algorithm)
     _refuse_unsupported_distributed_calibration(model, algorithm)
     _refuse_a_malformed_variable()
     if forward_loop is not None:
@@ -603,6 +634,7 @@ def quantize(
     """
     quantize_config = QuantizeConfig(**dict(config))
     _refuse_awq_on_a_sharded_fsdp2_model(model, config.get("algorithm"))
+    _refuse_unsupported_fused_svdquant(model, config.get("algorithm"))
     _refuse_unsupported_distributed_calibration(model, config.get("algorithm"))
     _refuse_a_malformed_variable()
     if not is_quantized(model):

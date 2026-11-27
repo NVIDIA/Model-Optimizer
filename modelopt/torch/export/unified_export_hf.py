@@ -395,12 +395,12 @@ def collect_shared_input_modules(
     return input_to_linear, output_to_layernorm
 
 
-def _shared_input_fusion_groups(model, input_to_linear):
+def _shared_input_fusion_groups(model, input_to_linear, name_of):
     """Keep Qwen's QKVZ and BA runtime groups separate despite their shared input."""
     for tensor, modules in input_to_linear.items():
         groups = defaultdict(list)
         for module in modules:
-            name = getattr(module, "name", "")
+            name = name_of(module)
             key = _linear_attn_qkvz_group_key(model, name) or _linear_attn_ba_group_key(model, name)
             groups[key].append(module)
         for key, group in groups.items():
@@ -410,6 +410,43 @@ def _shared_input_fusion_groups(model, input_to_linear):
                 )
         for group in groups.values():
             yield tensor, group, len(groups) == 1
+
+
+def _name_attr(module):
+    return getattr(module, "name", "")
+
+
+def fused_linear_groups(model, input_to_linear, qkv_only=False, name_of=_name_attr):
+    """Yield ``(tensor, modules, can_fuse_layernorm)`` for each group of linears export fuses.
+
+    Export gives every yielded group one mean pre_quant_scale and shared amax values
+    (``preprocess_linear_fusion``). SVDQuant calibration with ``fused_group_scale`` reuses this
+    to give the same groups their exported scale.
+
+    Args:
+        model: The model the linears belong to.
+        input_to_linear: Dict mapping an input to the list of linears that read it.
+        qkv_only: Keep only Q/K/V projections, grouped per attention block (diffusion export).
+        name_of: Returns a linear's module name; defaults to the ``name`` attribute that
+            :func:`collect_shared_input_modules` sets.
+    """
+    for tensor, modules, can_fuse_layernorm in _shared_input_fusion_groups(
+        model, input_to_linear, name_of
+    ):
+        # Must be re-evaluated per group as different modules may have different formats
+        if len(modules) < 2 or get_quantization_format(modules[0]) in FUSION_FREE_FORMATS:
+            continue
+        if not qkv_only:
+            yield tensor, modules, can_fuse_layernorm
+            continue
+        # Fuse only Q/K/V projections, and only within one attention block (diffusion models)
+        qkv_groups: dict[str, list[nn.Module]] = defaultdict(list)
+        for module in modules:
+            if is_qkv_projection(name_of(module)):
+                qkv_groups[get_qkv_group_key(name_of(module))].append(module)
+        for group in qkv_groups.values():
+            if len(group) >= 2:
+                yield tensor, group, False
 
 
 def _fuse_shared_input_modules(
@@ -441,49 +478,34 @@ def _fuse_shared_input_modules(
     fused_linears = {}
     fused_count = 0
 
-    for tensor, modules, can_fuse_layernorm in _shared_input_fusion_groups(model, input_to_linear):
-        # Get quantization format for this group of modules
-        # (must be re-evaluated per group as different modules may have different formats)
+    for tensor, modules, can_fuse_layernorm in fused_linear_groups(
+        model, input_to_linear, qkv_only
+    ):
+        if qkv_only:
+            preprocess_linear_fusion(modules, resmooth_only=False)
+            fused_count += 1
+            module_names = [getattr(m, "name", "unknown") for m in modules]
+            print(f"  Fused QKV group: {module_names}")
+            continue
+
+        with _fusion_update_context(model, modules, names):
+            preprocess_linear_fusion(modules)
+        fused_linears[modules[0].name] = [module.name for module in modules]
+        fused_count += 1
+
+        # Fuse layernorms (for AWQ)
         group_quant_format = get_quantization_format(modules[0]) if modules else quantization_format
-
-        if len(modules) > 1 and group_quant_format not in FUSION_FREE_FORMATS:
-            if qkv_only:
-                # Filter to only include QKV projection layers (diffusion models)
-                qkv_modules = [m for m in modules if is_qkv_projection(getattr(m, "name", ""))]
-
-                if len(qkv_modules) > 1:
-                    # Group QKV modules by their parent attention block
-                    qkv_groups: dict[str, list[nn.Module]] = defaultdict(list)
-                    for m in qkv_modules:
-                        group_key = get_qkv_group_key(getattr(m, "name", ""))
-                        qkv_groups[group_key].append(m)
-
-                    # Fuse each group separately
-                    for group_key, group_modules in qkv_groups.items():
-                        if len(group_modules) >= 2:
-                            preprocess_linear_fusion(group_modules, resmooth_only=False)
-                            fused_count += 1
-                            module_names = [getattr(m, "name", "unknown") for m in group_modules]
-                            print(f"  Fused QKV group: {module_names}")
-            else:
-                # Fuse all modules that have the same input (LLM models)
-                with _fusion_update_context(model, modules, names):
-                    preprocess_linear_fusion(modules)
-                fused_linears[modules[0].name] = [module.name for module in modules]
-                fused_count += 1
-
-            # Fuse layernorms (for AWQ)
-            if (
-                fuse_layernorms
-                and can_fuse_layernorm
-                and output_to_layernorm is not None
-                and group_quant_format is not None
-                and group_quant_format != QUANTIZATION_NONE
-                and "awq" in group_quant_format
-                and tensor in output_to_layernorm
-            ):
-                with fsdp2_aware_weight_update(model, output_to_layernorm[tensor], names=names):
-                    fuse_prequant_layernorm(output_to_layernorm[tensor], modules)
+        if (
+            fuse_layernorms
+            and can_fuse_layernorm
+            and output_to_layernorm is not None
+            and group_quant_format is not None
+            and group_quant_format != QUANTIZATION_NONE
+            and "awq" in group_quant_format
+            and tensor in output_to_layernorm
+        ):
+            with fsdp2_aware_weight_update(model, output_to_layernorm[tensor], names=names):
+                fuse_prequant_layernorm(output_to_layernorm[tensor], modules)
 
     if qkv_only:
         if fused_count > 0:

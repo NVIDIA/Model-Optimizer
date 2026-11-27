@@ -15,6 +15,7 @@
 
 """Unittests for AWQ and SVDQuant"""
 
+import copy
 from datetime import timedelta
 from functools import partial
 
@@ -32,8 +33,10 @@ from modelopt.torch.quantization.model_calib import (
     disable_pre_quant_scale_and_resmooth,
     layerwise_calibrate,
     max_calibrate,
+    svd,
 )
 from modelopt.torch.quantization.nn import QuantLinear, TensorQuantizer
+from modelopt.torch.quantization.utils import is_quantized
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 from modelopt.torch.utils.distributed import DistributionPlan, ParallelState, set_distribution_plan
 
@@ -516,6 +519,341 @@ def test_svdquant_lora_weights():
         assert torch.equal(module.weight, original_weight)
         assert module.weight_quantizer.svdquant_lora_a is not None
         assert module.weight_quantizer.svdquant_lora_b is not None
+
+
+class _LinearAttn(nn.Module):  # Qwen3-Next: qkv/z read the same input as a/b but fuse apart
+    def __init__(self):
+        super().__init__()
+        self.in_proj_qkv, self.in_proj_z = nn.Linear(64, 64), nn.Linear(64, 32)
+        self.in_proj_a, self.in_proj_b = nn.Linear(64, 16), nn.Linear(64, 16)
+
+
+class _SharedInputLLM(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.q, self.k, self.v = nn.Linear(64, 64), nn.Linear(64, 32), nn.Linear(64, 32)
+        self.layer = nn.Module()
+        self.layer.linear_attn = _LinearAttn()
+        self.out = nn.Linear(256, 64)
+
+    def forward(self, x):
+        la = self.layer.linear_attn
+        projs = [self.q, self.k, self.v, la.in_proj_qkv, la.in_proj_z, la.in_proj_a, la.in_proj_b]
+        return self.out(torch.cat([proj(x) for proj in projs], dim=-1))
+
+
+def _svdquant_fused_group_scale_case(reference, loop, groups, kept):
+    """Check the scales and input ranges ``fused_group_scale`` gives ``groups`` and ``kept``.
+
+    ``groups`` maps each group export fuses to the input its members read.
+    """
+
+    def quantize(fused_group_scale):
+        config = mtq.INT8_SMOOTHQUANT_CFG.copy()
+        config["algorithm"] = {"method": "svdquant", "fused_group_scale": fused_group_scale}
+        return mtq.quantize(copy.deepcopy(reference), config, loop)
+
+    per_layer, shared = quantize(False), quantize(True)
+
+    def pqs(model, name):
+        return model.get_submodule(name).input_quantizer.pre_quant_scale
+
+    for group, inputs in groups.items():
+        # Export's resmooth: the mean of the members' pre_quant_scales.
+        mean = torch.stack([pqs(per_layer, n) for n in group]).mean(0)
+        assert not torch.equal(pqs(per_layer, group[0]), mean)
+        for name in group:
+            assert torch.allclose(pqs(shared, name).float(), mean.float())
+            # The final max calibration measured the input range under the shared scale.
+            expected = (inputs * pqs(shared, name)).abs().amax()
+            assert torch.allclose(shared.get_submodule(name).input_quantizer.amax, expected)
+    for name in kept:
+        assert torch.equal(pqs(shared, name), pqs(per_layer, name))
+
+
+def test_svdquant_fused_group_scale():
+    torch.manual_seed(0)
+    inputs = torch.randn(2, 16, 64) * torch.rand(64) * 10  # uneven channels: scales differ
+    linear_attn = "layer.linear_attn."
+    groups = {
+        ("q", "k", "v"): inputs,
+        (linear_attn + "in_proj_qkv", linear_attn + "in_proj_z"): inputs,
+    }  # in_proj_a/b are left unquantized by the default config
+    loop = partial(forward_loop, dataloader=[inputs])
+    _svdquant_fused_group_scale_case(_SharedInputLLM(), loop, groups, kept=["out"])
+
+
+@pytest.mark.parametrize(
+    ("autocast", "scale", "lead"),
+    [
+        (False, 1.0, 1.0),
+        (True, 1.0, 1.0),
+        (False, 1e20, 1.0),
+        (False, 1e-25, 1.0),
+        (False, 1.0, 1e3),
+    ],
+)
+@pytest.mark.parametrize(
+    ("shape", "rank"), [((128, 48), 4), ((48, 128), 4), ((6, 8), 8), ((128, 48), 0)]
+)
+def test_svd_matches_full_svd(shape, rank, autocast, scale, lead):
+    """The top-rank factors match the full SVD for tall and wide weights, and pad past the rank.
+    Under BF16 autocast too, which would otherwise compute the Gram matrix in BF16; for weights
+    whose squares overflow or underflow float32; and when the first singular value is ``lead``
+    times larger, which leaves the Gram matrix unable to resolve the others."""
+    torch.manual_seed(0)
+    spectrum = torch.logspace(0, -2, min(shape))
+    spectrum[0] *= lead
+    u = torch.linalg.qr(torch.randn(shape[0], min(shape)))[0]
+    v = torch.linalg.qr(torch.randn(shape[1], min(shape)))[0]
+    weight = u * spectrum @ v.T * scale
+    with torch.autocast("cpu", dtype=torch.bfloat16, enabled=autocast):
+        us, vt = svd(weight, rank)
+    assert us.shape == (shape[0], rank) and vt.shape == (rank, shape[1])
+    k = min(rank, *shape)
+    atol = 1e-5 if lead == 1 else 3e-4  # a full float32 SVD's own error grows with s_1
+    torch.testing.assert_close(
+        us @ vt / scale, u[:, :k] * spectrum[:k] @ v[:, :k].T, atol=atol, rtol=0
+    )
+    torch.testing.assert_close(vt[:k] @ vt[:k].T, torch.eye(k), atol=1e-5, rtol=0)
+
+
+@pytest.mark.parametrize(
+    "enable_tf32",
+    [
+        lambda: setattr(torch.backends.cuda.matmul, "allow_tf32", True),
+        lambda: torch.set_float32_matmul_precision("high"),
+        lambda: setattr(torch.backends.cuda.matmul, "fp32_precision", "tf32"),
+    ],
+    ids=["allow_tf32", "float32_matmul_precision", "fp32_precision"],
+)
+def test_svd_turns_tf32_off_through_either_api(monkeypatch, enable_tf32):
+    """The fast path turns TF32 off however the caller turned it on, so that what reads the legacy
+    settings in between, such as TunableOp, still can, and the caller's settings come back."""
+    matmul, onednn = torch.backends.cuda.matmul, torch.backends.mkldnn.matmul
+
+    def settings():
+        try:
+            legacy = (matmul.allow_tf32, torch.get_float32_matmul_precision())
+        except RuntimeError:  # refused when the per-backend setting disagrees with them
+            legacy = None
+        return legacy, matmul.fp32_precision, onednn.fp32_precision
+
+    seen, eigh = [], torch.linalg.eigh
+
+    def eigh_reading_legacy_settings(gram):
+        seen.append((matmul.allow_tf32, matmul.fp32_precision))
+        return eigh(gram)
+
+    monkeypatch.setattr(torch.linalg, "eigh", eigh_reading_legacy_settings)
+    default = (torch.get_float32_matmul_precision(), matmul.fp32_precision, onednn.fp32_precision)
+    enable_tf32()
+    before = settings()
+    try:
+        svd(torch.randn(128, 48), 4)
+        assert seen == [(False, "ieee")]
+        assert settings() == before
+    finally:
+        torch.set_float32_matmul_precision(default[0])
+        matmul.fp32_precision, onednn.fp32_precision = default[1:]
+
+
+def test_svdquant_fused_group_svd():
+    """Each group export fuses shares its lora_a and amax. That export then leaves an NVFP4
+    model unchanged is tested in ``tests/gpu/torch/quantization/test_calib_cuda.py``."""
+    torch.manual_seed(0)
+    inputs = torch.randn(2, 16, 64) * torch.rand(64) * 10
+    config = copy.deepcopy(mtq.INT8_SMOOTHQUANT_CFG)
+    # Per-tensor weight amax, which export unifies across a fused group.
+    config["quant_cfg"] = [
+        {**e, "cfg": {"num_bits": 8, "axis": None}}
+        if e.get("quantizer_name") == "*weight_quantizer"
+        else e
+        for e in config["quant_cfg"]
+    ]
+    config["algorithm"] = {"method": "svdquant", "fused_group_scale": True, "fused_group_svd": True}
+    model = mtq.quantize(_SharedInputLLM(), config, partial(forward_loop, dataloader=[inputs]))
+
+    la = model.layer.linear_attn
+    for group in ([model.q, model.k, model.v], [la.in_proj_qkv, la.in_proj_z]):
+        first = group[0]
+        for m in group[1:]:
+            for attr in ("svdquant_lora_a", "amax"):
+                assert torch.equal(
+                    getattr(m.weight_quantizer, attr), getattr(first.weight_quantizer, attr)
+                )
+            for attr in ("pre_quant_scale", "amax"):
+                assert torch.equal(
+                    getattr(m.input_quantizer, attr), getattr(first.input_quantizer, attr)
+                )
+
+    # A group whose members differ in format or range layout keeps its per-layer scales and
+    # low-rank branches; export cannot stack its ranges either.
+    for k_differs in (
+        {"quantizer_name": "*k.input_quantizer", "enable": False},
+        {"quantizer_name": "*k.input_quantizer", "cfg": {"num_bits": 8, "type": "dynamic"}},
+        {"quantizer_name": "*k.weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+    ):
+        mixed = copy.deepcopy(config)
+        mixed["quant_cfg"] = [*mixed["quant_cfg"], k_differs]
+        model = mtq.quantize(_SharedInputLLM(), mixed, partial(forward_loop, dataloader=[inputs]))
+        assert not torch.equal(
+            model.q.weight_quantizer.svdquant_lora_a, model.v.weight_quantizer.svdquant_lora_a
+        )
+        la = model.layer.linear_attn
+        assert torch.equal(
+            la.in_proj_qkv.weight_quantizer.svdquant_lora_a,
+            la.in_proj_z.weight_quantizer.svdquant_lora_a,
+        )
+
+    # Where export could not tell a format or fuse a group, here formats differing within the QKVZ
+    # group and an INT4 per-channel weight, every layer keeps its own scale; calibration goes on.
+    for unexportable in (
+        {
+            "quantizer_name": "*in_proj_z.weight_quantizer",
+            "cfg": {"num_bits": 4, "block_sizes": {-1: 16}},
+        },
+        {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 4, "axis": 0}},
+    ):
+        per_layer = copy.deepcopy(config)
+        per_layer["quant_cfg"] = [*per_layer["quant_cfg"], unexportable]
+        model = mtq.quantize(
+            _SharedInputLLM(), per_layer, partial(forward_loop, dataloader=[inputs])
+        )
+        assert not torch.equal(
+            model.q.weight_quantizer.svdquant_lora_a, model.v.weight_quantizer.svdquant_lora_a
+        )
+
+    # fused_group_svd without fused_group_scale is refused before the model changes.
+    model = _SharedInputLLM()
+    config["algorithm"] = {"method": "svdquant", "fused_group_svd": True}
+    with pytest.raises(ValueError, match="fused_group_svd requires fused_group_scale"):
+        mtq.quantize(model, config, partial(forward_loop, dataloader=[inputs]))
+    assert not is_quantized(model)
+
+
+def test_svdquant_fused_group_scale_needs_one_forward():
+    """Linears that read the same tensor only in different forwards never ran together, so they
+    keep their own scales."""
+
+    class _TwoBranches(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.p, self.r = nn.Linear(64, 64), nn.Linear(64, 64)
+
+        def forward(self, x, branch):
+            return getattr(self, branch)(x)
+
+    torch.manual_seed(0)
+    inputs = torch.randn(2, 16, 64) * torch.rand(64) * 10
+
+    def loop(model):  # the same tensor object in both forwards
+        model(inputs, "p")
+        model(inputs, "r")
+
+    _svdquant_fused_group_scale_case(_TwoBranches(), loop, groups={}, kept=["p", "r"])
+
+    def forward_method_loop(model):  # forward hooks, which mark where a forward ends, do not run
+        model.forward(inputs, "p")
+        model.forward(inputs, "r")
+
+    _svdquant_fused_group_scale_case(
+        _TwoBranches(), forward_method_loop, groups={}, kept=["p", "r"]
+    )
+
+
+def _svdquant_fused_group_scale_in_a_distributed_run_job(rank, size):
+    model = _SharedInputLLM()  # neither FSDP2 nor a recorded distribution plan
+    config = copy.deepcopy(mtq.INT8_SMOOTHQUANT_CFG)
+    config["algorithm"] = {"method": "svdquant", "fused_group_scale": True}
+    with pytest.raises(NotImplementedError, match=f"run of {size} processes"):
+        mtq.quantize(model, config, lambda m: m(torch.randn(2, 16, 64)))
+    assert not is_quantized(model)
+
+
+def test_svdquant_fused_group_scale_is_refused_in_a_distributed_run(cpu_dist_workers):
+    """Each process would search the shared scales and find the groups on its own data, whatever
+    the model's layout: every process refuses alike, before the model changes."""
+    cpu_dist_workers.run(_svdquant_fused_group_scale_in_a_distributed_run_job)
+
+
+def test_svdquant_fused_group_scale_diffusers():
+    diffusers = pytest.importorskip("diffusers")
+
+    class _CrossAttnBlock(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.attn = nn.Module()
+            self.attn.to_q, self.attn.to_k, self.attn.to_v = (nn.Linear(64, 64) for _ in range(3))
+            self.context_proj = nn.Linear(64, 64)  # reads the context too, but is not Q/K/V
+
+        def forward(self, x, context):
+            attn = self.attn
+            return (
+                x
+                + attn.to_q(x) * attn.to_k(context) * attn.to_v(context)
+                + self.context_proj(context)
+            )
+
+    class _Transformer(diffusers.ModelMixin, diffusers.ConfigMixin):
+        def __init__(self):
+            super().__init__()
+            self.blocks = nn.ModuleList(_CrossAttnBlock() for _ in range(2))
+
+        def forward(self, x, context):
+            for block in self.blocks:  # every block reads the same context tensor
+                x = block(x, context)
+            return x
+
+    torch.manual_seed(0)
+    x = torch.randn(2, 16, 64)
+    context = torch.randn(2, 16, 64) * torch.rand(64) * 10
+
+    def loop(model):
+        model(x, context)
+
+    # Export fuses each block's cross-attention K/V, not across blocks or with context_proj.
+    groups = {(f"blocks.{i}.attn.to_k", f"blocks.{i}.attn.to_v"): context for i in range(2)}
+    kept = [f"blocks.{i}.{n}" for i in range(2) for n in ("attn.to_q", "context_proj")]
+    _svdquant_fused_group_scale_case(_Transformer(), loop, groups, kept)
+
+    # Wan 2.2's layout: a pipeline runs two backbones on one context, and examples/diffusers
+    # quantizes each by itself while calibration runs the whole pipeline.
+    transformer_2 = _Transformer()
+
+    def pipeline_loop(transformer):
+        transformer_2(transformer(x, context), context)
+
+    _svdquant_fused_group_scale_case(_Transformer(), pipeline_loop, groups, kept)
+
+    # LTX-2's models are not diffusers models, but export fuses their Q/K/V per block too.
+    class _LTXModel(nn.Module):
+        __module__ = "ltx_core.model.transformer.model"
+
+        def __init__(self):
+            super().__init__()
+            self.blocks = nn.ModuleList(_CrossAttnBlock() for _ in range(2))
+
+        forward = _Transformer.forward
+
+    _svdquant_fused_group_scale_case(_LTXModel(), loop, groups, kept)
+
+    # A wrapper of both backbones is not a diffusers object: calibration would group its linears
+    # by the LLM rule, across backbones and blocks, so it is refused before the model changes.
+    class _Pipeline(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.transformer, self.transformer_2 = _Transformer(), _Transformer()
+
+        def forward(self, x, context):
+            return self.transformer_2(self.transformer(x, context), context)
+
+    pipeline = _Pipeline()
+    config = copy.deepcopy(mtq.INT8_SMOOTHQUANT_CFG)
+    config["algorithm"] = {"method": "svdquant", "fused_group_scale": True}
+    with pytest.raises(NotImplementedError, match="wraps diffusion components"):
+        mtq.quantize(pipeline, config, lambda m: m(x, context))
+    assert not is_quantized(pipeline)
 
 
 def test_layerwise_calibrate_support_gate():

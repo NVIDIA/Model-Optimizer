@@ -18,12 +18,14 @@
 import fnmatch
 import itertools
 import math
+import re
 import sys
 import time
 import warnings
+import weakref
 from collections import Counter, defaultdict
 from collections.abc import Callable, Mapping, Sequence
-from contextlib import nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
 from functools import partial
 from typing import Any, TypeAlias
 
@@ -1750,9 +1752,10 @@ def awq(
     details on the remaining arguments.
     """
     _warn_if_fused_experts_skipped(model, algorithm)
+    fused_groups = None
     with SequentialQuantizer.convert_to_single_quantizer(model):
         if algorithm in ["awq_full", "awq_lite"]:
-            awq_lite(model, forward_loop, **kwargs)
+            fused_groups = awq_lite(model, forward_loop, **kwargs)
 
         if algorithm in ["awq_full", "awq_clip"]:
             awq_clip(model, forward_loop, **kwargs)
@@ -1764,6 +1767,7 @@ def awq(
         if is_quantized_linear(module) and isinstance(module.weight_quantizer, SequentialQuantizer):
             with enable_weight_access_and_writeback(module, model, names):
                 max_calibrate(module, lambda linear: linear.weight_quantizer(module.weight))
+    return fused_groups
 
 
 @torch.no_grad()
@@ -1773,6 +1777,7 @@ def awq_lite(
     alpha_step: float = 0.1,
     debug: bool = False,
     use_weight_scale: bool = True,
+    fused_group_scale: bool = False,
     **kwargs,
 ):
     """Lite version of AWQ.
@@ -1781,6 +1786,13 @@ def awq_lite(
         model: Model to be calibrated.
         forward_loop: A callable which takes the model as argument and
             forwards calibration data through the model.
+        fused_group_scale: If True, the linears that export fuses (q/k/v and gate/up for LLMs,
+            each attention block's Q/K/V for diffusers models) get the mean of their searched
+            ``pre_quant_scale``, the scale export would give them. Used by :func:`svdquant`.
+
+    Returns:
+        The module names of each group given a shared ``pre_quant_scale`` (empty unless
+        ``fused_group_scale``), or None if ``forward_loop`` is None.
 
     See :class:`AWQLiteCalibConfig <modelopt.torch.quantization.config.AWQLiteCalibConfig>` for
     details on the remaining arguments.
@@ -1811,6 +1823,7 @@ def awq_lite(
             self.num_tokens = 0
             self.module = module
             self.is_enabled = True
+            self.input_peers = []  # per cache step: the helpers that read the same input tensor
 
         def setup(self):
             module = self.module
@@ -1871,7 +1884,7 @@ def awq_lite(
         self.awq_lite.loss[alpha] += loss.to(self.awq_lite.loss[alpha].device)
 
     def update_best_params(self):
-        if not self.awq_lite.is_enabled:
+        if not self.awq_lite.is_enabled or self.awq_lite.best_scale is not None:
             return
         self.awq_lite.loss.update({k: float(v) for k, v in self.awq_lite.loss.items()})
         self.awq_lite.best_alpha = min(self.awq_lite.loss, key=self.awq_lite.loss.get)
@@ -1901,6 +1914,8 @@ def awq_lite(
             return out_actual
 
         if AWQLiteHelper.cache_mode:
+            if fused_group_scale:
+                note_shared_input(self.awq_lite, input)
             # Get local tensor from Dtensor
             input = input.to_local() if hasattr(input, "to_local") else input
 
@@ -1935,6 +1950,124 @@ def awq_lite(
         # Now forward the actual output without any quantization
         return out_actual
 
+    shared_inputs: dict[int, tuple] = {}  # id(input) -> (weakref to input, helpers reading it)
+    # The model's forwards in progress, and the first linear that ran outside one: a forward loop
+    # that calls model.forward or a submodule directly hides where one forward ends.
+    model_forward = {"depth": 0, "linear_outside": None}
+
+    def note_shared_input(helper, x):
+        if model_forward["depth"] == 0:
+            model_forward["linear_outside"] = model_forward["linear_outside"] or helper.name
+            return
+        # Identity, not data_ptr: a freed activation's memory can be reused by a later layer.
+        # The weakref proves the tensor is still the one recorded under this id.
+        entry = shared_inputs.get(id(x))
+        if entry is None or entry[0]() is not x:
+            if len(shared_inputs) > 4096:
+                for key in [k for k, (ref, _) in shared_inputs.items() if ref() is None]:
+                    del shared_inputs[key]
+            entry = (weakref.ref(x), [])
+            shared_inputs[id(x)] = entry
+        entry[1].append(helper)
+        helper.input_peers.append(entry[1])
+
+    def share_fused_group_scales(model):
+        """Give the linears that export fuses their mean pre_quant_scale.
+
+        Export replaces the pre_quant_scales of each fused group with their mean
+        (``preprocess_linear_fusion``). Taking the same mean here, before the scale is applied,
+        makes the weight smoothing and every later calibration step see the exported scale.
+        The groups come from export's own rule, applied to the inputs seen while caching.
+        """
+        # Imported here: modelopt.torch.export imports this module.
+        from modelopt.torch.export.quant_utils import get_quantization_format
+        from modelopt.torch.export.unified_export_hf import fused_linear_groups
+
+        def layout(helper):
+            """What decides whether export can stack a group's ranges."""
+            weight = helper.module.weight_quantizer
+            weights = weight if isinstance(weight, SequentialQuantizer) else [weight]
+            # Ranges from the caching pass: one per member with a static input range.
+            has_input_range = helper.module.input_quantizer.amax is not None
+            return (
+                helper.is_input_quantized,
+                has_input_range,
+                repr([(type(q), q.num_bits, q.axis, q.block_sizes) for q in weights]),
+            )
+
+        helpers = [m.awq_lite for m in model.modules() if hasattr(m, "awq_lite")]
+
+        def keep_every_scale(reason):
+            warn_rank_0(f"awq_lite: every layer keeps its own scale: {reason}")
+            for h in helpers:
+                h.input_peers = []
+            return []
+
+        if model_forward["linear_outside"] is not None:
+            return keep_every_scale(
+                f"{model_forward['linear_outside']} ran outside the model's forward (the forward "
+                "loop calls a submodule or the forward method, or generate runs an encoder by "
+                "itself), so which linears read one input in one forward is unknown."
+            )
+        # Export fails on a format it cannot tell, as grouping below would; the search has
+        # disabled every input quantizer, so whether each input is quantized is compared apart.
+        formats = {}
+        for h in helpers:
+            try:
+                formats[h.name] = get_quantization_format(h.module)
+            except (AssertionError, NotImplementedError, TypeError) as error:
+                return keep_every_scale(f"export cannot tell {h.name}'s format ({error!r}).")
+        by_name = {h.name: h for h in helpers}
+        input_to_linear, keys_of = {}, {}
+        for h in helpers:
+            keys_of[h.name] = {
+                tuple(dict.fromkeys(p.name for p in peers)) for peers in h.input_peers
+            }
+            for key in keys_of[h.name]:
+                input_to_linear.setdefault(key, [by_name[n].module for n in key])
+            h.input_peers = []
+
+        try:
+            candidates = list(
+                fused_linear_groups(
+                    model,
+                    input_to_linear,
+                    qkv_only=_exports_qkv_per_block(model),
+                    name_of=lambda module: module.awq_lite.name,
+                )
+            )
+        except AssertionError as error:  # export's own check, which exporting this model fails too
+            return keep_every_scale(f"export cannot fuse its layers ({error}).")
+        groups = []
+        for key, modules, _ in candidates:
+            members = [m.awq_lite for m in modules]
+            if any(keys_of[m.name] != {key} for m in members) or not all(
+                m.is_enabled and m.num_search_steps > 0 for m in members
+            ):
+                warn_rank_0(
+                    f"awq_lite: {[m.name for m in members]} keep per-layer scales: they do not "
+                    "share an input on every step, or a member was not searched."
+                )
+                continue
+            # Checked before any scale changes: export's fusion, which the range sharing after the
+            # SVD reuses, stacks the members' ranges and refuses differing formats.
+            if len({(layout(m), formats[m.name]) for m in members}) > 1:
+                warn_rank_0(
+                    f"awq_lite: {[m.name for m in members]} keep per-layer scales: their "
+                    "quantization formats or range layouts differ, so export cannot fuse them."
+                )
+                continue
+            for m in members:
+                update_best_params(m.module)
+            # The mean of the pre_quant_scales as export stores and averages them (weight dtype).
+            dtype, device = members[0].module.weight.dtype, members[0].best_scale.device
+            mean = torch.stack([(1.0 / m.best_scale).to(device, dtype) for m in members]).mean(0)
+            for m in members:
+                m.best_scale = 1.0 / mean.float()
+            groups.append([m.name for m in members])
+        print_rank_0(f"awq_lite: {len(groups)} fused group(s) share their mean pre_quant_scale")
+        return groups
+
     # Pre-compute the name maps ONCE to avoid O(n^2) complexity in enable_weight_access_and_writeback
     names = module_name_maps(model)
     for name, module in names.name_to_module.items():
@@ -1950,7 +2083,29 @@ def awq_lite(
     # Lets enable stats collection
     # This will collect amax for input_quantizers and KV quantizers during the caching mode forward pass
     enable_stats_collection(model)
-    forward_loop(model)
+
+    def enter_forward(*_):
+        if model_forward["depth"] == 0:
+            # A tensor passed again in a later forward does not join its readers there to this one's.
+            shared_inputs.clear()
+        model_forward["depth"] += 1
+
+    def leave_forward(*_):
+        model_forward["depth"] -= 1
+
+    hooks = (
+        [
+            model.register_forward_pre_hook(enter_forward),
+            model.register_forward_hook(leave_forward, always_call=True),
+        ]
+        if fused_group_scale
+        else []
+    )
+    try:
+        forward_loop(model)
+    finally:
+        for hook in hooks:
+            hook.remove()
 
     # Load the amax values collected during the caching mode forward pass
     # This will also perform distributed amax sync for input_quantizers
@@ -2006,10 +2161,13 @@ def awq_lite(
         ):
             module.awq_lite.is_enabled = False
 
+    shared_inputs.clear()
     AWQLiteHelper.cache_mode = False
     print_rank_0("awq_lite: Searching parameters...")
     with torch.no_grad():
         forward_loop(model)
+
+    fused_groups = share_fused_group_scales(model) if fused_group_scale else []
 
     def postprocess(module, name):
         update_best_params(module)
@@ -2097,6 +2255,7 @@ def awq_lite(
             module.awq_lite.cleanup()
             if not debug:
                 delattr(module, "awq_lite")
+    return fused_groups
 
 
 @torch.no_grad()
@@ -2341,15 +2500,93 @@ def _get_awq_quantizer_block_size(tensor: torch.Tensor, quantizer: TensorQuantiz
     return blocksize
 
 
+def _exports_qkv_per_block(model: nn.Module) -> bool:
+    """Whether export fuses only ``model``'s Q/K/V, per attention block, as for diffusion components.
+
+    That is how it exports diffusers models and LTX-2's, which are ``ltx_core`` models instead.
+    """
+    # Imported here: modelopt.torch.export imports this module.
+    from modelopt.torch.export.diffusers_utils import is_diffusers_object
+
+    return is_diffusers_object(model) or type(model).__module__.startswith("ltx_core.")
+
+
+@contextmanager
+def _ieee_fp32_matmuls():
+    """Run float32 matmuls in full precision, whichever TF32 API the caller set.
+
+    PyTorch refuses to read the legacy TF32 settings (``allow_tf32``, the global matmul precision)
+    while they disagree with the per-backend ``fp32_precision``. Overriding only the latter would
+    break legacy readers in between, such as TunableOp and torch.compile.
+    """
+    backends = (torch.backends.cuda.matmul, torch.backends.mkldnn.matmul)
+    saved = [backend.fp32_precision for backend in backends]
+    try:
+        legacy = torch.get_float32_matmul_precision()
+    except RuntimeError:  # the caller's per-backend settings already disagree with the legacy ones
+        legacy = None
+    if legacy is not None:
+        torch.set_float32_matmul_precision("highest")
+    for backend in backends:  # oneDNN too, for weights on CPU
+        backend.fp32_precision = "ieee"
+    try:
+        yield
+    finally:
+        if legacy is not None:
+            torch.set_float32_matmul_precision(legacy)
+        # The global setter also sets oneDNN's matmul precision, which the caller may have set apart.
+        for backend, precision in zip(backends, saved):
+            backend.fp32_precision = precision
+
+
+def _top_singular_factors(w, rank, oversample=32):
+    """Return ``(U_r·S_r, V_rᵀ)`` of ``w``, computed through an eigendecomposition of its Gram matrix.
+
+    The symmetric eigensolver is 6-20x faster than the SVD solvers on GPU at 1024-4096 columns. Its top
+    ``rank + oversample`` eigenvectors span the top singular subspace, and a small SVD of ``w`` projected
+    onto them (Rayleigh-Ritz) gives the singular triplets. On Qwen3 SVDQuant weights, the rank-``rank``
+    residual is closer to a float64 SVD's than a full float32 SVD's is. A weight whose spectrum the Gram
+    matrix cannot resolve takes the full SVD instead.
+    """
+
+    def full_svd():
+        u, s, vt = torch.linalg.svd(w, full_matrices=False)
+        return u[:, :rank] * s[:rank], vt[:rank]
+
+    if rank + oversample >= min(w.shape):
+        return full_svd()
+    wide = w.shape[0] < w.shape[1]
+    a = w.T if wide else w
+    lo, hi = w.aminmax()
+    peak = torch.maximum(-lo, hi).item()  # a host sync, as eigh's own is
+    if peak > 0 and not 1e-15 < peak < 1e15:
+        # The Gram matrix squares the weight's magnitudes, which float32 would overflow or underflow.
+        # Rescaled only then, as the rescaled copy costs as much memory as the weight.
+        a = a / peak
+    else:
+        peak = 1.0
+    # TF32's 10-bit mantissa, or the 16-bit dtype autocast would run the matmuls in, would swamp the
+    # squared condition number of the Gram matrix.
+    with _ieee_fp32_matmuls(), torch.autocast(w.device.type, enabled=False):
+        basis = torch.linalg.eigh(a.T @ a)[1][:, -(rank + oversample) :]
+        u, s, yt = torch.linalg.svd(a @ basis, full_matrices=False)
+        v = basis @ yt[:rank].T
+    # The Gram matrix resolves the k-th direction only to about eps·(s_1/s_k)² of its size. Past 1e-4,
+    # no longer far below BF16's rounding of the factors, the full SVD is taken instead (in float32,
+    # when s_rank < 0.035·s_1). Ritz values only underestimate s_rank, so the check errs that way.
+    if rank > 0 and s[rank - 1] < s[0] * (torch.finfo(s.dtype).eps / 1e-4) ** 0.5:
+        return full_svd()
+    u, s = u[:, :rank], s[:rank] * peak
+    return (v * s, u.T) if wide else (u * s, v.T)  # a = U·S·Vᵀ, and w = aᵀ when wide
+
+
 def svd(weight, rank):
     original_device = weight.device
     original_dtype = weight.dtype
     # float32 is enough because the factors are cast back to the weight dtype, while float64 is
     # over 20x slower on GPUs with low float64 throughput, such as GB300.
     compute_dtype = torch.float64 if original_dtype == torch.float64 else torch.float32
-    u, s, vt = torch.linalg.svd(weight.to(compute_dtype), full_matrices=False)
-    us = u[:, :rank] * s[:rank]
-    vt = vt[:rank]
+    us, vt = _top_singular_factors(weight.to(compute_dtype), rank)
     us = us.to(device=original_device, dtype=original_dtype)
     vt = vt.to(device=original_device, dtype=original_dtype)
     if us.shape[1] < rank or vt.shape[0] < rank:
@@ -2373,6 +2610,8 @@ def svdquant(
     forward_loop: ForwardLoop | None = None,
     lowrank: int = 32,
     skip_layers: list[str] | None = None,
+    fused_group_scale: bool = False,
+    fused_group_svd: bool = False,
     **kwargs,
 ):
     """Lite version of SVDQuant.
@@ -2389,17 +2628,32 @@ def svdquant(
     def is_skipped(name):
         return any(fnmatch.fnmatch(name, pattern) for pattern in skip_layers or [])
 
-    def postprocess(module, name):
-        print_rank_0(f"SVD {name}")
-        weight = module.weight.data
-        us, vt = svd(weight, lowrank)
-        module.weight_quantizer.svdquant_lora_a = vt
-        module.weight_quantizer.svdquant_lora_b = us
-        module.weight.data.sub_(
-            module.weight_quantizer.svdquant_lora_b @ module.weight_quantizer.svdquant_lora_a
-        )
-        module.weight_quantizer.reset_amax()
-        module.input_quantizer.reset_amax()
+    def postprocess(modules, names):
+        # One SVD of the stacked weights: the members share lora_a, as export fuses them.
+        print_rank_0(f"SVD {', '.join(names)}")
+        weights = [m.weight.data for m in modules]
+        us, vt = svd(weights[0] if len(weights) == 1 else torch.cat(weights), lowrank)
+        for module, lora_b in zip(modules, us.split([m.weight.shape[0] for m in modules])):
+            module.weight_quantizer.svdquant_lora_a = vt
+            module.weight_quantizer.svdquant_lora_b = lora_b
+            module.weight.data.sub_(lora_b @ vt)
+            module.weight_quantizer.reset_amax()
+            module.input_quantizer.reset_amax()
+
+    if fused_group_scale:
+        # Export's rule for experts that are separate linears (requantize_resmooth_fused_llm_layers)
+        experts = [
+            name
+            for name, module in model.named_modules()
+            if is_quantized_linear(module) and re.search(r"experts?\.\d+\.", name)
+        ]
+        if experts:
+            warn_rank_0(
+                "fused_group_scale gives fused groups of dense layers the scale and low-rank branch "
+                f"export writes. MoE experts that are separate linears (e.g. {experts[0]}) are not "
+                "covered, each expert's gate/up pair included: export still averages their scales "
+                "across experts and re-fits their low-rank branches."
+            )
 
     create_and_replace_svdquant_linear_on_the_fly(model=model)
 
@@ -2421,21 +2675,45 @@ def svdquant(
                         quantizer.disable()
                         skipped_quantizers.append(quantizer)
 
-    awq(model, forward_loop, "awq_lite", **kwargs)
+    fused_groups = awq(
+        model, forward_loop, "awq_lite", fused_group_scale=fused_group_scale, **kwargs
+    )
+    fused_groups = (fused_groups or []) if fused_group_svd else []
 
     for quantizer in skipped_quantizers:
         quantizer.enable()
 
     names = module_name_maps(model)
+    group_of = {name: group for group in fused_groups for name in group}
+    done = set()
     for name, module in names.name_to_module.items():
         if (
             is_quantized_linear(module)
             and module.weight_quantizer.is_enabled
             and not is_skipped(name)
+            and name not in done
         ):
-            with enable_weight_access_and_writeback(module, model, names):
-                postprocess(module, name)
+            group = group_of.get(name, [name])
+            modules = [names.name_to_module[n] for n in group]
+            with ExitStack() as stack:
+                for m in modules:
+                    stack.enter_context(enable_weight_access_and_writeback(m, model, names))
+                postprocess(modules, group)
+            done.update(group)
     max_calibrate(model, forward_loop)
+
+    if fused_groups:
+        # Imported here: modelopt.torch.export imports this module.
+        from modelopt.torch.export.quant_utils import preprocess_linear_fusion
+
+        # Export's own fusion: the shared scale and lora_a are kept, and the members get the
+        # group max of their input and weight amax, so export leaves these groups unchanged.
+        for group in fused_groups:
+            modules = [names.name_to_module[n] for n in group]
+            with ExitStack() as stack:
+                for m in modules:
+                    stack.enter_context(enable_weight_access_and_writeback(m, model, names))
+                preprocess_linear_fusion(modules)
 
 
 @torch.no_grad()
