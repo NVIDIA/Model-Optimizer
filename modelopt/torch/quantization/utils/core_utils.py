@@ -544,6 +544,9 @@ def _fsdp2_param_groups(module: nn.Module):
 _FSDP2_OWNED_PARAMS: "weakref.WeakKeyDictionary[nn.Module, dict[int, weakref.ref]]" = (
     weakref.WeakKeyDictionary()
 )
+_FSDP2_UNOWNED_PLAIN_PARAMS: "weakref.WeakKeyDictionary[nn.Module, dict[int, weakref.ref]]" = (
+    weakref.WeakKeyDictionary()
+)
 _FSDP2_OWNED_MODULES: "weakref.WeakKeyDictionary[nn.Module, weakref.WeakSet[nn.Module]]" = (
     weakref.WeakKeyDictionary()
 )
@@ -589,6 +592,13 @@ def _fsdp2_owned_params(fsdp_module: FSDPModule, refresh: bool = False) -> dict[
                 ):
                     if state_param is not None:
                         owned[id(state_param)] = weakref.ref(state_param)
+        # Remember plain misses across the whole unit, not once per leaf window. DTensor misses
+        # still refresh ownership each window so newly materialized FSDP2 views are discovered.
+        _FSDP2_UNOWNED_PLAIN_PARAMS[fsdp_module] = {
+            id(parameter): weakref.ref(parameter)
+            for parameter in fsdp_module.parameters()
+            if not isinstance(parameter, DTensor) and not _fsdp2_owns(owned, parameter)
+        }
         _FSDP2_OWNED_PARAMS[fsdp_module] = owned
     return owned
 
@@ -618,13 +628,13 @@ def fsdp2_weight_access_and_writeback_context(
 
     Gathered TP weights expose their local tensors in this scope; retained native-full TP views
     remain DTensors on the TP mesh.
-    Default writable windows with owned parameters coordinate entry, final preparation, body failures,
-    each publication, and final registration restoration. Failed bodies make every rank fail and skip
-    writeback.
+    Default writable windows whose subtree contains an FSDP2 registration owner coordinate entry,
+    final preparation, body failures, each publication, and final registration restoration. Failed
+    bodies make every rank fail and skip writeback.
     Publication failures stop later parameters on every rank; callers restore any values already
     published before failure and repair any registration whose restoration failed.
-    Default windows without owned parameters skip coordination. Aliased values may already have
-    changed without rollback.
+    Default windows whose subtree contains no FSDP2 registration owner skip coordination. Aliased
+    values may already have changed without rollback.
     ``rollback=True`` always coordinates entry, isolates singleton/replicated aliases, and coordinates
     writable staging errors.
     Its additional consensus is per parameter: a failure after one gather stops peers before the next
@@ -731,8 +741,10 @@ def _fsdp2_weight_access_and_writeback_context(module, root_model, writeback, na
             raise ValueError("Writable FSDP2 rollback cannot overlap an active writable window")
         # Recognize new registrations, including native full and post-forward views.
         owned = _fsdp2_owned_params(fsdp_module, refresh=rollback)
+        known_unowned = _FSDP2_UNOWNED_PLAIN_PARAMS.get(fsdp_module, {})
         if not rollback and any(
-            not _fsdp2_owns(owned, parameter) for parameter in module.parameters()
+            not _fsdp2_owns(owned, parameter) and not _fsdp2_owns(known_unowned, parameter)
+            for parameter in module.parameters()
         ):
             owned = _fsdp2_owned_params(fsdp_module, refresh=True)
         owned_params = [

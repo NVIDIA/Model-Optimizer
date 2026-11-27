@@ -588,6 +588,8 @@ def _window_leaves_what_fsdp2_does_not_own_job(rank, size, failure_stage, _cuda_
     )
     layer = torch.nn.Module()
     layer.dense = torch.nn.Linear(8, 8)
+    if failure_stage == "plain_ignored":
+        layer.dense.adapter = torch.nn.Parameter(torch.randn(8))
     if failure_stage.startswith("nested_"):
         layer.other = torch.nn.Linear(8, 8)
     layer.experts = torch.nn.Module()
@@ -595,7 +597,24 @@ def _window_leaves_what_fsdp2_does_not_own_job(rank, size, failure_stage, _cuda_
         weight = distribute_tensor(torch.randn(2 * size, 8), ep_mesh, [Shard(0)])
         layer.experts.register_parameter(name, torch.nn.Parameter(weight))
     layer.requires_grad_(False)
-    fully_shard(layer, mesh=dp_mesh, ignored_params=set(layer.experts.parameters()))
+    ignored = set(layer.experts.parameters())
+    if failure_stage == "plain_ignored":
+        ignored.add(layer.dense.adapter)
+    fully_shard(layer, mesh=dp_mesh, ignored_params=ignored)
+    if failure_stage == "plain_ignored":
+        _fsdp2_owned_params(layer)
+        adapter = layer.dense.adapter
+        before = adapter.detach().clone()
+        with mock.patch.object(
+            core_utils, "_fsdp2_param_groups", wraps=_fsdp2_param_groups
+        ) as scans:
+            for _ in range(3):
+                with fsdp2_weight_access_and_writeback_context(layer.dense, layer):
+                    assert layer.dense.adapter is adapter
+                    assert not isinstance(layer.dense.weight, DTensor)
+        assert scans.call_count == 0
+        torch.testing.assert_close(adapter, before, rtol=0, atol=0)
+        return
     if failure_stage.startswith("nested_"):
         parameters = dict(layer.named_parameters())
         before = {name: value.to_local().detach().clone() for name, value in parameters.items()}
@@ -864,6 +883,7 @@ def _window_leaves_what_fsdp2_does_not_own_job(rank, size, failure_stage, _cuda_
     [
         "none",
         "ignored_only",
+        "plain_ignored",
         "entry",
         "writeback",
         "body_writeback",
