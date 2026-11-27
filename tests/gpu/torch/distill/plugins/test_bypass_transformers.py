@@ -104,6 +104,16 @@ def test_teacher_replay_caches_model_scans_without_changing_targets():
         torch.testing.assert_close(torch.cat(current), targets[0], rtol=0, atol=0)
         assert (teacher.scans, student.scans) == scans
     student.mlp.input_quantizer.disable()
+    for validity in ({}, {"valid_mask": torch.ones_like(batch["input_ids"], dtype=torch.bool)}):
+        ambiguous = {
+            **batch,
+            **validity,
+            "attention_mask": torch.tensor([[0.0, 0.0, 0.0, float("-inf")]]),
+        }
+        teacher.batches.clear()
+        with pytest.raises(ValueError, match="2D attention mask"):
+            adapter.teacher_microbatch(teacher, units, ambiguous, lambda *_: None)
+        assert not teacher.batches
     for name in (
         "q_bmm_quantizer",
         "k_bmm_quantizer",

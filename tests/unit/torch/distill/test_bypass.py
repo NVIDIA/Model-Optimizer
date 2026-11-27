@@ -126,7 +126,7 @@ def test_hf_refuses_ambiguous_floating_2d_attention_mask(packed):
     if packed:
         batch["_packed_seq_ids"] = torch.tensor([[1, 1, 2]])
         del batch["valid_mask"]
-    adapter = TransformersBypassAdapter()
+    adapter = object.__new__(TransformersBypassAdapter)
     for microbatch in adapter.microbatches(batch, 1):
         with pytest.raises(ValueError, match="2D attention mask"):
             adapter.prepare_batch(model, microbatch)

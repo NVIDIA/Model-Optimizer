@@ -347,6 +347,15 @@ class TransformersBypassAdapter(ModuleBypassAdapter):
         return record
 
     def _validate_text_batch(self, batch):
+        attention = batch.get("attention_mask")
+        if (
+            isinstance(attention, torch.Tensor)
+            and attention.ndim == 2
+            and attention.is_floating_point()
+        ):
+            raise ValueError(
+                "A 2D attention mask must be Boolean or integer; use 4D for floating additive bias."
+            )
         if any(
             batch.get(name) is not None
             for name in ("past_key_values", "past_key_value", "cache_params")
@@ -375,14 +384,6 @@ class TransformersBypassAdapter(ModuleBypassAdapter):
             )
         }
         attention = result.get("attention_mask")
-        if (
-            isinstance(attention, torch.Tensor)
-            and attention.ndim == 2
-            and attention.is_floating_point()
-        ):
-            raise ValueError(
-                "A 2D attention mask must be Boolean or integer; use 4D for floating additive bias."
-            )
         if (
             isinstance(attention, torch.Tensor)
             and attention.ndim == 4
