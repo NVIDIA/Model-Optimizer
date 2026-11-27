@@ -25,7 +25,14 @@ import modelopt.torch.quantization as mtq
 
 
 class BypassNetwork(nn.Sequential):
-    def forward(self, hidden_states, attention_mask=None, _packed_seq_ids=None, padding_mask=None, position_ids=None):
+    def forward(
+        self,
+        hidden_states,
+        attention_mask=None,
+        _packed_seq_ids=None,
+        padding_mask=None,
+        position_ids=None,
+    ):
         if position_ids is not None:
             hidden_states = hidden_states + position_ids[..., None]
         return super().forward(hidden_states)

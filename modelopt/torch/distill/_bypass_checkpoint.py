@@ -331,7 +331,7 @@ class _CheckpointRanks:
 class BypassCheckpoint(_CheckpointRanks):
     """Commit every rank's auxiliary state before retiring the prior generation."""
 
-    def __init__(self, student, teacher, config, runtime=None, *, dataloader):
+    def __init__(self, student, teacher, config, runtime=None, *, dataloader, devices):
         """Bind committed state to immutable inputs, the recipe and realized owners."""
         super().__init__(
             runtime.checkpoint_group() if runtime is not None else None,
@@ -358,6 +358,7 @@ class BypassCheckpoint(_CheckpointRanks):
                     exclude={"checkpoint_dir", "resume_from", "checkpoint_interval"}
                 ),
                 "topology": runtime.checkpoint_topology() if runtime is not None else None,
+                "cuda_devices": sorted(devices),
                 # Positive batches consume at most one item per sample; include
                 # the priming window even for zero updates, and one saved lookahead.
                 "data": _data_identity(dataloader, max(1, config.num_steps) * batch_size + 1),
