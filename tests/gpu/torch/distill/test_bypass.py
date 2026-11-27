@@ -39,7 +39,16 @@ from modelopt.torch.quantization.ggml.scale_fields import decode_scale_fields, r
 
 
 class _Network(nn.Sequential):
-    def forward(self, hidden_states, attention_mask=None, _packed_seq_ids=None, padding_mask=None):
+    def forward(
+        self,
+        hidden_states,
+        attention_mask=None,
+        _packed_seq_ids=None,
+        padding_mask=None,
+        position_ids=None,
+    ):
+        if position_ids is not None:
+            hidden_states = hidden_states + position_ids[..., None]
         return super().forward(hidden_states)
 
 
@@ -217,6 +226,64 @@ def test_bypass_refuses_aliases_and_cleans_failed_replay():
         for m, after, before in hook_counts
     )
     assert not any("repair" in n for n, _ in student.named_modules())
+
+
+@pytest.mark.parametrize("reader", ["reused_storage", "shared_positions"])
+def test_bypass_preserves_reader_samples_and_shared_positions(reader):
+    student, teacher, batches = _problem()
+    batches = [batch[:, :2].clone() for batch in batches[:2]]
+    observed = []
+    handle = teacher.mlp.register_forward_pre_hook(
+        lambda module, args: observed.append(args[0].clone())
+    )
+
+    def read():
+        staging = torch.empty_like(batches[0])
+        for batch in batches:
+            if reader == "reused_storage":
+                yield staging.copy_(batch)
+            else:
+                yield {"hidden_states": batch, "position_ids": torch.arange(2)}
+
+    try:
+        mtd.bypass(
+            student,
+            teacher,
+            read(),
+            {
+                "num_steps": 1,
+                "global_batch_size": 4,
+                "micro_batch_size": 1,
+                "sequence_length": 2,
+                "modules": ["mlp"],
+            },
+        )
+    finally:
+        handle.remove()
+    expected = torch.cat(batches)
+    if reader == "shared_positions":
+        expected = expected + torch.arange(2)[:, None]
+    torch.testing.assert_close(torch.cat(observed), expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("heldout", [False, True])
+def test_bypass_rejects_misaligned_loss_masks_before_slicing(heldout):
+    student, teacher, batches = _problem()
+    malformed = {"hidden_states": batches[0], "valid_mask": torch.ones(1, 3, dtype=torch.bool)}
+    with pytest.raises(ValueError):
+        mtd.bypass(
+            student,
+            teacher,
+            batches if heldout else [malformed],
+            {
+                "num_steps": 1,
+                "global_batch_size": 2,
+                "micro_batch_size": 1,
+                "sequence_length": 3,
+                "modules": ["mlp"],
+            },
+            validation_dataloader=[malformed] if heldout else None,
+        )
 
 
 @pytest.mark.parametrize(

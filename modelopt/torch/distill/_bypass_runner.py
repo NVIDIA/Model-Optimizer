@@ -67,7 +67,8 @@ class _BypassRunner:
             samples += self.adapter.batch_size(batch)
             if samples > self.config.global_batch_size:
                 raise ValueError("Dataloader batches must exactly fill the configured global batch")
-            window.append(batch)
+            saved, _ = self.adapter.snapshot_inputs((batch,), {})
+            window.append(saved[0])
         return window
 
     def _measure(self, batches, training):

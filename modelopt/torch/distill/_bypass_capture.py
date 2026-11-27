@@ -387,17 +387,50 @@ class ModuleBypassAdapter:
             raise ValueError("Bypass batches cannot be empty")
 
     def microbatches(self, batch, size):
-        """Slice sample-aligned tensors while retaining shared model metadata."""
+        """Slice batch-leading inputs; other 1D dict metadata stays shared.
+
+        Adapters with other auxiliary sample layouts must override this method.
+        """
         samples = self.batch_size(batch)
+        mask = _valid_token_mask(batch)
+        if mask is not None and (not mask.ndim or mask.shape[0] != samples):
+            raise ValueError("Bypass loss mask must match the original batch's sample dimension")
         for start in range(0, samples, size):
-            yield tree_map(
-                lambda v: (
-                    v[start : start + size]
-                    if isinstance(v, torch.Tensor) and v.ndim and v.shape[0] == samples
-                    else v
-                ),
-                batch,
-            )
+
+            def sliced(value, sample_vector=True):
+                return tree_map(
+                    lambda v: (
+                        v[start : start + size]
+                        if isinstance(v, torch.Tensor)
+                        and v.ndim
+                        and v.shape[0] == samples
+                        and (v.ndim > 1 or sample_vector)
+                        else v
+                    ),
+                    value,
+                )
+
+            if isinstance(batch, dict):
+                yield {
+                    key: sliced(
+                        value,
+                        key
+                        in (
+                            "input_ids",
+                            "hidden_states",
+                            "inputs_embeds",
+                            "valid_mask",
+                            "loss_mask",
+                            "attention_mask",
+                            "labels",
+                            "sample_ids",
+                            "document_ids",
+                        ),
+                    )
+                    for key, value in batch.items()
+                }
+            else:
+                yield sliced(batch)
 
     def forward_teacher(self, teacher, args, kwargs):
         """Preserve the supplied callable's real forward and outer hooks."""

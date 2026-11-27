@@ -49,6 +49,12 @@ def bypass(
             Otherwise, ``attention_mask`` must be 2D boolean/integer. Floating or
             4D attention masks require an explicit validity mask. Weighted masks
             are unsupported; other metadata does not define the loss mask.
+            Batches are snapshotted before the next reader call. Named model inputs
+            and loss masks have a leading sample axis; other 1D dict metadata is
+            shared across samples. Use batch-shaped auxiliary per-sample tensors.
+            Global Python/NumPy/CPU RNG and CUDA RNG on resident model devices are
+            seeded and restored. Readers using other CUDA devices must own their
+            generators; reader generators and worker state advance independently.
         config: A :class:`BypassConfig`, a dict, or None for the established defaults.
         validation_dataloader: Optional held-out batches for finalized-student valid-token MSE.
             Diagnostic failures propagate after committing training updates to the student.
@@ -57,10 +63,14 @@ def bypass(
 
     Finalization commits boundaries in order. Any failure during finalization may
     leave earlier boundaries committed; reload a saved checkpoint before retrying.
+    Persistent owner restoration failures may also retain temporary repair state;
+    discard the affected model and reload it before reuse. Cleanup failures are
+    attached to the primary exception when one is already propagating.
 
     Returns:
         The supplied student, finalized for ordinary ModelOpt save/export. Temporary
-        fields, hooks, modes and gradient flags are restored on every exit.
+        fields and hooks are removed unless owner restoration fails; caller modes
+        and teacher gradient flags are restored on every exit.
     """
     config = config if isinstance(config, BypassConfig) else BypassConfig(**(config or {}))
     if device_mesh is not None or (
