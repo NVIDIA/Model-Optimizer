@@ -233,6 +233,42 @@ def _spec_refuses_ep(model_type: str) -> bool:
     return _spec_refusal(model_type) is not None
 
 
+# The model types whose spec's prepare ran in this process and patched every later load of them.
+_PATCHED_EVERY_LOAD: set[str] = set()
+
+
+def mark_patched_every_load(model_type: str) -> None:
+    """Record that a ``prepare`` patched ``model_type`` for every later load in this process.
+
+    :func:`apply_distributed_support` records it once such a ``prepare`` returns; a ``prepare`` calls
+    this itself at its first patch that lasts, so a raise after it still leaves the record.
+    """
+    _PATCHED_EVERY_LOAD.add(model_type)
+
+
+def check_not_patched_by_prepare(model_type: str) -> None:
+    """Refuse a load other than an expert-parallel one of a model whose ``prepare`` patched it for good.
+
+    A spec whose ``prepare`` patches every later load of its model
+    (:attr:`~modelopt.torch.models.EPSpec.prepare_patches_every_load`) leaves code only an
+    expert-parallel load builds from: once it ran in this process, a whole-model or FSDP2-sharded
+    load of the model is refused before it builds or loads one. The plan decision's throwaway meta
+    build runs earlier, so under torchrun an EP degree of 1 meets the decision's own refusal first.
+    A new process builds the checkpoint's own code as it ships: Kimi-K3's needs the fixes in
+    ``kimi_k3._remote_fixes`` to import, build, load and run on current transformers and fla-core,
+    which only its ``prepare`` applies, so there it loads expert-parallel only. A text-only
+    kimi_linear checkpoint that transformers' own class builds loads whole there.
+    """
+    if model_type in _PATCHED_EVERY_LOAD:
+        raise NotImplementedError(
+            f"An expert-parallel load in this process, of {model_type} or of a model built on it, "
+            "patched its modeling code for every later load of it, which a whole-model or "
+            "FSDP2-sharded load cannot build from. Load it in a new process. There the checkpoint's "
+            "own code is built as it ships, so remote code that needs its spec's fixes to run on this "
+            "transformers, as Kimi-K3's does, loads only expert-parallel."
+        )
+
+
 def apply_distributed_support(
     model_type: str,
     hf_config,
@@ -302,6 +338,8 @@ def apply_distributed_support(
 
     if prepare and ep.prepare is not None:
         hf_config = ep.prepare(hf_config, ckpt_path=ckpt_path, trust_remote_code=trust_remote_code)
+        for patched in ep.prepare_patches_every_load:
+            mark_patched_every_load(patched)
         # The load builds from the config prepare returns: a bad one would fail only there, far
         # from the spec at fault.
         if hf_config is None:
@@ -587,8 +625,9 @@ _TORCH_A2A_REGISTERED = False
 def register_torch_a2a():
     """Register everything the torch_a2a path needs into stock transformers (idempotent).
 
-    Done lazily from ``load_and_prepare_ep``, not at import time, so importing this module has no
-    transformers side effect:
+    Done lazily, not at import time, so importing this module has no transformers side effect: by
+    ``load_and_prepare_ep``, and by a spec's ``prepare`` that names ``torch_a2a`` on the config a
+    model is built from before that load (Kimi-K3's). It registers:
 
     - the ``torch_a2a`` experts forward into ``ExpertsInterface`` (``ALL_EXPERTS_FUNCTIONS``);
     - two EP parallel styles into ``ALL_PARALLEL_STYLES``:

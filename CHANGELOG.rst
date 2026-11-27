@@ -23,6 +23,7 @@ Changelog
 *Quantization - Export & Deployment*
 
 - ``examples/hf_ptq/convert_ggml_to_int8.py`` now also converts GGML exports that hold other formats (FP8, NVFP4, KV cache quantization): their GGML layers become ModelOpt ``INT8_PB_WO`` layers beside the rest of the export, which vLLM newer than 0.34.0 serves. Exports with only GGML layers still become compressed-tensors, and fused MoE experts now convert in both.
+- ``examples/hf_ptq/hf_ptq.py`` now quantizes Kimi-K3 expert-parallel: each rank decompresses only its own share of the packed MXFP4 routed experts to bf16 as they load, and the model is calibrated with the chosen recipe. It needs ``--trust_remote_code``, transformers 5.13 or newer and compressed-tensors 0.16 or newer; the calibration-free streaming converter in ``examples/kimi`` remains the way to reproduce ``nvidia/Kimi-K3-NVFP4``.
 
 *Quantization - Recipes*
 
