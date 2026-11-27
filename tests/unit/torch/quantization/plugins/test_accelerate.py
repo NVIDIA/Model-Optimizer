@@ -28,7 +28,7 @@ import torch.nn as nn
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 from modelopt.torch.quantization.ggml.common import pin_packed_weight, pinned_packed_weight
-from modelopt.torch.quantization.nn import QuantLinearConvBase, TensorQuantizer
+from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.quantization.nn.modules.quant_linear import RealQuantLinear
 from modelopt.torch.quantization.qtensor import INT4QTensor, QTensorWrapper
 from modelopt.torch.quantization.repair import IQRepairPolicy, plan_iq_repair
