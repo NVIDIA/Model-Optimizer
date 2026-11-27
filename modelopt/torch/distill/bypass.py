@@ -87,6 +87,9 @@ def bypass(
             module itself is checked; distributed descendants remain subject to the
             composite producer contract above.
 
+    Serialize checkpoint loads and saves to the same directory: a save can retire
+    the generation a concurrent reader has resolved. Use one writer per directory.
+
     Finalization commits boundaries in order. Any failure during finalization may
     leave earlier boundaries committed; reload a saved checkpoint before retrying.
     Persistent owner restoration failures may also retain temporary repair state;

@@ -23,7 +23,9 @@ import random
 import shutil
 import time
 from contextlib import nullcontext
+from importlib.metadata import PackageNotFoundError
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import numpy as np
@@ -33,10 +35,12 @@ from _test_utils.bypass import assert_exact_state as _equal
 from _test_utils.bypass import bypass_problem
 from _test_utils.bypass import committed_checkpoint as _committed
 from _test_utils.torch.distributed.utils import bounded_collectives
+from torch.distributed.device_mesh import init_device_mesh
 
 import modelopt.torch.distill as mtd
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
+from modelopt.torch.distill import _bypass_checkpoint as checkpoint_module
 from modelopt.torch.distill._bypass_capture import ModuleBypassAdapter
 from modelopt.torch.distill._bypass_checkpoint import (
     BypassCheckpoint,
@@ -86,9 +90,17 @@ def test_checkpoint_refuses_reserved_latest_pointer(tmp_path, pointer):
         checkpoint.load(str(tmp_path))
 
 
-def test_checkpoint_requires_directory_sync_before_training(tmp_path, monkeypatch):
+@pytest.mark.parametrize("failure", ["flag", "filesystem"])
+def test_checkpoint_requires_directory_sync_before_training(tmp_path, monkeypatch, failure):
     student, teacher, batches = bypass_problem()
-    monkeypatch.delattr(os, "O_DIRECTORY", raising=False)
+    if failure == "flag":
+        monkeypatch.delattr(os, "O_DIRECTORY", raising=False)
+    else:
+        monkeypatch.setattr(
+            checkpoint_module,
+            "_sync_directory",
+            mock.Mock(side_effect=OSError("unsupported directory sync")),
+        )
     with (
         mock.patch.object(
             ModuleBypassAdapter, "teacher_microbatch", side_effect=AssertionError("teacher ran")
@@ -109,15 +121,28 @@ def test_checkpoint_requires_directory_sync_before_training(tmp_path, monkeypatc
     assert not list(tmp_path.iterdir())
 
 
-def test_checkpoint_first_save_syncs_new_ancestor_entries(tmp_path):
-    from modelopt.torch.distill import _bypass_checkpoint as checkpoint_module
-
+@pytest.mark.parametrize("retry", [False, True])
+def test_checkpoint_first_save_syncs_new_ancestor_entries(tmp_path, retry):
     student, teacher, batches = bypass_problem()
     root = tmp_path / "new-parent" / "checkpoints"
     config = mtd.BypassConfig(
         num_steps=1, global_batch_size=2, sequence_length=3, checkpoint_dir=str(root)
     )
     checkpoint = BypassCheckpoint(student, teacher, config, dataloader=batches, devices=[])
+    if retry:
+        sync_directory = checkpoint_module._sync_directory
+
+        def fail_parent(path):
+            if path == tmp_path:
+                raise OSError("first ancestor sync failed")
+            return sync_directory(path)
+
+        with (
+            mock.patch.object(checkpoint_module, "_sync_directory", side_effect=fail_parent),
+            pytest.raises(ValueError, match="first ancestor sync failed"),
+        ):
+            checkpoint.save(1, fields={}, optimizers={}, data_position={}, rng_state=_rng_state([]))
+        assert root.is_dir()
     with mock.patch.object(
         checkpoint_module, "_sync_directory", wraps=checkpoint_module._sync_directory
     ) as sync:
@@ -125,6 +150,21 @@ def test_checkpoint_first_save_syncs_new_ancestor_entries(tmp_path):
     paths = [call.args[0] for call in sync.call_args_list]
     assert tmp_path in paths and root.parent in paths
     assert checkpoint.load(str(root))[0] == 1
+
+
+def test_generic_checkpoint_does_not_require_transformers_for_teacher_metadata(tmp_path):
+    student, teacher, batches = bypass_problem()
+    teacher.config = SimpleNamespace(model_type="custom_generic_teacher")
+    config = mtd.BypassConfig(
+        num_steps=1, global_batch_size=2, sequence_length=3, checkpoint_dir=str(tmp_path)
+    )
+    with mock.patch.object(
+        checkpoint_module, "version", side_effect=PackageNotFoundError("transformers")
+    ):
+        checkpoint = BypassCheckpoint(student, teacher, config, dataloader=batches, devices=[])
+    assert "transformers" not in checkpoint.identity["runtime"]
+    checkpoint.save(1, fields={}, optimizers={}, data_position={}, rng_state=_rng_state([]))
+    assert checkpoint.load(str(tmp_path))[0] == 1
 
 
 def test_checkpoint_refuses_unsafe_initial_loader_cursor(tmp_path):
@@ -404,12 +444,16 @@ def test_bypass_resume_matches_uninterrupted(tmp_path, monkeypatch, caplog, stat
     _equal(refused.state_dict(), before)
     assert metadata["dtype"] == torch.float64
 
-    def failed_write(*args, **kwargs):
-        raise OSError("Simulated checkpoint disk failure")
+    original_save = torch.save
+
+    def failed_write(state, stream, *args, **kwargs):
+        if ".pending-step-000004-" in str(getattr(stream, "name", "")):
+            raise OSError("Simulated checkpoint disk failure")
+        return original_save(state, stream, *args, **kwargs)
 
     with monkeypatch.context() as patch:
         patch.setattr(torch, "save", failed_write)
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="Simulated checkpoint disk failure"):
             mtd.bypass(
                 fresh_student(),
                 copy.deepcopy(teacher),
@@ -602,7 +646,6 @@ def _distributed_resume_worker(rank, size, directory, failure=None):
 
 
 def _distributed_resume_case(rank, size, directory, failure):
-    from torch.distributed.device_mesh import init_device_mesh
 
     initial, teacher, batches = bypass_problem()
     batches = [sample.unsqueeze(0) for batch in batches[:4] for sample in batch]
@@ -765,15 +808,31 @@ def _distributed_resume_case(rank, size, directory, failure):
         _equal(candidate.state_dict(), before)
         _equal(_rng_state([]), caller_rng)
         return
-    with bounded_collectives(10), pytest.raises(ValueError):
+
+    class LateSnapshotFailure(_StatefulCursor):
+        def state_dict(self):
+            if rank == 1 and self.position >= 4:
+                raise OSError("Simulated save-time data-cursor snapshot failure")
+            return super().state_dict()
+
+    with (
+        bounded_collectives(10),
+        pytest.raises(ValueError, match="save-time data-cursor snapshot failure") as snapshot_error,
+    ):
         mtd.bypass(
             copy.deepcopy(initial),
             copy.deepcopy(teacher),
-            _StatefulCursor(local, snapshot_failure=rank == 1),
+            LateSnapshotFailure(local),
             {**recipe, "checkpoint_dir": str(root / "snapshot-failure")},
             device_mesh=mesh,
         )
-    assert not (root / "snapshot-failure" / "latest").exists()
+    errors = [None] * size
+    torch.distributed.all_gather_object(errors, str(snapshot_error.value), group=mesh.get_group())
+    assert len(set(errors)) == 1
+    generation, saved = _committed(root / "snapshot-failure", size=size, rank=rank)
+    assert saved["step"] == 2
+    assert list((root / "snapshot-failure").glob("step-*")) == [generation]
+    assert not list((root / "snapshot-failure").glob(".pending-step-*"))
     resumed = copy.deepcopy(initial)
     mtd.bypass(
         resumed,
@@ -835,11 +894,10 @@ class _NativeInterrupted(list):
 
 
 def _native_checkpoint_problem(rank, size):
+    # Native model builders and device meshes require the optional Transformers integration.
     from _test_utils.transformers_families import build_model, cases
-    from torch.distributed.device_mesh import init_device_mesh
     from transformers.distributed.utils import TransformersDeviceMesh
 
-    import modelopt.torch.quantization as mtq
     from modelopt.torch.distill.plugins.transformers import TransformersBypassAdapter
 
     torch.cuda.set_device(rank)
@@ -1077,6 +1135,20 @@ def _native_pair_identity_worker(rank, size, directory):
     gc.collect()
 
 
+def _native_transformers_unavailable():
+    # Reuse the optional adapter's exact stable-version admission predicate.
+    from modelopt.torch.distill.plugins.transformers.bypass import _require_transformers
+
+    try:
+        _require_transformers()
+    except ImportError:
+        return True
+    return False
+
+
+@pytest.mark.skipif(
+    _native_transformers_unavailable(), reason="Native Bypass requires stable Transformers 5.23.x"
+)
 @pytest.mark.manual
 @pytest.mark.parametrize("native_workers", [2, 4], indirect=True, ids=["fsdp2", "fsdp2_tp2_ep4"])
 @pytest.mark.timeout(300)
@@ -1087,10 +1159,12 @@ def test_large_native_checkpoint_identity_measurement(native_workers, tmp_path, 
             print((tmp_path / f"native-pair-identity-{rank}.json").read_text(), flush=True)
 
 
+@pytest.mark.skipif(
+    _native_transformers_unavailable(), reason="Native Bypass requires stable Transformers 5.23.x"
+)
 @pytest.mark.parametrize("native_workers", [2, 4], indirect=True, ids=["fsdp2", "fsdp2_tp2_ep4"])
 @pytest.mark.timeout(300)
 def test_native_resume_with_empty_owners_and_frozen_nvfp4(native_workers, tmp_path, capsys):
-    pytest.importorskip("transformers", minversion="5.23")
     native_workers.run(_native_resume_worker, str(tmp_path))
     with capsys.disabled():
         for rank in range(native_workers.world_size):
