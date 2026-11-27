@@ -1082,6 +1082,7 @@ class _QuantCoreAttention(QuantModule):
 
     def forward(self, query, key, value, *args, **kwargs):
         """Apply post-RoPE quantization to KV cache."""
+        inputs = (query, key, value)
         # Quantize Q, K, V
         query = self.q_bmm_quantizer(query)
         if value is None:
@@ -1092,6 +1093,13 @@ class _QuantCoreAttention(QuantModule):
         else:
             value = self.v_bmm_quantizer(value)
         key = self.k_bmm_quantizer(key)
+        if any(new is not old for new, old in zip((query, key, value), inputs)):
+            # Megatron hands Q, K and V in as strided views of one fused QKV buffer, and a
+            # quantizer returns a new contiguous tensor. Quantizing only some of them (e.g. K
+            # and V for the KV cache) leaves a mix of the two layouts, which Transformer Engine's
+            # attention silently misreads (wrong outputs, no error; seen with TE 2.18 in both
+            # THD and SBHD formats). Give it one consistent layout.
+            query, key, value = (t if t is None else t.contiguous() for t in (query, key, value))
         return super().forward(query, key, value, *args, **kwargs)
 
     def modelopt_post_restore(self, name=""):
