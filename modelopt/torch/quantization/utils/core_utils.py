@@ -17,6 +17,7 @@
 
 import copy
 import itertools
+import threading
 import warnings
 import weakref
 from collections import namedtuple
@@ -441,10 +442,7 @@ def _get_fsdp2_mesh(module: nn.Module):
     pg = fsdp_state._fsdp_param_group
     if pg is None:
         return None
-    # A root FSDP module has reshard_after_forward=False by default, so its
-    # post_forward_mesh_info is None; fall back to the sharding mesh (mesh_info),
-    # which is the same FSDP shard mesh (post_forward_mesh_info is only the reshard target).
-    mesh_info = pg.post_forward_mesh_info or pg.mesh_info
+    mesh_info = pg.post_forward_mesh_info if pg.is_sharded_post_forward else pg.mesh_info
     return mesh_info.mesh if mesh_info is not None else None
 
 
@@ -518,9 +516,9 @@ def _set_parameter(module: nn.Module, name: str, value: nn.Parameter):
 
 @contextmanager
 def _fsdp2_unshard_context(fsdp_module: FSDPModule):
-    """Unshard an FSDP2 module without replacing individual DTensor parameters."""
+    """Materialize either shard state and reshard on exit; preserve existing native full views."""
     fsdp_param_group = fully_shard.state(fsdp_module)._fsdp_param_group
-    was_sharded = fsdp_param_group.is_sharded
+    was_sharded = not fsdp_param_group.is_unsharded
     if was_sharded:
         fsdp_module.unshard()
     try:
@@ -546,6 +544,23 @@ def _fsdp2_param_groups(module: nn.Module):
 _FSDP2_OWNED_PARAMS: "weakref.WeakKeyDictionary[nn.Module, dict[int, weakref.ref]]" = (
     weakref.WeakKeyDictionary()
 )
+_FSDP2_OWNED_MODULES: "weakref.WeakKeyDictionary[nn.Module, weakref.WeakSet[nn.Module]]" = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _fsdp2_owned_modules(fsdp_module: FSDPModule, groups=None):
+    # Registration owners stay stable across shard-state changes; weak caches retain no model.
+    owners = _FSDP2_OWNED_MODULES.get(fsdp_module)
+    if owners is None:
+        owners = weakref.WeakSet()
+        for group in _fsdp2_param_groups(fsdp_module) if groups is None else groups:
+            for parameter in group.fsdp_params:
+                info = parameter._module_info
+                owners.add(info.module)
+                owners.update(info.shared_modules)
+        _FSDP2_OWNED_MODULES[fsdp_module] = owners
+    return owners
 
 
 def _fsdp2_owned_params(fsdp_module: FSDPModule, refresh: bool = False) -> dict[int, weakref.ref]:
@@ -561,7 +576,9 @@ def _fsdp2_owned_params(fsdp_module: FSDPModule, refresh: bool = False) -> dict[
     owned = None if refresh else _FSDP2_OWNED_PARAMS.get(fsdp_module)
     if owned is None:
         owned = {}
-        for group in _fsdp2_param_groups(fsdp_module):
+        groups = tuple(_fsdp2_param_groups(fsdp_module))
+        _fsdp2_owned_modules(fsdp_module, groups)
+        for group in groups:
             for fsdp_param in group.fsdp_params:
                 # The last two exist once their state is first entered.
                 for state_param in (
@@ -587,6 +604,8 @@ def fsdp2_weight_access_and_writeback_context(
     root_model: nn.Module,
     writeback: bool = True,
     names: "ModuleNames | None" = None,
+    *,
+    rollback: bool = False,
 ):
     """Context manager for FSDP2 weight access and writeback.
 
@@ -596,9 +615,48 @@ def fsdp2_weight_access_and_writeback_context(
     parameters FSDP2 manages are gathered: a DTensor it does not own (an
     expert-parallel weight ``fully_shard`` was told to ignore, say) stays sharded.
 
-    If TP is implemented with DTensor, the weight will be a local tensor of the
-    TP DTensor under this context.
+    If TP is implemented with DTensor, weights are local tensors of the TP DTensor in this scope.
+    Default writable windows with owned parameters coordinate entry, body failures, each publication,
+    and final registration restoration. Failed bodies make every rank fail and skip writeback.
+    Publication failures stop later parameters on every rank; callers restore any values already
+    published before failure and repair any registration whose restoration failed.
+    Default windows without owned parameters skip coordination. Aliased values may already have
+    changed without rollback.
+    ``rollback=True`` always coordinates entry, isolates singleton/replicated aliases, and coordinates
+    writable staging errors.
+    Its additional consensus is per parameter: a failure after one gather stops peers before the next
+    gather, and writeback preparation must finish on every rank before each scatter.
+    Registration-metadata initialization, coordination-resource allocation, and backend collective
+    failures require job termination.
+    Default access avoids per-parameter gather staging consensus. A rank-local gather/staging failure
+    can leave peers blocked until the backend timeout; terminate the job rather than retry locally.
+    No undo callback is yielded; callers own restoration of values published before a later failure.
+
+    Writable access rejects temporary post-forward shards in both modes; call ``reshard()`` then
+    retry. ``rollback=True`` also rejects native unsharded views. Default access retains existing
+    native full views; their materialization scope remains responsible for publishing edits on exit.
+    Native-full TP registrations warn that callers must publish edits before ``reshard()``.
+    Default writable access requires matching native-full or persistent-shard state on every rank;
+    rank-local reshard divergence is unsupported and may stall until the backend timeout.
+    ``writeback=False`` materializes either shard state with native unshard/reshard, returning to the
+    ordinary persistent shards on exit. This gives up a post-forward state's smaller backward groups.
+    An existing native full view is preserved. The read-only route supplies no staging coordination
+    or undo callback, even with ``rollback=True``.
+    Writable windows require matching sharding groups for all managed parameters;
+    open separate windows for nested units with different rank memberships. This is
+    checked and coordinated before gathering so consensus covers every gather participant.
     """
+    with (
+        _weight_access_guard(),
+        _fsdp2_weight_access_and_writeback_context(
+            module, root_model, writeback, names, rollback=rollback
+        ),
+    ):
+        yield
+
+
+@contextmanager
+def _fsdp2_weight_access_and_writeback_context(module, root_model, writeback, names, *, rollback):
     assert not hasattr(module, "_hf_hook"), "We dont support FSDP2 with HF accelerate hooks"
     fsdp_module = _get_enclosing_fsdp_module(module, root_model, names)
     assert fsdp_module is not None, "Module is not wrapped by FSDP"
@@ -609,71 +667,243 @@ def fsdp2_weight_access_and_writeback_context(
 
     fsdp_device_mesh = _get_fsdp2_mesh(fsdp_module)
     fsdp_dim = fsdp_device_mesh.ndim
+    # Decide participation before fallible parameter discovery, including its cold/refresh path.
+    owners = _fsdp2_owned_modules(fsdp_module)
+    coordinate_window = rollback or any(child in owners for child in module.modules())
 
     # Collect all DTensor parameters, replacing them with local replicated copies.
     originals: dict[str, tuple] = {}
-    owned = _fsdp2_owned_params(fsdp_module)
-    refreshed = False
-    for name, param in module.named_parameters():
-        if not isinstance(param, torch.distributed.tensor.DTensor):
-            continue
-        if not _fsdp2_owns(owned, param) and not refreshed:
-            # Once per window: nothing here changes a unit's state, and a DTensor FSDP2 does not own
-            # (every expert-parallel weight) misses each time.
-            owned, refreshed = _fsdp2_owned_params(fsdp_module, refresh=True), True
-        if not _fsdp2_owns(owned, param):
-            # Not FSDP's shard: a DTensor FSDP2 does not manage, such as an expert-parallel weight
-            # that fully_shard was told to ignore. Gathering it would hand every rank every expert,
-            # which its module indexes by local expert.
-            continue
-        original_placements = param.placements
-        original_device_mesh = param.device_mesh
-        if fsdp_dim != original_device_mesh.ndim:
-            assert (
-                fsdp_device_mesh.mesh_dim_names == original_device_mesh.mesh_dim_names[:fsdp_dim]
-            ), "FSDP2 mesh should be a slice of DTensor's device mesh."
-        unsharded_dtensor = param.redistribute(
-            placements=[Replicate()] * fsdp_dim + list(original_placements[fsdp_dim:]),
-            device_mesh=original_device_mesh,
-        )
-        unsharded_tensor = unsharded_dtensor.to_local()
-        # cpu_offload: gathered shard is on CPU; mirror to GPU for forward.
-        needs_gpu_copy = unsharded_tensor.device.type == "cpu" and torch.cuda.is_available()
-        gpu_tensor = (
-            unsharded_tensor.to(torch.cuda.current_device()) if needs_gpu_copy else unsharded_tensor
-        )
-        cpu_writeback_tensor = unsharded_tensor if needs_gpu_copy else None
-        originals[name] = (
-            param,
-            unsharded_dtensor,
-            original_placements,
-            original_device_mesh,
-            cpu_writeback_tensor,
-            gpu_tensor,
-        )
-        _set_parameter(module, name, nn.Parameter(gpu_tensor))
+    ready = propagating = False
+    error = None
 
+    failure_flag = None
+
+    def synchronize_staging_error(local_error, *, coordinate=rollback, mesh=fsdp_device_mesh):
+        nonlocal failure_flag
+        if coordinate:
+            if failure_flag is None:
+                failure_flag = torch.zeros(
+                    (), dtype=torch.int32, device=fsdp_device_mesh.device_type
+                )
+            failure_flag.fill_(local_error is not None)
+            for dimension in range(mesh.ndim):
+                torch.distributed.all_reduce(
+                    failure_flag,
+                    op=torch.distributed.ReduceOp.MAX,
+                    group=mesh.get_group(dimension),
+                )
+            if failure_flag.item() and local_error is None:
+                local_error = RuntimeError("FSDP2 weight-access failed on another rank")
+        if local_error is not None:
+            raise local_error
+
+    def record_error(exc):
+        nonlocal error
+        if error is None:
+            error = exc
+        elif exc is not error:
+            error.add_note(f"FSDP2 weight-access cleanup also failed: {exc!r}")
+
+    owned_params = []
+    gather_params = []
+    preflight_error = None
+    try:
+        # Recognize new registrations, including native full and post-forward views.
+        owned = _fsdp2_owned_params(fsdp_module, refresh=rollback)
+        if not rollback and any(
+            not _fsdp2_owns(owned, parameter) for parameter in module.parameters()
+        ):
+            owned = _fsdp2_owned_params(fsdp_module, refresh=True)
+        owned_params = [
+            (name, parameter)
+            for name, parameter in module.named_parameters()
+            if _fsdp2_owns(owned, parameter)
+        ]
+        gather_params = [
+            (name, parameter)
+            for name, parameter in owned_params
+            if isinstance(parameter, torch.distributed.tensor.DTensor)
+        ]
+        if gather_params and not rollback:
+            # Native full TP registrations remain DTensors, on the TP mesh rather than FSDP's.
+            native_full = {
+                id(parameter.unsharded_param)
+                for unit in itertools.chain((fsdp_module,), module.modules())
+                if isinstance(unit, FSDPModule)
+                and (group := fully_shard.state(unit)._fsdp_param_group) is not None
+                and not group.is_sharded
+                and not group.is_sharded_post_forward
+                for parameter in group.fsdp_params
+            }
+            if any(id(parameter) in native_full for _, parameter in gather_params):
+                warnings.warn(
+                    f"FSDP2 owner {type(fsdp_module).__name__} preserves native-full TP parameters "
+                    + ", ".join(
+                        name for name, parameter in gather_params if id(parameter) in native_full
+                    )
+                    + "; this window does not publish edits to persistent shards. "
+                    "The caller must publish edits before reshard().",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+            gather_params = [
+                (name, parameter)
+                for name, parameter in gather_params
+                if id(parameter) not in native_full
+            ]
+        if rollback or gather_params:
+            temporary = {
+                id(
+                    parameter._sharded_post_forward_param
+                    if group.is_sharded_post_forward
+                    else parameter.unsharded_param
+                )
+                for unit in itertools.chain((fsdp_module,), module.modules())
+                if isinstance(unit, FSDPModule)
+                and (group := fully_shard.state(unit)._fsdp_param_group) is not None
+                and (group.is_sharded_post_forward or (rollback and group.is_unsharded))
+                for parameter in group.fsdp_params
+            }
+            if temporary and any(id(parameter) in temporary for parameter in module.parameters()):
+                raise ValueError(
+                    "Writable FSDP2 access requires reshard() before entering the window"
+                )
+        for _, parameter in gather_params:
+            mesh = parameter.device_mesh
+            if mesh.ndim < fsdp_dim or any(
+                torch.distributed.get_process_group_ranks(mesh.get_group(dimension))
+                != torch.distributed.get_process_group_ranks(fsdp_device_mesh.get_group(dimension))
+                for dimension in range(fsdp_dim)
+            ):
+                raise ValueError(
+                    "Writable FSDP2 access requires the same sharding mesh; "
+                    "open separate windows for differently sharded nested units"
+                )
+    except BaseException as exc:
+        preflight_error = exc
+    # Coordinate temporary-view refusals on stable groups, including rank-asymmetric states.
+    entry_mesh = fully_shard.state(fsdp_module)._fsdp_param_group.mesh_info.mesh
+    synchronize_staging_error(preflight_error, coordinate=coordinate_window, mesh=entry_mesh)
+
+    try:
+        for name, param in gather_params:
+            original_placements = param.placements
+            original_device_mesh = param.device_mesh
+            if fsdp_dim != original_device_mesh.ndim:
+                assert (
+                    fsdp_device_mesh.mesh_dim_names
+                    == original_device_mesh.mesh_dim_names[:fsdp_dim]
+                ), "FSDP2 mesh should be a slice of DTensor's device mesh."
+            staging_error = None
+            try:
+                unsharded_dtensor = param.redistribute(
+                    placements=[Replicate()] * fsdp_dim + list(original_placements[fsdp_dim:]),
+                    device_mesh=original_device_mesh,
+                )
+                unsharded_tensor = unsharded_dtensor.to_local()
+                # Singleton/replicated gathers can alias the persistent shard: isolate body edits.
+                if rollback and (
+                    unsharded_tensor.untyped_storage().data_ptr()
+                    == param.to_local().untyped_storage().data_ptr()
+                ):
+                    unsharded_dtensor = unsharded_dtensor.clone()
+                    unsharded_tensor = unsharded_dtensor.to_local()
+                # CPU offload gathers on the host; mirror to the execution device for forward.
+                needs_gpu_copy = unsharded_tensor.device.type == "cpu" and torch.cuda.is_available()
+                gpu_tensor = (
+                    unsharded_tensor.to(torch.cuda.current_device())
+                    if needs_gpu_copy
+                    else unsharded_tensor
+                )
+                cpu_writeback_tensor = unsharded_tensor if needs_gpu_copy else None
+                originals[name] = (
+                    param,
+                    unsharded_dtensor,
+                    original_placements,
+                    original_device_mesh,
+                    cpu_writeback_tensor,
+                    gpu_tensor,
+                )
+                _set_parameter(
+                    module, name, nn.Parameter(gpu_tensor, requires_grad=param.requires_grad)
+                )
+            except BaseException as exc:
+                staging_error = exc
+            synchronize_staging_error(staging_error)
+        ready = True
+        yield
+    except BaseException as exc:
+        error, propagating = exc, True
+        raise
+    finally:
+        # A failed last preparation must still match the peers' body-error round.
+        if not rollback and coordinate_window:
+            try:
+                synchronize_staging_error(error, coordinate=True)
+            except BaseException as exc:
+                record_error(exc)
+        if ready and (rollback or error is None):
+            # Coordinate after publication too: the final local shard copy may fail on one rank.
+            for (
+                original_param,
+                unsharded_dtensor,
+                original_placements,
+                original_device_mesh,
+                cpu_writeback_tensor,
+                gpu_tensor,
+            ) in originals.values():
+                try:
+                    staging_error = error if rollback else None
+                    if staging_error is None and cpu_writeback_tensor is not None:
+                        try:
+                            cpu_writeback_tensor.data.copy_(
+                                gpu_tensor.data.to(cpu_writeback_tensor.device)
+                            )
+                        except BaseException as exc:
+                            staging_error = exc
+                    synchronize_staging_error(staging_error)
+                    # Repartitioning a replicated FSDP dimension is local; peers synchronize below.
+                    shard = unsharded_dtensor.redistribute(
+                        placements=original_placements, device_mesh=original_device_mesh
+                    ).to_local()
+                    original_param.to_local().data.copy_(shard)
+                except BaseException as exc:
+                    record_error(exc)
+                try:
+                    synchronize_staging_error(error, coordinate=coordinate_window)
+                except BaseException as exc:
+                    record_error(exc)
+                if error is not None:
+                    break
+        # Entry failures never publish partial temporaries. Every registration is restored
+        # independently of entry, body, and repartitioning failures.
+        for name, original in originals.items():
+            try:
+                _set_parameter(module, name, original[0])
+            except BaseException as exc:
+                record_error(exc)
+        try:
+            synchronize_staging_error(error, coordinate=coordinate_window)
+        except BaseException as exc:
+            record_error(exc)
+        originals.clear()
+        original = unsharded_dtensor = unsharded_tensor = cpu_writeback_tensor = gpu_tensor = None
+        shard = None
+        if error is not None and not propagating:
+            raise error
+
+
+_WEIGHT_ACCESS_LOCK = threading.RLock()
+
+
+@contextmanager
+def _weight_access_guard():
+    if not _WEIGHT_ACCESS_LOCK.acquire(blocking=False):
+        raise RuntimeError("Weight access and rollback must be serialized across threads")
     try:
         yield
     finally:
-        # Write back and restore original DTensor parameters. Runs on both success
-        # and exception so the module never lingers with the temporary local params.
-        for name, (
-            original_param,
-            unsharded_dtensor,
-            original_placements,
-            original_device_mesh,
-            cpu_writeback_tensor,
-            gpu_tensor,
-        ) in originals.items():
-            if cpu_writeback_tensor is not None:
-                cpu_writeback_tensor.data.copy_(gpu_tensor.data.to(cpu_writeback_tensor.device))
-            original_param.to_local().data.copy_(
-                unsharded_dtensor.redistribute(
-                    placements=original_placements, device_mesh=original_device_mesh
-                ).to_local()
-            )
-            _set_parameter(module, name, original_param)
+        _WEIGHT_ACCESS_LOCK.release()
 
 
 @contextmanager
