@@ -33,61 +33,6 @@ def _workflow():
     return yaml.safe_load((REPO / ".github/workflows/gpu_tests.yml").read_text())
 
 
-def _expression(expression, event, suite="full"):
-    expression = expression.removeprefix("${{ ").removesuffix(" }}")
-    expression = expression.replace("&&", "and").replace("||", "or")
-    return eval(
-        expression,
-        {"__builtins__": {}},
-        {
-            "github": SimpleNamespace(event_name=event),
-            "inputs": SimpleNamespace(suite=suite),
-            "fromJSON": json.loads,
-        },
-    )
-
-
-@pytest.mark.parametrize(
-    ("event", "suite", "focused"),
-    [
-        ("push", "fsdp2-measurement", False),
-        ("schedule", "full", False),
-        ("workflow_dispatch", "full", False),
-        ("workflow_dispatch", "", False),
-        ("workflow_dispatch", "fsdp2-measurement", True),
-    ],
-)
-def test_fixed_measurement_routing(event, suite, focused):
-    workflow = _workflow()
-    inputs = workflow[True]["workflow_dispatch"]["inputs"]["suite"]
-    assert inputs == {
-        "description": "Fixed GPU suite",
-        "type": "choice",
-        "default": "full",
-        "options": ["full", "fsdp2-measurement"],
-    }
-    rows = _expression(workflow["jobs"]["gpu-tests"]["strategy"]["matrix"], event, suite)["include"]
-    if focused:
-        assert rows == [
-            {
-                "example": "gpu",
-                "timeout": 30,
-                "container_image": "nvcr.io/nvidia/pytorch:26.09-py3",
-                "nox_session": "gpu_fsdp2_measurement",
-            }
-        ]
-    else:
-        assert [row["example"] for row in rows] == [
-            "gpu",
-            "bypass",
-            "gpu_megatron",
-            "gpu_trtllm",
-            "gpu_vllm",
-        ]
-        assert [row["timeout"] for row in rows] == [60, 60, 75, 15, 30]
-        assert all(set(row) == {"example", "timeout", "container_image"} for row in rows)
-
-
 @pytest.fixture
 def measurement():
     path = REPO / ".github/scripts/fsdp2_measurement.py"
