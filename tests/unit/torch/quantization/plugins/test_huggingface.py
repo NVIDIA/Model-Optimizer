@@ -36,7 +36,7 @@ from _test_utils.torch.transformers_models import (
 import modelopt.torch.quantization as mtq
 from modelopt.recipe.loader import load_recipe
 from modelopt.torch.quantization.algorithms import _AutoQuantizeBaseSearcher
-from modelopt.torch.quantization.config import LayerwiseConfig
+from modelopt.torch.quantization.config import LayerwiseConfig, QuantizerAttributeConfig
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
 from modelopt.torch.quantization.ggml.common import (
     pin_packed_weight,
@@ -46,6 +46,7 @@ from modelopt.torch.quantization.ggml.common import (
 from modelopt.torch.quantization.nn import QuantLinear, QuantModuleRegistry, TensorQuantizer
 from modelopt.torch.quantization.plugins.huggingface import (
     _QuantHFParallelLinear,
+    _transposed_quantize,
     _TransposedExpertsCalibMixin,
     convert_hf_parallel_linears_on_the_fly,
     get_homogeneous_hf_decoder_layers,
@@ -734,4 +735,3 @@ def test_transposed_native_fields_keep_master_gradients_and_ordinary_ste():
     torch.testing.assert_close(
         torch.autograd.grad(ordinary.sum(), source)[0], torch.ones_like(source)
     )
-

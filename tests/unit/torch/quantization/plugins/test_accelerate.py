@@ -1417,8 +1417,16 @@ def test_iq_plan_checks_resident_offload_mapping_backings(mapping_mode, monkeypa
                 plan_iq_repair([model[0]], root_model=model)
 
 
-@pytest.mark.parametrize("offload_mode", ["cpu_offload", "disk_offload"])
-@pytest.mark.parametrize("failure_stage", ["local_writeback", "peer", "peer_recovery_cleanup"])
+@pytest.mark.parametrize(
+    ("offload_mode", "failure_stage"),
+    [
+        (mode, stage)
+        for mode in ("cpu_offload", "disk_offload")
+        for stage in ("local_writeback", "peer", "peer_recovery_cleanup")
+    ]
+    # Only resident CPU backing snapshots use copy_ during owner undo.
+    + [("cpu_offload", "peer_owner_rollback")],
+)
 def test_iq_finalize_writeback_failure_restores_state_for_retry(
     offload_mode, failure_stage, tmp_path, monkeypatch
 ):
@@ -1462,16 +1470,27 @@ def test_iq_finalize_writeback_failure_restores_state_for_retry(
 
     window = 0
     checked_originals = False
+    in_owner_undo = False
+    owner_undo_fault_armed = failure_stage == "peer_owner_rollback"
 
     @contextmanager
     def weight_access(**kwargs):
-        nonlocal window, checked_originals
+        nonlocal window, checked_originals, in_owner_undo
         window += 1
         with offload_weight_access(model, **kwargs) as undo:
             if failure_stage == "peer_recovery_cleanup" and window == 4:
                 torch.testing.assert_close(model.state_dict(), original, rtol=0, atol=0)
                 checked_originals = True
-            yield undo
+
+            def owner_undo():
+                nonlocal in_owner_undo
+                in_owner_undo = True
+                try:
+                    undo()
+                finally:
+                    in_owner_undo = False
+
+            yield owner_undo if failure_stage == "peer_owner_rollback" else undo
 
     failure = RuntimeError("late IQ writeback failure")
     armed = True
@@ -1506,6 +1525,15 @@ def test_iq_finalize_writeback_failure_restores_state_for_retry(
             raise RuntimeError("one-shot recovery cleanup failure")
         return set_tensor(owner, name, device, *args, **kwargs)
 
+    copy_tensor = torch.Tensor.copy_
+
+    def fail_owner_undo_copy(tensor, *args, **kwargs):
+        nonlocal owner_undo_fault_armed
+        if in_owner_undo and owner_undo_fault_armed:
+            owner_undo_fault_armed = False
+            raise RuntimeError("one-shot owner undo copy failure")
+        return copy_tensor(tensor, *args, **kwargs)
+
     try:
         with offload_weight_access(model, writeback=False):
             fields = policy.prepare_plan(plan, 0)
@@ -1525,6 +1553,7 @@ def test_iq_finalize_writeback_failure_restores_state_for_retry(
             for owner in model
         }
         monkeypatch.setattr(accelerate_hooks, "set_module_tensor_to_device", fail_partial_recovery)
+        monkeypatch.setattr(torch.Tensor, "copy_", fail_owner_undo_copy)
         handle = model[0].register_state_dict_post_hook(fail_writeback)
         try:
             with pytest.raises(RuntimeError) as error:
@@ -1542,22 +1571,28 @@ def test_iq_finalize_writeback_failure_restores_state_for_retry(
                 assert {name: tensor.device for name, tensor in saved_buffers.items()} == placement
                 assert saved_nonpersistent == nonpersistent
             monkeypatch.setattr(accelerate_hooks, "set_module_tensor_to_device", set_tensor)
-        assert {name: value.device for name, value in model.state_dict().items()} == devices
-        assert all(owner._hf_hook.offload for owner in model)
-        assert all(hasattr(owner.weight_quantizer, "_local_repair_state") for owner in model)
-        assert all(owner.weight_quantizer._enable_pre_quant_scale for owner in model)
-        assert backing.keys() == original_backing.keys()
-        for name, value in original_backing.items():
-            assert backing[name] is value
-        for name, value in original.items():
-            torch.testing.assert_close(dataset[name], value, check_dtype=False, rtol=0, atol=0)
-        with offload_weight_access(model, writeback=False):
-            state = model.state_dict()
-            assert state.keys() == original.keys()
+        if failure_stage == "peer_owner_rollback":
+            assert not owner_undo_fault_armed
+            assert policy._pending_rollback is not None
+            with pytest.raises(RuntimeError, match="Retry IQ finalization recovery"):
+                policy.close()
+        else:
+            assert {name: value.device for name, value in model.state_dict().items()} == devices
+            assert all(owner._hf_hook.offload for owner in model)
+            assert all(hasattr(owner.weight_quantizer, "_local_repair_state") for owner in model)
+            assert all(owner.weight_quantizer._enable_pre_quant_scale for owner in model)
+            assert backing.keys() == original_backing.keys()
+            for name, value in original_backing.items():
+                assert backing[name] is value
             for name, value in original.items():
-                torch.testing.assert_close(state[name], value, rtol=0, atol=0)
-        for owner, output in zip(model, expected, strict=True):
-            torch.testing.assert_close(owner(inputs), output, rtol=0, atol=0)
+                torch.testing.assert_close(dataset[name], value, check_dtype=False, rtol=0, atol=0)
+            with offload_weight_access(model, writeback=False):
+                state = model.state_dict()
+                assert state.keys() == original.keys()
+                for name, value in original.items():
+                    torch.testing.assert_close(state[name], value, rtol=0, atol=0)
+            for owner, output in zip(model, expected, strict=True):
+                torch.testing.assert_close(owner(inputs), output, rtol=0, atol=0)
         policy.finalize_(weight_access=weight_access)
         if failure_stage == "peer_recovery_cleanup":
             assert checked_originals
@@ -1574,4 +1609,3 @@ def test_iq_finalize_writeback_failure_restores_state_for_retry(
         assert all(parameter.requires_grad for parameter in model.parameters())
     finally:
         policy.close()
-

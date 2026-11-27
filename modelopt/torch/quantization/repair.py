@@ -447,7 +447,7 @@ class IQRepairPolicy:
                             ),
                         ),
                     )
-                    module._local_repair_properties = {
+                    checkpoint_properties = {
                         "_if_calib": self._calibration_flags[module],
                         "_axis": self._layouts[module][0],
                         "_block_sizes": self._layouts[module][1],
@@ -456,6 +456,11 @@ class IQRepairPolicy:
                             for name, (existed, value) in self._layouts[module][4].items()
                             if existed
                         },
+                    }
+                    module._local_repair_properties = {
+                        name: checkpoint_properties[name]
+                        for name in TensorQuantizer._repair_overlay_properties
+                        if name in checkpoint_properties
                     }
                     module._if_calib = False
                 if hasattr(module, "allow_real_quant_gemm"):
@@ -593,6 +598,20 @@ class IQRepairPolicy:
             except BaseException as exc:
                 rollback_error = exc
                 traceback.clear_frames(exc.__traceback__)
+        # Never expire an unfinished owner receipt by entering another access window.
+        # Agree on this stage before peers can enter collective-bearing recovery access.
+        if synchronize_error is not None:
+            try:
+                synchronize_error(
+                    None
+                    if rollback_error is None
+                    else f"{type(rollback_error).__name__}: {rollback_error}"
+                )
+            except BaseException as exc:
+                rollback_error = exc
+        if rollback_error is not None:
+            traceback.clear_frames(rollback_error.__traceback__)
+            raise rollback_error
         for quantizer, (buffers, nonpersistent, cache, pre_scale, rotate) in originals.items():
             # Owner recovery can mutate live registrations before another transient failure.
             quantizer._buffers = buffers.copy()

@@ -24,9 +24,9 @@ from torch.distributed.fsdp import fully_shard
 from torch.distributed.tensor import DTensor, Replicate, Shard, distribute_tensor
 
 import modelopt.torch.quantization as mtq
-from modelopt.torch.quantization.repair import IQRepairPolicy
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
+from modelopt.torch.quantization.repair import IQRepairPolicy
 from modelopt.torch.quantization.utils import (
     convert_quantization_axis_to_reduce_axis,
     core_utils,
@@ -1200,9 +1200,7 @@ def _fsdp2_iq_repair_flags_job(rank, size):
         with fsdp2_weight_access_and_writeback_context(boundary, boundary, writeback=False):
             boundary(inputs).square().mean().backward()
             assert all(parameter.grad is None for parameter in boundary.parameters())
-            assert any(
-                field.grad is not None and field.grad.count_nonzero() for field in fields
-            )
+            assert any(field.grad is not None and field.grad.count_nonzero() for field in fields)
         assert all(not parameter.requires_grad for parameter in boundary.parameters())
         policy.close()
         assert all(parameter.requires_grad for parameter in boundary.parameters())
@@ -1216,7 +1214,6 @@ def _fsdp2_iq_repair_flags_job(rank, size):
         )
     finally:
         policy.close()
-
 
 
 def test_fsdp2_iq_repair_preserves_gradient_flags(cpu_dist_workers):

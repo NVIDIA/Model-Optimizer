@@ -85,6 +85,9 @@ def test_iq_fields_finalize_and_reload(name, width, tmp_path):
     enable_weight_cache(model)
     try:
         fields = policy.prepare(model)
+        captured = quantizer._local_repair_properties
+        assert set(TensorQuantizer._repair_required_properties) <= captured.keys()
+        assert captured.keys() <= set(TensorQuantizer._repair_overlay_properties)
         assert torch.equal(model.weight_quantizer._local_repair_state.native_payload(), original)
         torch.testing.assert_close(model(x), before, rtol=0, atol=0)
         assert {id(parameter) for parameter in model.parameters()} == parameters
@@ -118,6 +121,7 @@ def test_iq_fields_finalize_and_reload(name, width, tmp_path):
     finally:
         policy.close()
         disable_weight_cache(model)
+    assert all(not hasattr(q, "_local_repair_properties") for q in model.modules())
     payload = pinned_packed_weight(model.weight_quantizer, name)
     global_scale, local, _ = decode_scale_fields(original, fmt)
     assert torch.equal(replace_scale_fields(payload, fmt, global_scale, local), original)
@@ -161,6 +165,7 @@ def test_iq_policy_refuses_aliases_and_restores_on_failure():
     assert model[0].weight.requires_grad
     assert not hasattr(quantizer, "_local_repair_state")
     assert not hasattr(quantizer, "_local_repair_active")
+    assert not hasattr(quantizer, "_local_repair_properties")
     assert quantizer._fake_quantize == original_forward
     torch.testing.assert_close(model(x), baseline, rtol=0, atol=0)
 
@@ -557,6 +562,7 @@ def test_iq_policy_restores_first_flags_of_shared_frozen_modules(separate_polici
     assert all(parameter.requires_grad == flag for parameter, flag in flags.items())
     assert shared.weight_quantizer._if_calib
     assert shared.allow_real_quant_gemm
+    assert all(not hasattr(q, "_local_repair_properties") for q in units.modules())
 
 
 def test_iq_resident_nonoffload_hook_needs_no_optional_offload_plugin(monkeypatch):
