@@ -17,6 +17,7 @@
 
 import copy
 import itertools
+import sys
 import threading
 import warnings
 import weakref
@@ -672,13 +673,19 @@ def fsdp2_weight_access_and_writeback_context(
     contention only. Rank-divergent concurrent calls can block peers until backend timeout and
     require job termination.
 
+    Direct entry and publication expire overlapping Accelerate rollback callbacks, as the dispatcher
+    does; disjoint callbacks remain valid.
+
     Raises:
         RuntimeError: Another thread holds the process-local weight-access guard.
     """
     with (
         _weight_access_guard(),
-        _fsdp2_weight_access_and_writeback_context(
-            module, root_model, writeback, names, rollback=rollback
+        _expire_accelerate_rollbacks_on_exit(
+            module,
+            _fsdp2_weight_access_and_writeback_context(
+                module, root_model, writeback, names, rollback=rollback
+            ),
         ),
     ):
         yield
@@ -690,6 +697,7 @@ def _fsdp2_weight_access_and_writeback_context(module, root_model, writeback, na
     fsdp_module = _get_enclosing_fsdp_module(module, root_model, names)
     assert fsdp_module is not None, "Module is not wrapped by FSDP"
     if not writeback:
+        _invalidate_pending_accelerate_rollbacks(module)
         with _fsdp2_unshard_context(fsdp_module):
             yield
         return
@@ -737,6 +745,7 @@ def _fsdp2_weight_access_and_writeback_context(module, root_model, writeback, na
     gather_params = []
     preflight_error = None
     try:
+        _invalidate_pending_accelerate_rollbacks(module)
         if (
             rollback
             and _FSDP2_ACTIVE_PARAMS
@@ -958,15 +967,47 @@ def _weight_access_guard():
         _WEIGHT_ACCESS_LOCK.release()
 
 
+def _invalidate_pending_accelerate_rollbacks(module):
+    # A pending callback implies the optional plugin is already loaded.
+    plugin = sys.modules.get("modelopt.torch.quantization.plugins.accelerate")
+    if plugin is not None and plugin._ROLLBACK_RECEIPTS:
+        try:
+            plugin._invalidate_rollbacks(plugin._rollback_scope(module, ()))
+        except BaseException:
+            plugin._ROLLBACK_RECEIPTS.clear()
+            raise
+
+
+@contextmanager
+def _expire_accelerate_rollbacks_on_exit(module, context):
+    try:
+        with context as owner_rollback:
+            try:
+                yield owner_rollback
+            finally:
+                _invalidate_pending_accelerate_rollbacks(module)
+    finally:
+        # Owner exit can restore persistent storage hidden by its materialized view.
+        _invalidate_pending_accelerate_rollbacks(module)
+
+
 @contextmanager
 def enable_weight_access_and_writeback(
-    module, root_model, names: "ModuleNames | None" = None, writeback: bool = True
+    module,
+    root_model,
+    names: "ModuleNames | None" = None,
+    writeback: bool = True,
+    *,
+    rollback: bool = False,
 ):
     """Enable weight access and writeback for a module.
 
     Useful for modules with weight not intact such as Linear layer in FSDP wrapped model or
     HF accelerate offloaded models (CPU or disk). Under FSDP2 only the parameters FSDP2 manages
     are gathered (see :func:`fsdp2_weight_access_and_writeback_context`).
+
+    Windows and undo callbacks must be serialized across threads in each process. Concurrent
+    access raises before entry; same-thread nesting remains supported.
 
     Args:
         module: The module to access weights for.
@@ -977,31 +1018,63 @@ def enable_weight_access_and_writeback(
             is its own module.
         writeback: Whether modified weights must be written back to the owning sharded/offload
             representation when exiting the context.
+        rollback: Retain aliased CPU backing snapshots for Accelerate and coordinate recoverable
+            FSDP2 staging failures before starting another collective in writable windows.
+            Read-only FSDP2 access uses native unshard/reshard without this coordination.
+            Accelerate's callback restores backing maps, registrations and captured CPU aliases;
+            callers still restore already-resident execution values from their own backups,
+            including inside outer materialization scopes. The callback becomes valid after exit
+            and expires when overlapping access through any dispatcher route or the direct FSDP2
+            context enters or publishes, including read-only or failed access and enclosing
+            publication. Stale undo raises before mutation; successful undo stays idempotent.
+            Custom offload mappings, including ``dict`` subclasses, are opaque and conservatively
+            expire all pending callbacks.
+            FSDP2, HF TP and ``nullcontext`` yield no rollback callback; callers own restoration.
     """
-    if _get_enclosing_fsdp_module(module, root_model, names) is not None:
-        context = fsdp2_weight_access_and_writeback_context(module, root_model, writeback, names)
+    with (
+        _weight_access_guard(),
+        _enable_weight_access_and_writeback(
+            module, root_model, names, writeback, rollback=rollback
+        ) as owner_rollback,
+    ):
+        yield owner_rollback
+
+
+@contextmanager
+def _enable_weight_access_and_writeback(module, root_model, names, writeback, *, rollback):
+    fsdp_access = _get_enclosing_fsdp_module(module, root_model, names) is not None
+    if not fsdp_access:
+        _invalidate_pending_accelerate_rollbacks(module)
+    accelerate_access = False
+    if fsdp_access:
+        context = _fsdp2_weight_access_and_writeback_context(
+            module, root_model, writeback, names, rollback=rollback
+        )
     elif is_quantized_parallel_linear(module) and hasattr(
         module, "enable_weight_access_and_writeback"
     ):
         # HF transformers TP sharded linear layer
         context = module.enable_weight_access_and_writeback()
-    elif hasattr(module, "_hf_hook"):
+    elif has_accelerate_offload(module):
         from ..plugins.accelerate import weight_access_and_writeback_context
 
-        context = weight_access_and_writeback_context(module, writeback)
+        accelerate_access = True
+        context = weight_access_and_writeback_context(module, writeback, rollback=rollback)
     else:
         context = nullcontext()
 
-    with context:
-        yield
+    if not accelerate_access:
+        context = _expire_accelerate_rollbacks_on_exit(module, context)
+    with context as owner_rollback:
+        yield owner_rollback
 
 
 def requires_weight_materialization(module, root_model, names: "ModuleNames | None" = None) -> bool:
     """Whether ``module``'s own weights are currently unreadable and need a window.
 
-    Mirrors the dispatch in :func:`enable_weight_access_and_writeback`, so callers
-    deciding *whether* to open a window agree with what opening one would do. Two things
-    must hold: the module owns tensors that are not directly readable right now
+    Checks the module's own weight owners; the dispatcher also accepts composite modules
+    with offloaded descendants. Two things must hold: the module owns tensors that are
+    not directly readable right now
     (offloaded to meta, or a sharded ``DTensor``), and a context exists that can
     materialize them. Modules already materialized are excluded -- re-entering a window
     would re-run export handlers over already-packed weights.
