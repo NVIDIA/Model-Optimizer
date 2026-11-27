@@ -49,6 +49,7 @@ from ._auto_quantize_cost import (
     COST_MODEL_ACTIVE_MOE,
     COST_MODEL_WEIGHT,
     _get_module_weight_numel,
+    _get_module_weights,
     get_auto_quantize_cost_model,
     normalize_auto_quantize_constraints,
 )
@@ -798,7 +799,7 @@ class QuantRecipeHparam(Hparam):
 
             # A plain tensor is this rank's shard over the TP and EP groups. A DTensor's size is the
             # whole tensor's already, as for the routed experts transformers shards expert-parallel.
-            if not any(isinstance(p, DTensor) for p in quant_module.parameters(recurse=False)):
+            if not any(isinstance(w, DTensor) for w in _get_module_weights(quant_module)):
                 weight_size = DistributedProcessGroup.get_dist_syncd_obj(
                     weight_size,
                     [

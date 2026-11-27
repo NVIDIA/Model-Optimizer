@@ -21,6 +21,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from _test_utils.torch.distributed.utils import bounded_collectives
 from _test_utils.torch.quantization.models import SimpleConv, SimpleConvLinear, SimpleLinear
 from packaging.version import Version
 from torch.distributed.device_mesh import init_device_mesh
@@ -47,6 +48,7 @@ from modelopt.torch.quantization.algorithms import (
     estimate_quant_compression,
 )
 from modelopt.torch.quantization.config import _base_disable_all, _default_disabled_quantizer_cfg
+from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.utils import safe_load, safe_save
 from modelopt.torch.utils.distributed import (
     DistributedProcessGroup,
@@ -1263,6 +1265,34 @@ def _sharded_like_the_expert_parallel_load(model, size):
     return model
 
 
+def _kv_cache_search():
+    """Each layer's K/V cast to FP8 with its calibrated scale or a constant one."""
+    return (
+        {
+            "quantization_formats": [
+                (
+                    {
+                        "quant_cfg": [
+                            {
+                                "quantizer_name": "*[kv]_bmm_quantizer",
+                                "cfg": {"num_bits": (4, 3), "constant_amax": 1.0}
+                                if cast
+                                else {"num_bits": (4, 3)},
+                            }
+                        ],
+                        "effective_bits": 8.0,
+                        "algorithm": None if cast else "max",
+                    },
+                    "cast_fp8" if cast else "calibrated_fp8",
+                )
+                for cast in (False, True)
+            ]
+        },
+        lambda model, batch: model(input_ids=batch["input_ids"], use_cache=False).logits,
+        {"effective_bits": 8.0, "cost_model": "kv_cache"},
+    )
+
+
 def _test_expert_parallel_auto_quantize(rank, size, methods):
     # model_load_utils imports transformers, which is optional here.
     from modelopt.torch.utils.plugins.model_load_utils import _seed_parallel_states
@@ -1290,30 +1320,7 @@ def _test_expert_parallel_auto_quantize(rank, size, methods):
             lambda model, batch: model(**batch).logits,
             {"effective_bits": 7.0},
         ),
-        "kl_div": (  # each layer's K/V cast to FP8 with its calibrated scale or a constant one
-            {
-                "quantization_formats": [
-                    (
-                        {
-                            "quant_cfg": [
-                                {
-                                    "quantizer_name": "*[kv]_bmm_quantizer",
-                                    "cfg": {"num_bits": (4, 3), "constant_amax": 1.0}
-                                    if cast
-                                    else {"num_bits": (4, 3)},
-                                }
-                            ],
-                            "effective_bits": 8.0,
-                            "algorithm": None if cast else "max",
-                        },
-                        "cast_fp8" if cast else "calibrated_fp8",
-                    )
-                    for cast in (False, True)
-                ]
-            },
-            lambda model, batch: model(input_ids=batch["input_ids"], use_cache=False).logits,
-            {"effective_bits": 8.0, "cost_model": "kv_cache"},
-        ),
+        "kl_div": _kv_cache_search(),
     }
 
     def auto_quantize(model, data_loader, method):
@@ -1334,6 +1341,11 @@ def _test_expert_parallel_auto_quantize(rank, size, methods):
     _seed_parallel_states(reference, [], ParallelState(-1), None)
     model = _sharded_like_the_expert_parallel_load(_tiny_qwen3_moe("torch_a2a"), size)
     for method in methods:
+        if method == "quantize":
+            # Weights alone, without a forward loop: nothing re-plants the experts' forwards.
+            for quantized in (reference, model):
+                mtq.quantize(quantized, mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG)
+            continue
         reference_state = auto_quantize(reference, batches, method)
         state = auto_quantize(model, batches[rank::size], method)
 
@@ -1367,20 +1379,68 @@ def _test_expert_parallel_auto_quantize(rank, size, methods):
 
 @pytest.mark.parametrize(
     "methods",
-    [("gradient", "kl_div"), ("aumann_shapley",), ("kl_div",)],
-    ids=["gradient_then_kv_cache", "aumann_shapley", "kv_cache"],
+    [("gradient", "kl_div"), ("aumann_shapley",), ("kl_div",), ("quantize", "kl_div")],
+    ids=["gradient_then_kv_cache", "aumann_shapley", "kv_cache", "quantize_then_kv_cache"],
 )
 def test_expert_parallel_auto_quantize_picks_one_processes_formats(cpu_dist_workers, methods):
     """Each rank scores its own batches through the experts it holds, sharded as transformers'
     expert-parallel load leaves them: DTensors over every rank, behind the all-to-all forwards that
     quantizer insertion drops. The search gives the costs, scores and formats of one process scoring
     every rank's batches -- with aumann_shapley over the experts alone, whose groups hold no rank's
-    whole data. So does the KV-cache search, on the model as it loads, and after a weight search,
-    where each rank holds the weight quantizers of its own experts alone."""
+    whole data. So does the KV-cache search, on the model as it loads, after a weight search, where
+    each rank holds the weight quantizers of its own experts alone, and after mtq.quantize without a
+    forward loop, which leaves the experts' forwards dropped."""
     transformers = pytest.importorskip("transformers")
     if Version(transformers.__version__) < Version("5.16"):
         pytest.skip("transformers' expert-parallel load shards the experts as DTensors from 5.16")
     cpu_dist_workers.run(_test_expert_parallel_auto_quantize, methods=methods)
+
+
+def _test_kv_resume_with_one_stale_expert_shard(rank, size, directory):
+    register_torch_a2a()
+    search, forward_step, constraints = _kv_cache_search()
+    gen = torch.Generator().manual_seed(1)
+    batches = [{"input_ids": torch.randint(0, 64, (2, 8), generator=gen)} for _ in range(size)]
+
+    def kv_search(stale):
+        model = _sharded_like_the_expert_parallel_load(_tiny_qwen3_moe("torch_a2a"), size)
+        mtq.quantize(model, mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG)
+        if stale:
+            # This rank's experts no longer hold the weight scales its checkpoint was taken on.
+            quantizer = next(
+                module
+                for name, module in model.named_modules()
+                if "mlp.experts" in name
+                and isinstance(module, TensorQuantizer)
+                and module.is_enabled
+            )
+            quantizer.amax = quantizer.amax * 2
+        mtq.auto_quantize(
+            model,
+            constraints=constraints,
+            data_loader=batches[rank::size],
+            forward_step=forward_step,
+            num_calib_steps=1,
+            num_score_steps=1,
+            method="kl_div",
+            checkpoint=str(directory),
+            **search,
+        )
+
+    kv_search(stale=False)
+    # No other rank compares this rank's experts' part of its checkpoint, so its verdict joins the
+    # cross-rank check: every rank refuses the resume, not this one alone with the others waiting.
+    with bounded_collectives(), pytest.raises(ValueError, match="identical search configuration"):
+        kv_search(stale=rank == 1)
+
+
+def test_expert_parallel_kv_resume_refuses_one_stale_expert_shard_on_every_rank(
+    cpu_dist_workers, tmp_path
+):
+    transformers = pytest.importorskip("transformers")
+    if Version(transformers.__version__) < Version("5.16"):
+        pytest.skip("transformers' expert-parallel load shards the experts as DTensors from 5.16")
+    cpu_dist_workers.run(_test_kv_resume_with_one_stale_expert_shard, directory=tmp_path)
 
 
 def test_score_hparam_registration_preserves_order():

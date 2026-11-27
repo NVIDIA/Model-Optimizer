@@ -93,8 +93,8 @@ def is_routed_moe_module_name(name: str) -> bool:
     return "shared_expert" not in name and _ROUTED_MOE_EXPERT_NAME_RE.search(name) is not None
 
 
-def _get_module_weight_numel(module: nn.Module) -> int:
-    """Return the parameter count for a module's quantizable weights.
+def _get_module_weights(module: nn.Module) -> list[nn.Parameter]:
+    """Return a module's quantizable weights, the tensors AutoQuantize's cost counts.
 
     Standard quantized linear modules have a single ``weight`` parameter. Fused
     MoE expert containers expose projection tensors directly instead, so both
@@ -102,15 +102,20 @@ def _get_module_weight_numel(module: nn.Module) -> int:
     """
     weight = getattr(module, "weight", None)
     if weight is not None:
-        return weight.numel()
+        return [weight]
 
     # Fused MoE expert containers expose projection tensors directly instead of
     # a single ``weight`` parameter.
-    return sum(
-        param.numel()
+    return [
+        param
         for attr in ("gate_up_proj", "down_proj")
         if (param := getattr(module, attr, None)) is not None
-    )
+    ]
+
+
+def _get_module_weight_numel(module: nn.Module) -> int:
+    """Return the parameter count for a module's quantizable weights."""
+    return sum(weight.numel() for weight in _get_module_weights(module))
 
 
 class AutoQuantizeCostModel:

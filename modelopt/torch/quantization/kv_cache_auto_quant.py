@@ -604,7 +604,7 @@ def _expert_quantizer_names(model: nn.Module) -> set[str]:
     """The quantizers under the routed experts an expert-parallel load shards over the ranks."""
     experts = {
         name
-        for name, module in model.named_modules()
+        for name, module in model.named_modules(remove_duplicate=False)
         if (state := getattr(module, "_parallel_state", None)) is not None
         and state.expert_model_parallel_group.world_size() > 1
     }
@@ -783,6 +783,10 @@ class AutoQuantizeKVSearcher(BaseSearcher):
         state = {
             "signature": shared_signature,
             "checkpoint_signature": shared_checkpoint,
+            # Each rank's verdict on its whole checkpoint, its experts' part included, which other
+            # ranks may not compare: one rank refusing it alone would leave the others waiting.
+            "checkpoint_compatible": self.search_signature is None
+            or _checkpoint_state_is_compatible(self.state_dict(), signature),
             "calibration_complete": self.calibration_complete,
             "layers": self.layers,
             "quantizer_state": _fingerprint_value(self.quantizer_state),

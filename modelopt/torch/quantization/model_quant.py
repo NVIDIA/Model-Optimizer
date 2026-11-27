@@ -861,10 +861,11 @@ def _auto_quantize_kv_cache(
     )
     if converted_for_search:
         model = apply_mode(model, mode="auto_quantize", registry=QuantizeModeRegistry)
-        # Quantizer insertion dropped the routed experts' all-to-all forwards, which the search's
-        # calibration and scoring forwards need.
-        dist.reinstall_a2a_forwards(model, ep_mesh)
         set_quantizer_by_cfg(model, [{"quantizer_name": "*", "enable": False}])
+    # Quantizer insertion dropped the routed experts' all-to-all forwards, which the search's
+    # calibration and scoring forwards need: this search's insertion, or the one before it on a
+    # model quantized without a forward loop, which nothing re-planted.
+    dist.reinstall_a2a_forwards(model, ep_mesh)
     searcher = AutoQuantizeKVSearcher()
     searcher.search(
         model,
