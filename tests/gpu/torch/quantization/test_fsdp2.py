@@ -719,7 +719,7 @@ def test_iq_plan_checks_execution_device_offload_backing(shared):
         },
     )
     backing = model[0].weight.detach().cuda()
-    model[1].register_buffer("retained", backing if shared else backing.clone())
+    model[1].register_buffer("retained", backing.view_as(backing) if shared else backing.clone())
     add_hook_to_module(
         model[0],
         AlignDevicesHook(execution_device="cuda", offload=True, weights_map={"weight": backing}),
