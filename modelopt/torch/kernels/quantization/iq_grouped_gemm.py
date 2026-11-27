@@ -205,21 +205,22 @@ class _IQGrouped(torch.autograd.Function):
             "E": len(packeds),
             "BE": triton.next_power_of_2(len(packeds)),
         }
-        _grouped[(programs,)](
-            inputs,
-            output,
-            pointers,
-            steps,
-            grid,
-            offsets,
-            bias if bias is not None else output,
-            output,
-            HAS_BIAS=bias is not None,
-            BACKWARD=False,
-            enable_fp_fusion=False,
-            **meta,
-            **common,
-        )
+        with torch.cuda.device(inputs.device):
+            _grouped[(programs,)](
+                inputs,
+                output,
+                pointers,
+                steps,
+                grid,
+                offsets,
+                bias if bias is not None else output,
+                output,
+                HAS_BIAS=bias is not None,
+                BACKWARD=False,
+                enable_fp_fusion=False,
+                **meta,
+                **common,
+            )
         ctx.save_for_backward(inputs, steps, pointers, offsets, grid, *packeds)
         ctx.meta, ctx.common, ctx.programs = meta, common, programs
         ctx.has_bias = bias is not None
@@ -232,40 +233,45 @@ class _IQGrouped(torch.autograd.Function):
         dx, ds, db = None, None, None
         if ctx.needs_input_grad[0]:
             dx = torch.zeros_like(inputs)
-            _grouped[(ctx.programs,)](
-                inputs,
-                gradient,
-                pointers,
-                steps,
-                grid,
-                offsets,
-                None,
-                dx,
-                HAS_BIAS=False,
-                BACKWARD=True,
-                enable_fp_fusion=False,
-                **ctx.meta,
-                **ctx.common,
-            )
+            with torch.cuda.device(inputs.device):
+                _grouped[(ctx.programs,)](
+                    inputs,
+                    gradient,
+                    pointers,
+                    steps,
+                    grid,
+                    offsets,
+                    None,
+                    dx,
+                    HAS_BIAS=False,
+                    BACKWARD=True,
+                    enable_fp_fusion=False,
+                    **ctx.meta,
+                    **ctx.common,
+                )
         if ctx.needs_input_grad[1]:
             ds = torch.empty_like(steps)
             n, k = ctx.meta["N"], ctx.meta["K"]
-            _grouped_scales[(len(packeds), triton.cdiv(n, _SCALE_TILE_N), triton.cdiv(k, _TILE_K))](
-                inputs,
-                gradient,
-                pointers,
-                grid,
-                offsets,
-                ds,
-                enable_fp_fusion=False,
-                **ctx.meta,
-            )
+            with torch.cuda.device(gradient.device):
+                _grouped_scales[
+                    (len(packeds), triton.cdiv(n, _SCALE_TILE_N), triton.cdiv(k, _TILE_K))
+                ](
+                    inputs,
+                    gradient,
+                    pointers,
+                    grid,
+                    offsets,
+                    ds,
+                    enable_fp_fusion=False,
+                    **ctx.meta,
+                )
         if ctx.has_bias and ctx.needs_input_grad[6]:
             n = ctx.meta["N"]
             db = inputs.new_empty((len(packeds), n))
-            _grouped_bias[(len(packeds), triton.cdiv(n, 64))](
-                gradient, offsets, db, n, inputs.shape[0]
-            )
+            with torch.cuda.device(gradient.device):
+                _grouped_bias[(len(packeds), triton.cdiv(n, 64))](
+                    gradient, offsets, db, n, inputs.shape[0]
+                )
         return dx, ds, None, None, None, None, db, None
 
 

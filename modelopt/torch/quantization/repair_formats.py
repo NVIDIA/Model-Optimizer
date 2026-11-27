@@ -18,6 +18,7 @@
 import torch
 from torch import nn
 from torch.distributed.tensor import DTensor
+from torch.nn.modules import module as module_hooks
 
 from modelopt.torch.utils import same_device_as
 
@@ -99,6 +100,10 @@ def _packed_projection_qualified(inputs, name, shape):
     return (
         inputs.is_cuda
         and inputs.dtype == torch.bfloat16
+        and (
+            not torch.is_autocast_enabled("cuda")
+            or torch.get_autocast_dtype("cuda") == inputs.dtype
+        )
         and name in ("iq1_m", "iq2_xxs")
         and tuple(shape) == (2048, 4096)
         and 0 < inputs.numel() // shape[-1] <= 8
@@ -118,7 +123,11 @@ def _plain_repair_quantizer(quantizer):
         and quantizer.bias is None
         and not quantizer.rotate_back_is_enabled
         and not (
-            quantizer._forward_hooks
+            module_hooks._global_forward_hooks
+            or module_hooks._global_forward_pre_hooks
+            or module_hooks._global_backward_hooks
+            or module_hooks._global_backward_pre_hooks
+            or quantizer._forward_hooks
             or quantizer._forward_pre_hooks
             or quantizer._backward_hooks
             or quantizer._backward_pre_hooks
@@ -246,14 +255,20 @@ def repair_grouped_linear(quantizers, inputs, offsets, bias=None, *, is_transpos
         p.device != inputs.device or p.dtype != torch.uint8 or not p.is_contiguous() for p in packed
     ):
         return None
-    from modelopt.torch.kernels.quantization.iq_grouped_gemm import iq_grouped_linear
+    try:
+        from modelopt.torch.kernels.quantization.iq_grouped_gemm import iq_grouped_linear
+    except ImportError as exc:
+        if not (exc.name or "").startswith("triton"):
+            raise
+        return None
 
     key = tuple((p.data_ptr(), p._version) for p in packed)
     cached = getattr(first, "_grouped_pointers", None)
     if cached is None or cached[0] != key:
-        pointers = torch.tensor(
-            [p.data_ptr() for p in packed], device=inputs.device, dtype=torch.int64
-        )
+        with torch.inference_mode(False):
+            pointers = torch.tensor(
+                [p.data_ptr() for p in packed], device=inputs.device, dtype=torch.int64
+            )
         # One immutable pointer table per owning representation, never projected fields/weights.
         first._grouped_pointers = key, pointers
     else:
@@ -365,7 +380,12 @@ class IQScaleState(nn.Module):
             or not _packed_projection_qualified(inputs, self.name, self.weight_shape)
         ):
             return None
-        from modelopt.torch.kernels.quantization.iq_gemm import iq_linear
+        try:
+            from modelopt.torch.kernels.quantization.iq_gemm import iq_linear
+        except ImportError as exc:
+            if not (exc.name or "").startswith("triton"):
+                raise
+            return None
 
         self.projection_counts["packed_dense"] = self.projection_counts.get("packed_dense", 0) + 1
         with same_device_as(inputs):

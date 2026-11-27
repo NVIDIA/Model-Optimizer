@@ -35,7 +35,10 @@ import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.ggml import IQ_FORMAT_REGISTRY
 from modelopt.torch.quantization.ggml.common import pin_packed_weight, pinned_packed_weight
 from modelopt.torch.quantization.repair import IQRepairPolicy, plan_iq_repair
-from modelopt.torch.quantization.repair_formats import _packed_projection_qualified
+from modelopt.torch.quantization.repair_formats import (
+    _packed_projection_qualified,
+    repair_grouped_linear,
+)
 from modelopt.torch.quantization.utils import enable_weight_access_and_writeback
 
 
@@ -691,11 +694,19 @@ def test_automatic_packed_projection_matches_native_fields(name, noncurrent, mon
                 ),
                 flush=True,
             )
-        # The long-context path must keep the faster materialized GEMM.
+        with (
+            torch.autocast("cuda", dtype=torch.float16),
+            mock.patch.object(torch.cuda, "get_device_capability", return_value=(10, 3)),
+        ):
+            autocast_actual = model(x)
+            autocast_expected = F.linear(x, state(model.weight), model.bias)
+        assert autocast_actual.dtype == autocast_expected.dtype == torch.float16
+        torch.testing.assert_close(autocast_actual, autocast_expected, rtol=0, atol=0)
+        # The first token count beyond the packed allowlist keeps materialized GEMM.
         with torch.no_grad():
-            model(torch.zeros(32768, 4096, device=device, dtype=torch.bfloat16))
+            model(torch.zeros(9, 4096, device=device, dtype=torch.bfloat16))
         assert torch.cuda.current_device() == current
-        assert state.projection_counts == {"packed_dense": 1, "materialized": 2}
+        assert state.projection_counts == {"packed_dense": 1, "materialized": 4}
         assert not any(
             t.shape == model.weight.shape and t.is_floating_point() for t in state.buffers()
         )
@@ -703,12 +714,8 @@ def test_automatic_packed_projection_matches_native_fields(name, noncurrent, mon
         policy.close()
 
 
-@pytest.mark.parametrize("noncurrent", [False, True], ids=["current", "noncurrent"])
-@pytest.mark.parametrize("name", ["iq1_m", "iq2_xxs"])
-@pytest.mark.timeout(180)
-def test_automatic_grouped_projection_preserves_native_fields(
-    name, capsys, monkeypatch, noncurrent
-):
+def _grouped_qualification_setup(name, monkeypatch, noncurrent):
+    pytest.importorskip("triton")
     if noncurrent and torch.cuda.device_count() < 2:
         pytest.skip("Noncurrent grouped dispatch requires two CUDA devices")
     if not torch.cuda.is_available():
@@ -718,13 +725,33 @@ def test_automatic_grouped_projection_preserves_native_fields(
     with torch.cuda.device(device):
         if not torch.cuda.is_bf16_supported():
             pytest.skip("Grouped packed qualification requires BF16 CUDA support")
-    from transformers import Qwen3MoeConfig
-    from transformers.integrations.moe import _grouped_linear
-    from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeSparseMoeBlock
+    probe = torch.empty(8, 4096, device=device, dtype=torch.bfloat16)
+    production_qualified = _packed_projection_qualified(probe, name, (2048, 4096))
+    eligibility_override = not production_qualified
+    if eligibility_override:
+        # Exercise real kernels on CI hardware; automatic production policy stays GB300-only.
+        monkeypatch.setattr(
+            "modelopt.torch.quantization.repair_formats._packed_projection_qualified",
+            lambda inputs, format_name, shape: (
+                inputs.device == device
+                and inputs.dtype == torch.bfloat16
+                and inputs.shape == (8, 4096)
+                and format_name == name
+                and tuple(shape) == (2048, 4096)
+            ),
+        )
+    return current, device, production_qualified, eligibility_override
 
-    from modelopt.torch.quantization.plugins.huggingface import _QuantFusedExperts
-    from modelopt.torch.quantization.repair_formats import repair_grouped_linear
 
+@pytest.mark.parametrize("noncurrent", [False, True], ids=["current", "noncurrent"])
+@pytest.mark.parametrize("name", ["iq1_m", "iq2_xxs"])
+@pytest.mark.timeout(180)
+def test_automatic_grouped_projection_preserves_native_fields(
+    name, capsys, monkeypatch, noncurrent
+):
+    current, device, production_qualified, eligibility_override = _grouped_qualification_setup(
+        name, monkeypatch, noncurrent
+    )
     torch.manual_seed(131)
     bank = nn.ModuleList(
         [
@@ -739,24 +766,13 @@ def test_automatic_grouped_projection_preserves_native_fields(
         quantizers = [m.weight_quantizer for m in bank]
         x = torch.randn(8, 4096, device=device, dtype=torch.bfloat16, requires_grad=True)
         ends = torch.tensor([5, 5, 8, 8], device=device, dtype=torch.int32)
-        production_qualified = _packed_projection_qualified(x, name, (2048, 4096))
-        eligibility_override = not production_qualified
-        if eligibility_override:
-            # Exercise real kernels on CI hardware; automatic production policy stays GB300-only.
-            monkeypatch.setattr(
-                "modelopt.torch.quantization.repair_formats._packed_projection_qualified",
-                lambda inputs, format_name, shape: (
-                    inputs.device == device
-                    and inputs.dtype == torch.bfloat16
-                    and inputs.shape == (8, 4096)
-                    and format_name == name
-                    and tuple(shape) == (2048, 4096)
-                ),
-            )
         states = [q._local_repair_state for q in quantizers]
         assert all(state.projection_counts == {} for state in states)
         original_codes = [state.packed.clone() for state in states]
         upstream = torch.randn(8, 2048, device=x.device, dtype=x.dtype) / (8 * 2048)
+        with torch.inference_mode():
+            assert repair_grouped_linear(quantizers, x, ends) is not None
+        assert not torch.is_inference(states[0]._grouped_pointers[1])
         warmup = repair_grouped_linear(quantizers, x, ends)
         assert torch.cuda.current_device() == current
         assert warmup is not None
@@ -807,8 +823,13 @@ def test_automatic_grouped_projection_preserves_native_fields(
                 flush=True,
             )
         with torch.cuda.device(device):
-            expected = _grouped_linear(
-                x, torch.stack([q(m.weight) for q, m in zip(quantizers, bank, strict=True)]), ends
+            expected = torch.cat(
+                [
+                    F.linear(x[start:end], q(module.weight))
+                    for start, end, q, module in zip(
+                        (0, 5, 5, 8), (5, 5, 8, 8), quantizers, bank, strict=True
+                    )
+                ]
             )
             oracle = torch.autograd.grad(expected, [x, *fields], upstream)
         torch.testing.assert_close(actual, expected, rtol=0.01, atol=0.015)
@@ -816,7 +837,7 @@ def test_automatic_grouped_projection_preserves_native_fields(
             error = (a.float() - b.float()).norm() / b.float().norm().clamp_min(1e-20)
             assert error < 5e-4, error.item()
         first = quantizers[0]._local_repair_state
-        assert first.projection_counts["packed_grouped"] == 2
+        assert first.projection_counts["packed_grouped"] == 3
         pointers = first._grouped_pointers[1]
         with torch.no_grad():
             repair_grouped_linear(quantizers, x, ends)
@@ -828,6 +849,22 @@ def test_automatic_grouped_projection_preserves_native_fields(
     finally:
         policy.close()
 
+
+@pytest.mark.parametrize("noncurrent", [False, True], ids=["current", "noncurrent"])
+@pytest.mark.parametrize("name", ["iq1_m", "iq2_xxs"])
+@pytest.mark.timeout(180)
+def test_hf_grouped_projection_preserves_native_fields(name, capsys, monkeypatch, noncurrent):
+    # This branch exercises the optional Transformers expert implementation itself.
+    pytest.importorskip("transformers")
+    from transformers import Qwen3MoeConfig
+    from transformers.integrations.moe import _grouped_linear
+    from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeSparseMoeBlock
+
+    from modelopt.torch.quantization.plugins.huggingface import _QuantFusedExperts
+
+    current, device, production_qualified, eligibility_override = _grouped_qualification_setup(
+        name, monkeypatch, noncurrent
+    )
     # A configurable production HF block reaches the same gate through its real router/forward.
     torch.manual_seed(137)
     config = Qwen3MoeConfig(

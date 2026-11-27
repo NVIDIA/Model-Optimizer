@@ -70,7 +70,7 @@ def _mse_backward(
     difference = tl.load(P + index, active, 0).to(tl.float32) - tl.load(T + index, active, 0).to(
         tl.float32
     )
-    value = difference * (2 * tl.load(G).to(tl.float32))
+    value = tl.where(active, difference * (2 * tl.load(G).to(tl.float32)), 0.0)
     if NEED_DP:
         tl.store(DP + index, value, index < N)
     if NEED_DT:
@@ -86,16 +86,17 @@ class _MaskedMSE(torch.autograd.Function):
             triton.cdiv(prediction.numel(), 1024), device=prediction.device, dtype=torch.float32
         )
         if partial.numel():
-            _mse[(partial.numel(),)](
-                prediction,
-                target,
-                mask,
-                partial,
-                prediction.numel(),
-                features,
-                mask is not None,
-                enable_fp_fusion=False,
-            )
+            with torch.cuda.device(prediction.device):
+                _mse[(partial.numel(),)](
+                    prediction,
+                    target,
+                    mask,
+                    partial,
+                    prediction.numel(),
+                    features,
+                    mask is not None,
+                    enable_fp_fusion=False,
+                )
         ctx.save_for_backward(prediction, target, mask)
         ctx.features = features
         return partial.sum()
@@ -106,20 +107,21 @@ class _MaskedMSE(torch.autograd.Function):
         dp = torch.empty_like(prediction) if ctx.needs_input_grad[0] else None
         dt = torch.empty_like(target) if ctx.needs_input_grad[1] else None
         if prediction.numel():
-            _mse_backward[(triton.cdiv(prediction.numel(), 1024),)](
-                prediction,
-                target,
-                mask,
-                gradient,
-                dp,
-                dt,
-                prediction.numel(),
-                ctx.features,
-                mask is not None,
-                dp is not None,
-                dt is not None,
-                enable_fp_fusion=False,
-            )
+            with torch.cuda.device(prediction.device):
+                _mse_backward[(triton.cdiv(prediction.numel(), 1024),)](
+                    prediction,
+                    target,
+                    mask,
+                    gradient,
+                    dp,
+                    dt,
+                    prediction.numel(),
+                    ctx.features,
+                    mask is not None,
+                    dp is not None,
+                    dt is not None,
+                    enable_fp_fusion=False,
+                )
         return dp, dt, None, None
 
 

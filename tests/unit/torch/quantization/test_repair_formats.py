@@ -235,7 +235,7 @@ def test_native_codebook_warmed_in_inference_can_be_saved_for_backward(monkeypat
     assert iq_metadata("cpu", name)[0] is grid
 
 
-@pytest.mark.parametrize("behavior", ["disabled", "hooked"])
+@pytest.mark.parametrize("behavior", ["disabled", "hooked", "global_hooked"])
 def test_packed_replay_gate_preserves_weight_quantizer_behavior(monkeypatch, behavior):
 
     model = nn.Linear(256, 2)
@@ -247,8 +247,12 @@ def test_packed_replay_gate_preserves_weight_quantizer_behavior(monkeypatch, beh
         quantizer = model.weight_quantizer
         if behavior == "disabled":
             quantizer.disable()
-        else:
+        elif behavior == "hooked":
             handle = quantizer.register_forward_hook(lambda _module, _args, output: output * 2)
+        else:
+            handle = nn.modules.module.register_module_forward_hook(
+                lambda module, _args, output: output * 2 if module is quantizer else None
+            )
 
         # Qualify CPU inputs solely to reach the unavailable CUDA optimization's gate.
         monkeypatch.setattr(repair_formats, "_packed_projection_qualified", lambda *args: True)
@@ -336,6 +340,47 @@ def test_active_repair_export_retains_base_linear_path(monkeypatch):
             exported = torch.export.export(model, (inputs,), strict=False)
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
         torch.testing.assert_close(exported.module()(inputs), expected, rtol=0, atol=0)
+        torch.testing.assert_close(
+            torch.autograd.grad(actual.sum(), inputs)[0],
+            torch.autograd.grad(expected.sum(), inputs)[0],
+            rtol=0,
+            atol=0,
+        )
+    finally:
+        policy.close()
+
+
+def test_packed_replay_without_optional_triton_retains_materialized_output(monkeypatch):
+    model = nn.Linear(256, 2)
+    mtq.quantize(model, _config([_iq("weight_quantizer", "iq1_s")]))
+    policy = IQRepairPolicy()
+    try:
+        policy.prepare(model)
+        inputs = torch.randn(3, 256, requires_grad=True)
+        expected = model(inputs)
+        original_import = builtins.__import__
+
+        def without_triton(module, *args, **kwargs):
+            if module in (
+                "modelopt.torch.kernels.quantization.iq_gemm",
+                "modelopt.torch.kernels.quantization.iq_grouped_gemm",
+            ):
+                raise ModuleNotFoundError("Optional Triton is unavailable", name="triton")
+            return original_import(module, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", without_triton)
+        # Reach the CUDA-only dispatch gate while exercising real CPU fallback math.
+        monkeypatch.setattr(repair_formats, "_packed_projection_qualified", lambda *args: True)
+        actual = model(inputs)
+        assert (
+            repair_formats.repair_grouped_linear(
+                [model.weight_quantizer] * 4,
+                inputs,
+                torch.tensor([0, 1, 2, 3], dtype=torch.int32),
+            )
+            is None
+        )
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
         torch.testing.assert_close(
             torch.autograd.grad(actual.sum(), inputs)[0],
             torch.autograd.grad(expected.sum(), inputs)[0],
