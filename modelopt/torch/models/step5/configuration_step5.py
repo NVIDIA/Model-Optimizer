@@ -20,6 +20,7 @@
 """Configuration for the published Step-5 Preview text architecture."""
 
 import copy
+import math
 
 from transformers import PretrainedConfig
 
@@ -194,7 +195,11 @@ class Step5Config(PretrainedConfig):
             if nested:
                 scaling = rope_scaling.get(kind, {})
             else:
-                scaling = (rope_scaling or {}) if kind in self.yarn_only_types else {}
+                scaling = (
+                    (rope_scaling or {})
+                    if not self.yarn_only_types or kind in self.yarn_only_types
+                    else {}
+                )
             self.rope_parameters.setdefault(
                 kind, {"rope_type": "default", **scaling, "rope_theta": theta}
             )
@@ -243,6 +248,10 @@ class Step5Config(PretrainedConfig):
             raise ValueError("Step-5 rope_theta must cover num_hidden_layers entries")
         if any(kind not in ("sliding_attention", "full_attention") for kind in self.layer_types):
             raise ValueError("Unsupported Step-5 attention layer type")
+        if any(
+            not math.isfinite(value) or not 0 <= value <= 1 for value in self.partial_rotary_factors
+        ):
+            raise ValueError("Step-5 partial rotary factors must be finite and lie in [0, 1]")
         for scaling in self.rope_parameters.values():
             if scaling["rope_type"] not in ("default", "llama3"):
                 raise ValueError("Step-5 supports only default or llama3 rotary scaling")

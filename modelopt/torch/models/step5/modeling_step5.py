@@ -33,6 +33,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn.functional as F
 from torch import nn
+from torch.utils.checkpoint import checkpoint
 from transformers import PreTrainedModel
 from transformers.cache_utils import DynamicCache
 from transformers.generation import GenerationMixin
@@ -47,13 +48,36 @@ __all__ = ["Step5ForCausalLM", "Step5Model", "Step5PreTrainedModel"]
 
 class _FP32Parameters(nn.Module):
     def _apply(self, fn, recurse=True):
+        # Retain the original FP32 bits; casting back after super()._apply already loses them.
+        parameters = {
+            name: (value.data, None if value.grad is None else value.grad.data)
+            for name, value in self.named_parameters(recurse=False)
+            if value.is_floating_point()
+        }
+        buffers = {
+            name: value
+            for name, value in self.named_buffers(recurse=False)
+            if value.is_floating_point()
+        }
         result = super()._apply(fn, recurse=recurse)
-        for parameter in self.parameters(recurse=False):
-            if parameter.is_floating_point():
-                parameter.data = parameter.data.float()
-        for name, buffer in self.named_buffers(recurse=False):
-            if buffer.is_floating_point():
-                setattr(self, name, buffer.float())
+        for name, (data, grad) in parameters.items():
+            parameter = getattr(self, name)
+            parameter.data = (parameter.data if data.is_meta else data).to(
+                device=parameter.device, dtype=torch.float32
+            )
+            if grad is not None:
+                parameter.grad.data = (parameter.grad.data if grad.is_meta else grad).to(
+                    device=parameter.device, dtype=torch.float32
+                )
+        for name, value in buffers.items():
+            transformed = getattr(self, name)
+            setattr(
+                self,
+                name,
+                (transformed if value.is_meta else value).to(
+                    device=transformed.device, dtype=torch.float32
+                ),
+            )
         return result
 
 
@@ -117,7 +141,7 @@ class Step5RotaryEmbedding(nn.Module):
             else config.rope_theta
         )
         kind = config.layer_types[layer_idx]
-        self.scaling = config.rope_parameters[kind] if kind in config.yarn_only_types else None
+        self.scaling = config.rope_parameters[kind]
 
     def forward(self, hidden, positions):
         """Rotate the leading subspace using FP32 arithmetic and rounded tables."""
@@ -213,6 +237,8 @@ class Step5Experts(nn.Module):
         )
         for expert in range(self.num_experts):
             rows, positions = torch.where(top_k_index == expert)
+            if not rows.numel():
+                continue
             values = F.linear(hidden_states[rows], self.gate_up_proj[expert])
             values = F.linear(self._apply_gate(values), self.down_proj[expert])
             slots[rows, positions] = values
@@ -262,11 +288,21 @@ class _RegionLayout:
     token_regions: torch.Tensor
     sources: torch.Tensor
     region_documents: torch.Tensor
+    cached_regions: int = 0
 
 
 def _region_layout(positions, valid, block):
     first = valid & (valid.long().cumsum(-1) == 1)
-    starts = ((positions.remainder(block) == 0) | first) & valid
+    physical = torch.arange(positions.shape[1], device=positions.device).expand_as(positions)
+    previous_index = physical.masked_fill(~valid, -1).cummax(-1).values
+    previous_index = F.pad(previous_index[:, :-1], (1, 0), value=0).clamp_min(0)
+    previous = positions.gather(1, previous_index)
+    # Position gaps can cross a region without landing exactly on its first slot.
+    starts = (
+        (positions.div(block, rounding_mode="floor") != previous.div(block, rounding_mode="floor"))
+        | (positions == 0)
+        | first
+    ) & valid
     token_regions = starts.long().cumsum(-1) - 1
     # The dynamic layout is built once per forward, shared by every CSA layer.
     regions = max(1, int(starts.sum(-1).max()))
@@ -299,6 +335,9 @@ class Step5SparseIndexer(_FP32Parameters, nn.Module):
         )
         self.q_norm = _IndexerRMSNorm(dim, config.rms_norm_eps)
         self.k_norm = _IndexerLayerNorm(dim, eps=config.rms_norm_eps, dtype=torch.float32)
+        # Release inference/model.py:1450-1459 explicitly retains this tensor as unused
+        # checkpoint metadata. Neither the weighted-ReLU indexer nor deployed attention
+        # kernels apply it; the main-head shape does not imply a missing softmax scale.
         self.register_buffer(
             "ssmax_s", torch.zeros(config.num_attention_heads, dtype=torch.float32)
         )
@@ -315,17 +354,26 @@ class Step5SparseIndexer(_FP32Parameters, nn.Module):
         logits = self.z_proj(hidden)
         if cached is not None:
             keys, logits = torch.cat((cached[0], keys), 1), torch.cat((cached[1], logits), 1)
-        source = layout.sources.clamp_min(0)
+        stable = (
+            min(layout.cached_regions, cached[2].shape[1])
+            if cached is not None and len(cached) > 2
+            else 0
+        )
+        source = layout.sources[:, stable:].clamp_min(0)
         rows = torch.arange(hidden.shape[0], device=hidden.device)[:, None, None]
         packed_keys = keys[rows, source].float()
         packed_z = (
-            logits[rows, source].float().masked_fill((layout.sources < 0).unsqueeze(-1), -torch.inf)
+            logits[rows, source]
+            .float()
+            .masked_fill((layout.sources[:, stable:] < 0).unsqueeze(-1), -torch.inf)
         )
         shift = packed_z.amax(-2, keepdim=True)
         weights = (packed_z - shift).exp().nan_to_num(0.0)
         summaries = (weights * packed_keys).sum(2) / weights.sum(2).clamp_min(1e-20)
         summaries = summaries.to(torch.bfloat16).to(torch.float8_e4m3fn).to(torch.bfloat16)
-        return (hidden.detach(), positions, layout, summaries), (keys, logits)
+        if stable:
+            summaries = torch.cat((cached[2][:, :stable], summaries), 1)
+        return (hidden.detach(), positions, layout, summaries), (keys, logits, summaries)
 
     @torch.no_grad()
     def select(self, state, start, stop):
@@ -409,7 +457,9 @@ class Step5Cache(DynamicCache):
 
     def reset(self):
         """Reset K/V and discard CSA projections and token metadata."""
-        super().reset()
+        # Older DynamicCache.reset zeroes storage while retaining length; dropping dynamic
+        # layers also leaves tensors held by an earlier autograd graph unchanged.
+        self.layers.clear()
         self._clear_metadata()
 
     def _clear_metadata(self):
@@ -420,8 +470,26 @@ class Step5Cache(DynamicCache):
         if self.positions is not None:
             self.positions, self.valid = transform(self.positions), transform(self.valid)
         self.indexer_states = {
-            layer: (transform(key), transform(z)) for layer, (key, z) in self.indexer_states.items()
+            # Layout-changing operations invalidate compressed summaries but retain exact projections.
+            layer: (transform(state[0]), transform(state[1]))
+            for layer, state in self.indexer_states.items()
         }
+
+
+def _attend_selected_tile(query, key, value, safe, allowed):
+    """Recompute gathered K/V during backward instead of saving one expanded bank per tile."""
+    batch, groups, count, heads, dim = query.shape
+    rows = torch.arange(batch, device=key.device)[:, None, None, None]
+    group_ids = torch.arange(groups, device=key.device)[None, :, None, None]
+    selected_k, selected_v = key[rows, group_ids, safe], value[rows, group_ids, safe]
+    attended = F.scaled_dot_product_attention(
+        query.reshape(batch * groups * count, heads, 1, dim),
+        selected_k.reshape(batch * groups * count, 1, -1, dim),
+        selected_v.reshape(batch * groups * count, 1, -1, dim),
+        attn_mask=allowed.reshape(batch * groups * count, 1, 1, -1),
+        enable_gqa=True,
+    )
+    return attended.view(batch, groups, count, heads, dim).permute(0, 2, 1, 3, 4).flatten(2, 3)
 
 
 class Step5Attention(nn.Module):
@@ -485,7 +553,6 @@ class Step5Attention(nn.Module):
                 past_key_values.indexer_states[self.layer_idx] = updated
         outputs = []
         rows = torch.arange(batch, device=hidden.device)[:, None, None, None]
-        group_ids = torch.arange(groups, device=hidden.device)[None, :, None, None]
         for start in range(0, sequence, 16):
             stop = min(start + 16, sequence)
             count = stop - start
@@ -493,7 +560,8 @@ class Step5Attention(nn.Module):
                 assert self.indexer is not None
                 indices = self.indexer.select(state, start, stop)
             else:
-                lo = max(0, offset + start - self.window + 1) if self.window is not None else 0
+                # Masked physical gaps can put a logically nearby valid key arbitrarily far back.
+                lo = 0
                 hi = offset + stop
                 indices = torch.arange(lo, hi, device=hidden.device).expand(
                     batch, groups, count, -1
@@ -501,14 +569,18 @@ class Step5Attention(nn.Module):
             safe = indices.clamp(0, total - 1)
             if state is None:
                 selected_k, selected_v = key[:, :, lo:hi], value[:, :, lo:hi]
-            else:
-                selected_k, selected_v = key[rows, group_ids, safe], value[rows, group_ids, safe]
             key_positions = layout.positions[rows, safe]
             key_docs = layout.documents[rows, safe]
             distance = positions[:, None, start:stop, None] - key_positions
             query_docs = layout.documents[:, None, offset + start : offset + stop, None]
             allowed = (
                 (indices >= 0)
+                & (
+                    indices
+                    <= torch.arange(offset + start, offset + stop, device=hidden.device)[
+                        None, None, :, None
+                    ]
+                )
                 & (distance >= 0)
                 & layout.valid[rows, safe]
                 & (key_docs == query_docs)
@@ -533,19 +605,15 @@ class Step5Attention(nn.Module):
                 )
                 continue
             local_q = query[:, start:stop].unflatten(-2, (groups, heads)).permute(0, 2, 1, 3, 4)
-            local_q = local_q.reshape(batch * groups * count, heads, 1, dim)
-            selected_k = selected_k.reshape(batch * groups * count, 1, -1, dim)
-            selected_v = selected_v.reshape(batch * groups * count, 1, -1, dim)
-            attended = F.scaled_dot_product_attention(
-                local_q,
-                selected_k,
-                selected_v,
-                attn_mask=allowed.reshape(batch * groups * count, 1, 1, -1),
-                enable_gqa=True,
-            )
-            outputs.append(
-                attended.view(batch, groups, count, heads, dim).permute(0, 2, 1, 3, 4).flatten(2, 3)
-            )
+            if torch.is_grad_enabled() and any(
+                tensor.requires_grad for tensor in (local_q, key, value)
+            ):
+                attended = checkpoint(
+                    _attend_selected_tile, local_q, key, value, safe, allowed, use_reentrant=False
+                )
+            else:
+                attended = _attend_selected_tile(local_q, key, value, safe, allowed)
+            outputs.append(attended)
         attended = torch.cat(outputs, 1)
         if self.g_proj is not None:
             attended = attended * self.g_proj(hidden).sigmoid().unsqueeze(-1)
@@ -656,7 +724,7 @@ class Step5Model(Step5PreTrainedModel):
             raise ValueError("Step-5 expects a 2D token-validity attention_mask")
         use_cache = self.config.use_cache if use_cache is None else use_cache
         checkpointing = getattr(self, "is_activation_checkpointing", self.is_gradient_checkpointing)
-        if self.training and checkpointing and use_cache:
+        if self.training and checkpointing and (use_cache or past_key_values is not None):
             raise ValueError("Step-5 caching cannot be combined with gradient checkpointing")
         if past_key_values is not None and not isinstance(past_key_values, Step5Cache):
             raise TypeError("Step-5 requires its own cache for CSA indexer metadata")
@@ -667,34 +735,107 @@ class Step5Model(Step5PreTrainedModel):
         )
         embedded = self.embed_tokens(input_ids) if inputs_embeds is None else inputs_embeds
         batch, length = embedded.shape[:2]
+        prefix_length = 0 if cache is None or cache.positions is None else cache.positions.shape[1]
+        if attention_mask is not None:
+            if attention_mask.shape[0] != batch or attention_mask.shape[1] not in (
+                length,
+                prefix_length + length,
+            ):
+                raise ValueError(
+                    "Step-5 attention mask must cover the current tokens or complete cached prefix"
+                )
+            if (
+                prefix_length
+                and cache is not None
+                and attention_mask.shape[1] != length
+                and not torch.equal(attention_mask[:, :prefix_length].bool(), cache.valid)
+            ):
+                raise ValueError("Step-5 cached token validity cannot change on continuation")
         valid = (
             torch.ones((batch, length), dtype=torch.bool, device=embedded.device)
             if attention_mask is None
             else attention_mask[:, -length:].bool()
         )
         if position_ids is None:
-            offset = 0 if cache is None or cache.positions is None else cache.positions[:, -1:] + 1
+            offset = 0
+            if cache is not None and cache.positions is not None:
+                physical = torch.arange(cache.positions.shape[1], device=cache.positions.device)
+                last = (
+                    physical.expand_as(cache.positions)
+                    .masked_fill(~cache.valid, -1)
+                    .amax(-1, keepdim=True)
+                )
+                previous = cache.positions.gather(1, last.clamp_min(0))
+                offset = torch.where(last >= 0, previous + 1, 0)
             position_ids = (offset + valid.long().cumsum(-1) - 1).clamp_min(0)
         else:
             if position_ids.ndim != 2 or position_ids.shape[-1] != length:
                 raise ValueError("Step-5 position_ids must have shape [batch, sequence]")
             position_ids = position_ids.expand(batch, -1)
+        if valid.shape != (batch, length):
+            raise ValueError("Step-5 token mask must match the current input batch and sequence")
+        if position_ids.dtype not in (torch.int32, torch.int64) or (position_ids < 0).any():
+            raise ValueError("Step-5 positions must be nonnegative integers")
         all_positions, all_valid = position_ids, valid
         if cache is not None and cache.positions is not None:
             all_positions = torch.cat((cache.positions, position_ids), 1)
             all_valid = torch.cat((cache.valid, valid), 1)
-        if cache is not None:
-            cache.positions, cache.valid = all_positions, all_valid
+        # Validate document order before publishing metadata or touching any per-layer K/V.
+        physical = torch.arange(all_positions.shape[1], device=all_positions.device).expand_as(
+            all_positions
+        )
+        previous_index = physical.masked_fill(~all_valid, -1).cummax(-1).values
+        previous_index = F.pad(previous_index[:, :-1], (1, 0), value=-1)
+        previous_position = all_positions.gather(1, previous_index.clamp_min(0))
+        invalid_order = (
+            all_valid
+            & (previous_index >= 0)
+            & (all_positions != 0)
+            & (all_positions < previous_position)
+        )
+        if self.config.sparse_config.enabled:
+            invalid_order |= (
+                all_valid
+                & (previous_index >= 0)
+                & (all_positions != 0)
+                & (all_positions == previous_position)
+            )
+        if invalid_order.any():
+            raise ValueError(
+                "Step-5 positions must advance within documents and may reset only at zero"
+            )
         layout = _region_layout(
             all_positions, all_valid, self.config.sparse_config.region_block_size
         )
         hidden = embedded.float()
         history = () if output_hidden_states else None
-        for layer in self.layers:
-            if output_hidden_states:
-                history += (hidden,)
-            hidden = layer(hidden, position_ids, layout, embedded.dtype, past_key_values=cache)
-        hidden = self.norm(hidden, output_dtype=embedded.dtype)
+        if cache is not None:
+            if cache.positions is not None:
+                last = torch.arange(cache.positions.shape[1], device=embedded.device).expand_as(
+                    cache.positions
+                )
+                last = last.masked_fill(~cache.valid, -1).amax(-1, keepdim=True)
+                last_region = layout.token_regions.gather(1, last.clamp_min(0))
+                last_position = cache.positions.gather(1, last.clamp_min(0))
+                complete = (
+                    last_position.remainder(self.config.sparse_config.region_block_size)
+                    == self.config.sparse_config.region_block_size - 1
+                )
+                layout.cached_regions = int(
+                    torch.where(last >= 0, last_region + complete, 0).amin()
+                )
+            cache.positions, cache.valid = all_positions.detach().clone(), all_valid.clone()
+        try:
+            for layer in self.layers:
+                if output_hidden_states:
+                    history += (hidden,)
+                hidden = layer(hidden, position_ids, layout, embedded.dtype, past_key_values=cache)
+            hidden = self.norm(hidden, output_dtype=embedded.dtype)
+        except BaseException:
+            # A partial multi-layer append cannot be reused safely. Explicitly invalidate it.
+            if cache is not None:
+                cache.reset()
+            raise
         if output_hidden_states:
             history += (hidden,)
         output = BaseModelOutputWithPast(
@@ -808,6 +949,18 @@ class Step5ForCausalLM(Step5PreTrainedModel, GenerationMixin):
         """Evaluate text logits and document-aware shifted causal loss."""
         if labels is not None and not (isinstance(logits_to_keep, int) and logits_to_keep == 0):
             raise ValueError("Step-5 labels require logits_to_keep=0")
+        current = input_ids if input_ids is not None else inputs_embeds
+        if isinstance(logits_to_keep, int) and logits_to_keep < 0:
+            raise ValueError("Step-5 logits_to_keep must be nonnegative")
+        if labels is not None and (
+            current is None
+            or labels.shape != current.shape[:2]
+            or labels.dtype != torch.int64
+            or ((labels != -100) & ((labels < 0) | (labels >= self.config.vocab_size))).any()
+        ):
+            raise ValueError(
+                "Step-5 labels must match the current tokens and contain vocabulary IDs or -100"
+            )
         output = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -828,7 +981,11 @@ class Step5ForCausalLM(Step5PreTrainedModel, GenerationMixin):
             shifted_labels = labels[:, 1:].clone()
             if attention_mask is not None:
                 shifted_labels.masked_fill_(
-                    ~(attention_mask[:, 1:].bool() & attention_mask[:, :-1].bool()), -100
+                    ~(
+                        attention_mask[:, -labels.shape[1] :][:, 1:].bool()
+                        & attention_mask[:, -labels.shape[1] :][:, :-1].bool()
+                    ),
+                    -100,
                 )
             if position_ids is not None:
                 shifted_labels.masked_fill_(position_ids[:, 1:] == 0, -100)

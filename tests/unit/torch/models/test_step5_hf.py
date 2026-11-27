@@ -29,6 +29,7 @@ from modelopt.torch.models.step5 import Step5Config, Step5ForCausalLM
 from modelopt.torch.models.step5.modeling_step5 import (
     Step5Attention,
     Step5RMSNorm,
+    Step5RotaryEmbedding,
     Step5SparseIndexer,
     _region_layout,
     clamped_swiglu,
@@ -81,6 +82,9 @@ def test_step5_fp32_norm_router_and_clamped_swiglu():
     expected = (expected * (1 + norm.weight)).to(torch.bfloat16)
     actual = norm(x, output_dtype=torch.bfloat16)
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    before = norm.weight.detach().clone()
+    norm.to(torch.bfloat16)
+    torch.testing.assert_close(norm.weight, before, rtol=0, atol=0)
     gate = torch.tensor([-12, -0.5, 2.25, 12], dtype=torch.bfloat16, requires_grad=True)
     up = torch.tensor([12, -12, 0.7, -2.3], dtype=torch.bfloat16, requires_grad=True)
     result = clamped_swiglu(gate, up, 2.0)
@@ -320,13 +324,17 @@ def test_step5_loads_published_bf16_tensor_layout():
     torch.testing.assert_close(restored(inputs).logits, model(inputs).logits, rtol=0, atol=0)
 
 
-def test_step5_cache_mutations_match_fresh_causal_outputs():
+@pytest.mark.parametrize("mask_rows", [[[1, 1, 1, 1], [0, 1, 1, 1]], [[1, 0, 0, 1], [1, 1, 0, 0]]])
+def test_step5_cache_mutations_match_fresh_causal_outputs(mask_rows):
     torch.manual_seed(17)
     model = Step5ForCausalLM(_config()).eval()
     prefix = torch.tensor([[1, 2, 3, 4], [0, 6, 7, 8]])
-    valid = torch.tensor([[1, 1, 1, 1], [0, 1, 1, 1]])
+    valid = torch.tensor(mask_rows)
     with torch.no_grad():
-        cache = model(prefix, attention_mask=valid, use_cache=True).past_key_values
+        positions = (valid.cumsum(-1) - 1).clamp_min(0).masked_fill(~valid.bool(), 0)
+        cache = model(
+            prefix, attention_mask=valid, position_ids=positions, use_cache=True
+        ).past_key_values
         cache.crop(-1)
         prefix, valid = prefix[:, :-1], valid[:, :-1]
         cache.batch_repeat_interleave(2)
@@ -347,6 +355,7 @@ def test_step5_cache_mutations_match_fresh_causal_outputs():
         actual = model(fresh, past_key_values=cache, use_cache=True).logits
         torch.testing.assert_close(actual, model(fresh).logits, atol=0, rtol=0)
         cache.reset()
+        assert cache.get_seq_length() == 0
         fresh = torch.tensor([[3, 5, 7]])
         actual = model(fresh, past_key_values=cache, use_cache=True).logits
         torch.testing.assert_close(actual, model(fresh).logits, atol=0, rtol=0)
@@ -370,3 +379,87 @@ def test_step5_fused_experts_ptq_keeps_full_model_differentiable():
     output.loss.backward()
     assert experts.gate_up_proj.grad.abs().sum() > 0
     assert torch.isfinite(output.logits).all()
+
+
+@pytest.mark.parametrize("failure", ["positions", "labels", "checkpointing", "late_layer"])
+def test_step5_failed_continuation_preserves_or_invalidates_cache(failure):
+    model = Step5ForCausalLM(_config()).eval()
+    ids = torch.tensor([[1, 3, 5, 7]])
+    cache = model(ids, use_cache=True).past_key_values
+    kwargs = {"past_key_values": cache, "use_cache": False}
+    handle = None
+    if failure == "positions":
+        kwargs["position_ids"] = torch.tensor([[-2]])
+    elif failure == "labels":
+        kwargs["labels"] = torch.tensor([[1, 3]])
+    elif failure == "checkpointing":
+        model.train()
+        model.gradient_checkpointing_enable()
+    else:
+
+        def refuse(module, args):
+            raise ValueError("injected late-layer failure")
+
+        handle = model.model.layers[1].register_forward_pre_hook(refuse)
+    try:
+        with pytest.raises(ValueError):
+            model(torch.tensor([[9]]), **kwargs)
+    finally:
+        if handle is not None:
+            handle.remove()
+    if failure == "late_layer":
+        assert cache.get_seq_length() == 0 and cache.positions is None
+    else:
+        assert cache.get_seq_length() == 4
+        torch.testing.assert_close(cache.positions, torch.arange(4).unsqueeze(0))
+
+
+def test_step5_meta_fp32_buffers_and_gradients_materialize():
+    model = Step5ForCausalLM(_config()).to("meta")
+    norm = model.model.norm
+    norm.weight.grad = torch.empty_like(norm.weight)
+    model.to_empty(device="cpu")
+    assert not any(value.is_meta for value in model.state_dict().values())
+    assert not norm.weight.grad.is_meta
+
+
+def test_step5_rotary_scaling_honors_empty_allowlist_and_nested_types():
+    values = _config().to_dict()
+    flat = values["rope_parameters"]["full_attention"]
+    values.update(rope_parameters=flat, yarn_only_types=[])
+    all_types = Step5Config(**values)
+    values["yarn_only_types"] = ["sliding_attention", "full_attention"]
+    named_types = Step5Config(**values)
+    hidden = torch.randn(1, 3, 1, 8)
+    positions = torch.tensor([[0, 33, 97]])
+    expected = Step5RotaryEmbedding(named_types, 0, 8)(hidden, positions)
+    torch.testing.assert_close(Step5RotaryEmbedding(all_types, 0, 8)(hidden, positions), expected)
+    values.update(
+        rope_parameters={"sliding_attention": flat, "full_attention": {"rope_type": "default"}},
+        yarn_only_types=["full_attention"],
+    )
+    nested = Step5Config(**values)
+    torch.testing.assert_close(Step5RotaryEmbedding(nested, 0, 8)(hidden, positions), expected)
+    values["partial_rotary_factors"] = [0.0, 1.0]
+    Step5Config(**values)
+    torch.testing.assert_close(Step5RotaryEmbedding(nested, 0, 0)(hidden, positions), hidden)
+    for invalid in (float("nan"), float("inf"), -0.1, 1.1):
+        values["partial_rotary_factors"] = [invalid, 1.0]
+        with pytest.raises(ValueError):
+            Step5Config(**values)
+
+
+@pytest.mark.parametrize(("sparse", "positions"), [(False, [0, 1, 1]), (True, [0, 3, 5])])
+def test_step5_repeated_positions_cannot_leak_future_tokens(sparse, positions):
+    values = _config().to_dict()
+    values["sparse_config"]["enabled"] = sparse
+    model = Step5ForCausalLM(Step5Config(**values)).eval()
+    tokens = torch.tensor([[1, 3, 5]])
+    positions = torch.tensor([positions])
+    expected = model(tokens, position_ids=positions).logits
+    prefix = model(tokens[:, :2], position_ids=positions[:, :2]).logits
+    torch.testing.assert_close(expected[:, :2], prefix, rtol=1e-5, atol=1e-6)
+    tokens[:, -1] = 9
+    torch.testing.assert_close(
+        model(tokens, position_ids=positions).logits[:, :-1], expected[:, :-1], rtol=0, atol=0
+    )
