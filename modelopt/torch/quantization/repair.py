@@ -519,6 +519,9 @@ class IQRepairPolicy:
 
         ``weight_access`` accepts ``writeback`` and ``rollback`` and forwards any idempotent owner
         rollback callback. Other owners always persist restored weights on failure.
+        Synchronized recovery after failed entry may retain CPU copies of every managed
+        disk-offloaded tensor in the owner's window, even without local backups. All
+        ranks still enter matching recovery windows to preserve peer collective ordering.
         ``synchronize_error`` must raise on every rank if any rank reports an error. Owners
         must coordinate recoverable entry/staging failures before issuing more collectives.
         Coordination-resource allocation or backend collective failures invalidate this retry

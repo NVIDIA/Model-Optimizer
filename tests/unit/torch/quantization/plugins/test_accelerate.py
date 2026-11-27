@@ -1469,6 +1469,7 @@ def test_iq_finalize_writeback_failure_restores_state_for_retry(
     plan = plan_iq_repair([model])
 
     window = 0
+    events = []
     checked_originals = False
     in_owner_undo = False
     owner_undo_fault_armed = failure_stage == "peer_owner_rollback"
@@ -1477,6 +1478,7 @@ def test_iq_finalize_writeback_failure_restores_state_for_retry(
     def weight_access(**kwargs):
         nonlocal window, checked_originals, in_owner_undo
         window += 1
+        events.append(("access", window))
         with offload_weight_access(model, **kwargs) as undo:
             if failure_stage == "peer_recovery_cleanup" and window == 4:
                 torch.testing.assert_close(model.state_dict(), original, rtol=0, atol=0)
@@ -1485,8 +1487,14 @@ def test_iq_finalize_writeback_failure_restores_state_for_retry(
             def owner_undo():
                 nonlocal in_owner_undo
                 in_owner_undo = True
+                events.append(("undo_begin", owner_undo, undo))
                 try:
                     undo()
+                except BaseException as exc:
+                    events.append(("undo_error", owner_undo, undo, str(exc)))
+                    raise
+                else:
+                    events.append(("undo_ok", owner_undo, undo))
                 finally:
                     in_owner_undo = False
 
@@ -1503,6 +1511,7 @@ def test_iq_finalize_writeback_failure_restores_state_for_retry(
 
     def synchronize_error(error):
         nonlocal armed
+        events.append(("sync", error))
         if armed and failure_stage.startswith("peer"):
             armed = False
             raise failure
@@ -1574,6 +1583,15 @@ def test_iq_finalize_writeback_failure_restores_state_for_retry(
         if failure_stage == "peer_owner_rollback":
             assert not owner_undo_fault_armed
             assert policy._pending_rollback is not None
+            callback = policy._pending_rollback[2]
+            undo_error_index = next(i for i, event in enumerate(events) if event[0] == "undo_error")
+            failed_undo = events[undo_error_index]
+            assert failed_undo[1] is callback
+            assert events[undo_error_index + 1] == (
+                "sync",
+                "RuntimeError: one-shot owner undo copy failure",
+            )
+            assert not any(event[0] == "access" for event in events[undo_error_index + 1 :])
             with pytest.raises(RuntimeError, match="Retry IQ finalization recovery"):
                 policy.close()
         else:
@@ -1593,7 +1611,18 @@ def test_iq_finalize_writeback_failure_restores_state_for_retry(
                     torch.testing.assert_close(state[name], value, rtol=0, atol=0)
             for owner, output in zip(model, expected, strict=True):
                 torch.testing.assert_close(owner(inputs), output, rtol=0, atol=0)
-        policy.finalize_(weight_access=weight_access)
+        retry_start = len(events)
+        policy.finalize_(
+            weight_access=weight_access,
+            synchronize_error=synchronize_error if failure_stage == "peer_owner_rollback" else None,
+        )
+        if failure_stage == "peer_owner_rollback":
+            # Retry must invoke the original receipt, succeed, and agree before new access.
+            assert events[retry_start] == ("undo_begin", callback, failed_undo[2])
+            assert events[retry_start + 1] == ("undo_ok", callback, failed_undo[2])
+            assert events[retry_start + 2] == ("sync", None)
+            assert events[retry_start + 3][0] == "access"
+            assert sum(event[0] == "undo_begin" for event in events) == 2
         if failure_stage == "peer_recovery_cleanup":
             assert checked_originals
             assert policy._pending_rollback is None
