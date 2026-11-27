@@ -20,9 +20,11 @@ from pathlib import Path
 
 import onnx
 import pytest
-from _test_utils.import_helper import skip_if_no_tensorrt, skip_if_no_trtexec
+from _test_utils.import_helper import skip_if_no_tensorrt_python, skip_if_no_trtexec
 from _test_utils.onnx.quantization.autotune import models as _test_models
+from _test_utils.onnx.trt_contract import assert_onnx_trt_producer_contract
 
+import modelopt.onnx.quantization.autotune.workflows as _workflows
 from modelopt.onnx.quantization.autotune.workflows import (
     init_benchmark_instance,
     region_pattern_autotuning_workflow,
@@ -47,7 +49,7 @@ def test_export_quantized_model(use_trtexec, simple_conv_model):
     if use_trtexec:
         skip_if_no_trtexec()
     else:
-        skip_if_no_tensorrt()
+        skip_if_no_tensorrt_python()
 
     with tempfile.NamedTemporaryFile(suffix=".onnx", delete=False) as f:
         baseline_model_path = f.name
@@ -82,7 +84,9 @@ def test_export_quantized_model(use_trtexec, simple_conv_model):
             if n.op_type in ["QuantizeLinear", "DequantizeLinear"]
         ]
         assert qdq_nodes, "Q/DQ nodes not found in quantized model"
+        assert_onnx_trt_producer_contract(output_path, simple_conv_model, keep_io_types=True)
     finally:
+        _workflows._benchmark_instance = None
         if os.path.exists(output_path):
             os.unlink(output_path)
         if os.path.exists(baseline_model_path):
