@@ -58,7 +58,7 @@ class Qwen2ModelDescriptor(ModelDescriptor):
 
     @staticmethod
     def init_rotary_embedding(model: nn.Module, runtime):
-        model.model.rotary_emb = Qwen2RotaryEmbedding(config=model.config, device=runtime.device)
+        model.model.rotary_emb = Qwen2RotaryEmbedding(config=model.config).to(runtime.device)
 
     @staticmethod
     def input_embedding_name():

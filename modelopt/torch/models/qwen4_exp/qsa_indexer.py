@@ -16,6 +16,8 @@
 """Calibration support for Qwen3.8's QSA indexer."""
 
 import torch
+import transformers
+from packaging.version import Version
 
 from modelopt.torch.utils import warn_rank_0
 from modelopt.torch.utils.network import bind_forward_method
@@ -50,10 +52,13 @@ def _forward(
         )
     # The reference reads head slot 0 of the 4-D mask and returns one head slot.
     mask = attention_mask[:, :1]
-    if attention_mask.is_floating_point():
-        min_dtype = torch.finfo(attention_mask.dtype).min
-        return torch.where(mask == 0, mask.new_zeros(()), min_dtype)
-    return mask.clone()
+    if not attention_mask.is_floating_point():
+        return mask.clone()
+    if Version(transformers.__version__).release >= (5, 23):
+        # From 5.23 the reference returns the selection as a bool mask for float masks too.
+        return mask == 0
+    min_dtype = torch.finfo(attention_mask.dtype).min
+    return torch.where(mask == 0, mask.new_zeros(()), min_dtype)
 
 
 def prepare_for_calibration(model) -> bool:

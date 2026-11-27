@@ -62,7 +62,7 @@ class MistralSmallModelDescriptor(ModelDescriptor):
 
     @staticmethod
     def init_rotary_embedding(model: MistralForCausalLM, runtime):
-        model.model.rotary_emb = MistralRotaryEmbedding(model.config, runtime.device)
+        model.model.rotary_emb = MistralRotaryEmbedding(model.config).to(runtime.device)
 
     @staticmethod
     def input_embedding_name():

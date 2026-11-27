@@ -877,7 +877,7 @@ def _build_reverse_rules(
     # which the per-expert-index leaf renames cannot rewrite.
     expert_fused_leaves: list[str] = []
     for conv in conversions:
-        rev = conv.reverse_transform()  # hub<-in-memory; reversed name patterns + ops
+        rev = _reverse_transform(conv)  # hub<-in-memory; reversed name patterns + ops
         if isinstance(rev, WeightRenaming):
             scope_prefixes = _scope_prefixes(rev)
             for pattern, repl in zip(_as_list(rev.source_patterns), _as_list(rev.target_patterns)):
@@ -981,6 +981,26 @@ def _dense_split_rule(rev, ops) -> SplitRule:
 
 def _as_list(x) -> list:
     return list(x) if isinstance(x, (list, tuple)) else [x]
+
+
+def _reverse_transform(conv):
+    r"""``conv.reverse_transform()``, with any ``$`` end anchor back on the reversed source patterns.
+
+    transformers 5.21+ reverses e.g. ``WeightRenaming(r"^head\.weight$", "lm_head.weight")`` into
+    ``^lm_head.weight`` -> ``head.weight$``, so a rename both matches longer keys and writes a
+    literal ``$``; earlier releases gave ``^lm_head.weight$`` -> ``head.weight``.
+    """
+    rev = conv.reverse_transform()
+    targets, sources = _as_list(rev.target_patterns), _as_list(rev.source_patterns)
+    anchored = [t.endswith("$") and not t.endswith("\\$") for t in targets]
+    if not any(anchored):
+        return rev
+    # Each pair's anchor goes back on its own source; with unpaired lists, on every source.
+    on_source = anchored if len(sources) == len(targets) else [True] * len(sources)
+    sources = [p + "$" if a and not p.endswith("$") else p for p, a in zip(sources, on_source)]
+    targets = [t[:-1] if a else t for t, a in zip(targets, anchored)]
+    kwargs = {"operations": list(rev.operations)} if hasattr(rev, "operations") else {}
+    return rev.copy(sources, targets, **kwargs)
 
 
 def _distinct_leaves(patterns: list[str]) -> list[str]:

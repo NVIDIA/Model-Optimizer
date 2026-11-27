@@ -123,7 +123,7 @@ def _choose_ep_degree(world_size: int, num_experts: int) -> int:
 # The styles a base_model_ep_plan gives a layer's routed-experts container. A plan that styles the
 # experts' grouped-GEMM parameters names the containers through their parents too, so a plan that
 # styles some containers one way and others the other names them all.
-_EXPERTS_STYLES = ("moe_tp_experts", "nemotron_experts_ep")
+_EXPERTS_STYLES = ("moe_tp_experts", "nemotron_experts_ep", "ep_dispatch_experts")
 
 
 def _routed_expert_keys(ep_plan: dict[str, str]) -> set[str]:
@@ -574,9 +574,11 @@ def torch_a2a_experts_forward(self, hidden_states, top_k_index, top_k_weights, p
         proj = _grouped_linear(sorted_tok, w1, offsets, bias=b1, is_transposed=self.is_transposed)
         proj = self._apply_gate(proj) if self.has_gate else self.act_fn(proj)
         b2 = self.down_proj_bias[row_eid] if has_bias else None
-        return _grouped_linear(
+        out = _grouped_linear(
             proj, self.down_proj, offsets, bias=b2, is_transposed=self.is_transposed
         )
+        # transformers 5.20+ experts may normalize each expert's output (e.g. Muse Spark).
+        return self.post_expert_norm(out) if getattr(self, "has_post_expert_norm", False) else out
 
     return a2a_moe(process_group, hidden_states, top_k_index, top_k_weights, num_local, expert_fn)
 
@@ -614,8 +616,12 @@ def register_torch_a2a():
     try:
         from transformers.integrations.tensor_parallel import RouterParallel
     except ImportError:
-        # transformers 5.16.0 exports it only as EpRouterParallel; 5.16.1 restored the alias.
-        from transformers.integrations.tensor_parallel import EpRouterParallel as RouterParallel
+        try:
+            # transformers 5.16.0 exports it only as EpRouterParallel; 5.16.1 restored the alias.
+            from transformers.integrations.tensor_parallel import EpRouterParallel as RouterParallel
+        except ImportError:
+            # transformers 5.23 dropped the router style: its plans route through the experts.
+            RouterParallel = TensorParallelLayer  # noqa: N806
 
     ALL_EXPERTS_FUNCTIONS.register("torch_a2a", torch_a2a_experts_forward)
 

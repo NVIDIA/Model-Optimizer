@@ -18,6 +18,7 @@
 import contextlib
 import copy
 import dataclasses
+import functools
 import inspect
 import json
 import logging
@@ -79,6 +80,7 @@ from modelopt.torch.utils import moe
 from modelopt.torch.utils.distributed import (
     DistributionPlan,
     ParallelState,
+    _hf_parameter_plan_lookup,
     barrier,
     broadcast_state_dict,
     is_initialized,
@@ -2351,13 +2353,10 @@ def _ep_aware_caching_allocator_warmup(
 
     def _ep_aware(model, accelerator_device_map, hf_quantizer=None, *args, **kwargs):
         try:
-            try:  # where current transformers keeps it (5.18); older releases, under integrations
-                from transformers.distributed.tensor_parallel import _get_parameter_tp_plan
+            try:
+                get_parameter_plan = _hf_parameter_plan_lookup()
             except ImportError:
-                try:
-                    from transformers.integrations.tensor_parallel import _get_parameter_tp_plan
-                except ImportError:
-                    _get_parameter_tp_plan = None
+                get_parameter_plan = None
             ws = (
                 torch.distributed.get_world_size()
                 if torch.distributed.is_available() and torch.distributed.is_initialized()
@@ -2383,8 +2382,8 @@ def _ep_aware_caching_allocator_warmup(
                     nb //= ep_degree
                 elif (
                     tp_plan
-                    and _get_parameter_tp_plan is not None
-                    and _get_parameter_tp_plan(pname, tp_plan, is_weight=True) is not None
+                    and get_parameter_plan is not None
+                    and get_parameter_plan(pname, tp_plan) is not None
                 ):
                     # Placed at its share over the ep submesh by transformers' TP branch, which ignores
                     # get_device, so it is on the device even when the rest of the dense part is on meta.
@@ -2683,8 +2682,11 @@ def _patch_finegrained_fp8_dequant(target_dtype=None):
         ):
             _orig_uwc = _FineGrainedFP8HfQuantizer.update_weight_conversions
 
-            def _uwc_fixed(self, weight_conversions):
-                convs = _orig_uwc(self, weight_conversions)
+            # Only reached on transformers < 5.10.1, or a newer one posing as it (the unit tests),
+            # where 5.21+ passes the model too.
+            @functools.wraps(_orig_uwc)
+            def _uwc_fixed(self, weight_conversions, *args, **kwargs):
+                convs = _orig_uwc(self, weight_conversions, *args, **kwargs)
                 for conv in convs:
                     ops = getattr(conv, "operations", None)
                     # Match the expert converter update_weight_conversions produced:
@@ -2788,13 +2790,17 @@ def _fsdp2_shard_dense(model: nn.Module, fsdp_mesh, expert_modules) -> int:
 # fp8 is block FP8; _ckpt_quant_method calls per-tensor FP8 fp8-per-tensor, which the load refuses.
 _EP_SOURCE_FORMATS: frozenset[str | None] = frozenset({None, "fp8"})
 
-# The ep_plan styles the expert-parallel load swaps for its torch_a2a styles. It keeps these and
-# grouped_gemm, and drops any other.
+# The ep_plan styles the expert-parallel load swaps for its torch_a2a styles.
 _EP_STYLE_SWAP = {
     "ep_router": "torch_a2a_router",
     "moe_tp_experts": "torch_a2a_experts",
     "nemotron_experts_ep": "torch_a2a_experts",
+    # transformers 5.19+ (its own all-to-all dispatch).
+    "ep_dispatch_experts": "torch_a2a_experts",
 }
+# The styles it keeps, dropping any other: these, grouped_gemm, and a norm replicated under the experts
+# that sums its gradient over the expert-parallel group (5.20+ post-expert norms, e.g. Muse Spark).
+_EP_KEPT_STYLES = frozenset({"grouped_gemm", "replicated_with_grad_allreduce", *_EP_STYLE_SWAP})
 
 
 def _ep_plan_refusal(ep_plan: dict[str, str]) -> str | None:
@@ -2823,11 +2829,10 @@ def _ep_plan_refusal(ep_plan: dict[str, str]) -> str | None:
     # The load drops any other style an expert weight takes, so that weight would load whole
     # beside its sharded siblings, and the grouped forward would pair slices of different experts.
     containers = _routed_expert_keys(ep_plan)
-    kept_styles = {"grouped_gemm", *_EP_STYLE_SWAP}
     dropped = sorted(
         name
         for name, style in ep_plan.items()
-        if style not in kept_styles
+        if style not in _EP_KEPT_STYLES
         and name not in containers
         and any(name.startswith(key + ".") for key in containers)
     )
@@ -2987,24 +2992,77 @@ def _transformers_mesh_builder():
     return mixin if hasattr(mixin, "initialize_distributed_mesh") else None
 
 
+def _hf_keeps_ep_apart() -> bool:
+    """Whether transformers (5.19+) applies an ``ep_plan`` only through its own expert dispatch."""
+    return "ep_size" in {f.name for f in dataclasses.fields(hf_distributed.DistributedConfig)}
+
+
 @contextlib.contextmanager
-def _experts_sharded_over(ep_mesh):
-    """Make ``from_pretrained`` shard the experts over ``ep_mesh`` on releases that build their own mesh."""
+def _experts_sharded_over(ep_mesh, distributed_config):
+    """Make ``from_pretrained`` shard the experts over ``ep_mesh`` on releases that build their own mesh.
+
+    Only the load given ``distributed_config`` is affected; any other load delegates unchanged.
+    """
     mixin = _transformers_mesh_builder()
     if mixin is None:
         yield
         return
 
-    def _ep_mesh(*args, **kwargs):
-        index = torch.cuda.current_device() if ep_mesh.device_type == "cuda" else None
-        return torch.device(ep_mesh.device_type, index), ep_mesh
+    class _OneMesh:
+        """transformers 5.19+'s mesh manager, with ``ep_mesh`` for every axis it asks for."""
 
+        def get_mesh(self, dims):
+            return ep_mesh
+
+    manager = _OneMesh() if _hf_keeps_ep_apart() else ep_mesh
     original = mixin.initialize_distributed_mesh
-    mixin.initialize_distributed_mesh = _ep_mesh
+
+    def _ep_mesh(config, *args, **kwargs):
+        if config is not distributed_config:
+            return original(config, *args, **kwargs)
+        index = torch.cuda.current_device() if ep_mesh.device_type == "cuda" else None
+        return torch.device(ep_mesh.device_type, index), manager
+
+    patches: list[tuple[Any, str, Any]] = [(mixin, "initialize_distributed_mesh", _ep_mesh)]
+    distributor = getattr(mixin, "DistributedMixin", None) if _hf_keeps_ep_apart() else None
+    if distributor is not None:
+        distribute = vars(distributor)["maybe_distribute_model"].__func__
+
+        def _expert_plan_only(cls, model, config, mesh_manager, *args, **kwargs):
+            if mesh_manager is manager:
+                # 5.19+ applies an ep_plan only for its own dispatch: the TP path applies the
+                # (swapped) expert plan instead, with no dense TP nor the embedding it would shard.
+                model.tp_plan = model.ep_plan
+            return distribute(cls, model, config, mesh_manager, *args, **kwargs)
+
+        patches.append((distributor, "maybe_distribute_model", classmethod(_expert_plan_only)))
+    # Every original is read before anything is patched, so a failed lookup patches nothing.
+    originals = [(obj, attr, vars(obj)[attr]) for obj, attr, _ in patches]
+    try:
+        for obj, attr, patched in patches:
+            setattr(obj, attr, patched)
+        yield
+    finally:
+        for obj, attr, kept in originals:
+            setattr(obj, attr, kept)
+
+
+# Held through an expert-parallel load, from its entry to its final barrier: an overlapping load's
+# collectives would pair with this one's, and its transformers hooks would restore each other's
+# originals. The warmup and dense-on-meta hooks act on any load meanwhile, so another
+# from_pretrained during an expert-parallel load is unsupported.
+_EP_LOAD_HOOKS = threading.Lock()
+
+
+@contextlib.contextmanager
+def _one_ep_load_at_a_time():
+    """Refuse an expert-parallel load while another one in this process has transformers hooked."""
+    if not _EP_LOAD_HOOKS.acquire(blocking=False):
+        raise RuntimeError("another expert-parallel load is in progress: load one model at a time.")
     try:
         yield
     finally:
-        mixin.initialize_distributed_mesh = original
+        _EP_LOAD_HOOKS.release()
 
 
 @contextlib.contextmanager
@@ -3082,6 +3140,8 @@ def _load_ep_dense_distributed(model, fsdp_mesh, local_dir, is_expert, expert_mo
     return n_dense
 
 
+# Refused at entry, before any collective, and held until it returns.
+@_one_ep_load_at_a_time()
 def load_and_prepare_ep(
     ckpt_path: str,
     plan: DistributionPlan,
@@ -3142,7 +3202,7 @@ def load_and_prepare_ep(
         )
     world_size, ep_degree, edp = plan.world_size, plan.ep_size, plan.edp
     hub_options = dict(hub_options or {})
-    swap, kept_styles = _EP_STYLE_SWAP, {"grouped_gemm", *_EP_STYLE_SWAP}
+    swap, kept_styles = _EP_STYLE_SWAP, _EP_KEPT_STYLES
     # Each rank checks its own transformers, the config it reads or was handed, and the plan against
     # it: one refusing fails every rank here, before the checkpoint's fetch and the meshes.
     with _refused_together("the expert-parallel load's checks", alone=False):
@@ -3348,6 +3408,10 @@ def load_and_prepare_ep(
     if _transformers_mesh_builder() is not None and "tp_size" in _dc_fields:
         # This release sizes its own mesh from tp_size; _experts_sharded_over swaps in the EP mesh.
         dc_kwargs["tp_size"] = ep_degree
+    if _hf_keeps_ep_apart():
+        # 5.19+ applies an ep_plan only for its own dispatch: _experts_sharded_over has the TP path
+        # apply the swapped expert plan over the EP mesh instead, as earlier releases did.
+        dc_kwargs = {"tp_size": ep_degree}
     distributed_config = hf_distributed.DistributedConfig(**dc_kwargs)
     from_pretrained_kwargs: dict[str, Any] = {
         "dtype": dtype,
@@ -3370,9 +3434,6 @@ def load_and_prepare_ep(
         # transformers keeps the checkpoint's quantization_config, its weight_block_size included,
         # and takes only the loading attributes (dequantize) from this one.
         from_pretrained_kwargs["quantization_config"] = FineGrainedFP8Config(dequantize=True)
-        _patch_finegrained_fp8_dequant(
-            dtype
-        )  # correct transformers' block-fp8 dequant; emit model dtype
         print_rank_0(
             f"[ep] native block-fp8 checkpoint -> FineGrainedFP8Config(dequantize=True) -> {dtype}"
         )
@@ -3409,8 +3470,12 @@ def load_and_prepare_ep(
                 ep_degree, swapped_plan, dense_on_meta=plan.is_fsdp_dense
             ),
             _dense_ctx,
-            _experts_sharded_over(ep_submesh),
+            _experts_sharded_over(ep_submesh, distributed_config),
         ):
+            if quant_method == "fp8":
+                # Correct transformers' block-fp8 dequant to emit the model dtype. The patch is
+                # class-wide and never undone, so later block-fp8 loads in this process keep it.
+                _patch_finegrained_fp8_dequant(dtype)
             model = loader.from_pretrained(ckpt_path, **from_pretrained_kwargs)
         model.eval()
         # The config the model keeps goes back to the checkpoint's plan, as an export writes it out

@@ -119,11 +119,14 @@ from modelopt.torch.utils.plugins.model_load_utils import (
     _convert_keys,
     _ep_aware_caching_allocator_warmup,
     _ep_dense_meta_load,
+    _ep_plan_refusal,
     _experts_sharded_over,
     _fsdp2_shard_dense,
+    _hf_keeps_ep_apart,
     _load_ep_dense_distributed,
     _make_expert_param_matcher,
     _meta_model_factory,
+    _one_ep_load_at_a_time,
     _refuse_unquantizable_experts,
     _resolve_target,
     _seed_parallel_states,
@@ -3509,6 +3512,18 @@ def test_a_config_the_load_cannot_take_is_refused_before_anything_loads(
     assert ep_world_of_two == []
 
 
+def test_a_post_expert_norm_replicated_under_the_experts_is_kept():
+    """Muse Spark's plan (transformers 5.20+): the norm each expert's output takes is replicated,
+    summing its gradient over the expert-parallel group, so the load keeps it rather than refusing."""
+    plan = {
+        "layers.*.mlp.experts.gate_up_proj": "grouped_gemm",
+        "layers.*.mlp.experts.down_proj": "grouped_gemm",
+        "layers.*.mlp.experts.post_expert_norm": "replicated_with_grad_allreduce",
+        "layers.*.mlp.experts": "ep_dispatch_experts",
+    }
+    assert _ep_plan_refusal(plan) is None
+
+
 def test_an_ep_size_that_does_not_divide_the_experts_is_refused_before_anything_loads(
     ep_world_of_two,
 ):
@@ -3544,6 +3559,62 @@ def test_a_plan_whose_expert_containers_match_no_module_is_refused(ep_world_of_t
 
     with pytest.raises(ValueError, match="that no module of"):
         load_and_prepare_ep("org/model", DistributionPlan(2, ep_size=2), hf_config=config)
+
+
+def test_an_expert_parallel_load_during_another_is_refused_before_it_hooks_anything(
+    ep_world_of_two, monkeypatch
+):
+    """Two loads hooking transformers at once would each take the other's hooks for the originals it
+    restores, and their collectives would pair with each other's: a second load is refused before
+    any collective, mesh or hook of its own, nor does it set the class-wide block-fp8 dequant dtype
+    the first one reads."""
+    hooked = []
+    all_reduce = dist.all_reduce
+    monkeypatch.setattr(
+        dist,
+        "all_reduce",
+        lambda *args, **kwargs: hooked.append("collective") or all_reduce(*args, **kwargs),
+    )
+
+    class _Loader:
+        @staticmethod
+        def from_pretrained(path, **kwargs):
+            hooked.append("from_pretrained")
+
+    monkeypatch.setattr(
+        model_load_utils,
+        "_ep_aware_caching_allocator_warmup",
+        lambda *args, **kwargs: hooked.append("warmup") or nullcontext(),
+    )
+    for hook in ("_ep_dense_meta_load", "_experts_sharded_over"):
+        monkeypatch.setattr(
+            model_load_utils,
+            hook,
+            lambda *args, hook=hook, **kwargs: hooked.append(hook) or nullcontext(),
+        )
+    monkeypatch.setattr(
+        model_load_utils,
+        "_patch_finegrained_fp8_dequant",
+        lambda *args, **kwargs: hooked.append("fp8-dtype"),
+    )
+    monkeypatch.setattr(model_load_utils, "_ckpt_quant_method", lambda *args, **kwargs: "fp8")
+    monkeypatch.setattr(model_load_utils.moe, "require_transformers", lambda *args, **kwargs: None)
+    monkeypatch.setattr(model_load_utils, "_auto_class", lambda *args, **kwargs: _Loader)
+    monkeypatch.setattr(
+        "torch.distributed.device_mesh.init_device_mesh",
+        lambda *args, **kwargs: hooked.append("mesh") or _Mesh(),
+    )
+    config = SimpleNamespace(
+        model_type=_NO_SPEC,
+        base_model_ep_plan={"layers.*.mlp.experts.*.gate_up_proj": "grouped_gemm"},
+    )
+
+    with (
+        _one_ep_load_at_a_time(),
+        pytest.raises(RuntimeError, match="another expert-parallel load is in progress"),
+    ):
+        load_and_prepare_ep("org/model", DistributionPlan(2, ep_size=2), hf_config=config)
+    assert hooked == []
 
 
 def test_routed_experts_without_experts_in_their_names_are_refused(ep_world_of_two, monkeypatch):
@@ -3787,7 +3858,9 @@ def test_a_loaded_model_keeps_its_sharding_styles_out_of_its_saved_config(
 
     (model,) = built
     assert model.config.base_model_ep_plan == Qwen3MoeConfig.base_model_ep_plan
-    assert "torch_a2a_experts" in set(model.tp_plan.values())
+    # transformers 5.19+ keeps the expert plan apart from the tensor-parallel one.
+    plan = getattr(model, "ep_plan", None) or model.tp_plan
+    assert "torch_a2a_experts" in set(plan.values())
     assert model._device_mesh is mesh
     assert model.config._experts_implementation == "torch_a2a"
     assert not any("experts_implementation" in key for key in model.config.to_dict())
@@ -4243,25 +4316,51 @@ def test_an_fp8_config_object_is_read_against_the_checkpoints_own_config(
     assert _ckpt_quant_method(config, str(tmp_path)) == expected
 
 
-def test_from_pretrained_builds_its_mesh_from_the_ep_mesh_it_is_given():
+def test_from_pretrained_builds_its_mesh_from_the_ep_mesh_it_is_given(monkeypatch):
     """Newer transformers ignores ``from_pretrained``'s ``device_mesh`` and builds a world-sized one,
     which shards the experts over every rank when EP is below the world size. During the load it gets
-    the EP mesh instead, and its own builder is back afterwards, even when the load raises."""
+    the EP mesh instead, any other load is left alone, a second EP load meanwhile is refused, and
+    transformers' own hooks are back afterwards, even when the load raises."""
     mixin = _transformers_mesh_builder()
     if mixin is None:
         pytest.skip("this transformers honors from_pretrained's device_mesh")
+    own_mesh = object()
+    monkeypatch.setattr(mixin, "initialize_distributed_mesh", lambda config: (None, own_mesh))
     builder = mixin.initialize_distributed_mesh
+    distributor = getattr(mixin, "DistributedMixin", object)
+    distribute = vars(distributor).get("maybe_distribute_model")
     ep_mesh = SimpleNamespace(device_type="cpu")
     config = DistributedConfig(enable_expert_parallel=True, tp_plan="auto", tp_size=2)
-    with _experts_sharded_over(ep_mesh):
+    other = DistributedConfig(tp_size=2)
+    other_model = SimpleNamespace(tp_plan={"layers.*.mlp.up_proj": "colwise"}, ep_plan={})
+    with _one_ep_load_at_a_time(), _experts_sharded_over(ep_mesh, config):
         _, device_map, device_mesh = PreTrainedModel.prepare_distribute_model(config)
+        assert mixin.initialize_distributed_mesh(other) == (None, own_mesh)
+        assert PreTrainedModel.maybe_distribute_model(other_model, other, None) is other_model
+        assert other_model.tp_plan == {"layers.*.mlp.up_proj": "colwise"}
+        patched = mixin.initialize_distributed_mesh
+        with (
+            pytest.raises(RuntimeError, match="in progress"),
+            _one_ep_load_at_a_time(),
+            _experts_sharded_over(ep_mesh, other),
+        ):
+            pass
+        assert mixin.initialize_distributed_mesh is patched
 
+    if _hf_keeps_ep_apart():  # transformers 5.19+ hands back a mesh manager
+        device_mesh = device_mesh.get_mesh("tp")
     assert device_mesh is ep_mesh
     assert device_map == torch.device("cpu")
     assert mixin.initialize_distributed_mesh is builder
-    with pytest.raises(RuntimeError), _experts_sharded_over(ep_mesh):
+    assert vars(distributor).get("maybe_distribute_model") is distribute
+    with (
+        pytest.raises(RuntimeError),
+        _one_ep_load_at_a_time(),
+        _experts_sharded_over(ep_mesh, config),
+    ):
         raise RuntimeError("the load failed")
     assert mixin.initialize_distributed_mesh is builder
+    assert vars(distributor).get("maybe_distribute_model") is distribute
 
 
 @pytest.mark.parametrize(
@@ -4290,8 +4389,16 @@ def test_from_pretrained_builds_its_mesh_from_the_ep_mesh_it_is_given():
             {"enable_expert_parallel": True, "tp_size": 2},
             "auto",
         ),
+        # 5.19 on
+        (["tp_size", "tp_plan", "enable_expert_parallel", "ep_size"], True, {"tp_size": 2}, None),
     ],
-    ids=["no-tp-plan-field", "tp-plan-field", "own-mesh-builder", "own-mesh-builder-no-tp-plan"],
+    ids=[
+        "no-tp-plan-field",
+        "tp-plan-field",
+        "own-mesh-builder",
+        "own-mesh-builder-no-tp-plan",
+        "ep-size-field",
+    ],
 )
 def test_each_load_argument_goes_where_this_transformers_takes_it(
     ep_world_of_two, monkeypatch, fields, builds_its_mesh, config, tp_plan
@@ -5485,9 +5592,17 @@ def test_the_expert_converter_leads_with_a_merge_that_dequantizes_each_expert(
         FineGrainedFP8Config(weight_block_size=(4, 4), dequantize=True), pre_quantized=True
     )
 
+    # transformers 5.21+ also takes the model, whose experts keep no scale param, so it dequantizes.
+    args = ()
+    if "model" in inspect.signature(quantizer.update_weight_conversions).parameters:
+        model = nn.Module()
+        model.mlp = nn.Module()
+        model.mlp.experts = nn.Module()
+        model.mlp.experts.gate_up_proj = nn.Parameter(torch.empty(3, 24, 12))
+        args = (model,)
     [converter] = [
         conv
-        for conv in quantizer.update_weight_conversions([experts])
+        for conv in quantizer.update_weight_conversions([experts], *args)
         if conv.target_patterns == ["mlp.experts.gate_up_proj"]
     ]
 
@@ -5497,9 +5612,9 @@ def test_the_expert_converter_leads_with_a_merge_that_dequantizes_each_expert(
         for p, name in enumerate(("gate_proj", "up_proj"))
     }
     tensors = {}  # what the loader collects for each of the converter's source patterns
-    for name, pairs in blocks.items():
-        tensors[f"mlp.experts.*.{name}.weight$"] = [weight for weight, _ in pairs]
-        tensors[f"mlp.experts.*.{name}.weight_scale_inv$"] = [scale_inv for _, scale_inv in pairs]
+    for pattern in converter.source_patterns:
+        pairs = blocks["gate_proj" if "gate_proj" in pattern else "up_proj"]
+        tensors[pattern] = [pair["weight_scale_inv" in pattern] for pair in pairs]
     for op in converter.operations:
         tensors = op.convert(
             tensors,

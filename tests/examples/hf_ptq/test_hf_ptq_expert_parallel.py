@@ -801,7 +801,9 @@ def test_a_vlm_calibrated_on_text_gets_its_experts_all_to_all_forwards_back(
     # Imported here: transformers.distributed exists from 5.16 only, which the line above requires.
     from transformers import Qwen3VLMoeConfig, Qwen3VLMoeForConditionalGeneration
     from transformers.distributed.configuration_utils import DistributedConfig
-    from transformers.distributed.tensor_parallel import ALL_PARALLEL_STYLES, _get_parameter_tp_plan
+    from transformers.distributed.tensor_parallel import ALL_PARALLEL_STYLES
+
+    from modelopt.torch.utils.distributed import _hf_parameter_plan_lookup
 
     register_torch_a2a()
     config = Qwen3VLMoeConfig(
@@ -835,8 +837,11 @@ def test_a_vlm_calibrated_on_text_gets_its_experts_all_to_all_forwards_back(
     config.distributed_config = DistributedConfig(enable_expert_parallel=True)
     model = Qwen3VLMoeForConditionalGeneration(config).eval()
     mesh = _EpMesh()
+    get_parameter_plan = _hf_parameter_plan_lookup()
+    # transformers 5.19+ keeps the expert plan apart from the tensor-parallel one.
+    plan = getattr(model, "ep_plan", None) or model.tp_plan
     for name, module in model.named_modules():
-        style = _get_parameter_tp_plan(parameter_name=name, tp_plan=model.tp_plan, is_weight=False)
+        style = get_parameter_plan(name, plan, False)
         if style in ("torch_a2a_router", "torch_a2a_experts"):
             ALL_PARALLEL_STYLES[style].install_forward(module, mesh)
     model.config.text_config._experts_implementation = "torch_a2a"

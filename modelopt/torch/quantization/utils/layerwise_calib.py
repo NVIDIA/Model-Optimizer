@@ -770,9 +770,12 @@ def _hf_cache_types() -> tuple[type, ...]:
     bases = tuple(b for n in names if (b := getattr(cache_utils, n, None)) is not None)
     if not bases:
         return ()
-    return tuple(
+    types = tuple(
         c for c in vars(cache_utils).values() if isinstance(c, type) and issubclass(c, bases)
     )
+    # transformers 5.23+ holds a layer without a cache as a DummyLayer, which has no cache base.
+    dummy = getattr(cache_utils, "DummyLayer", None)
+    return types if dummy is None else (*types, dummy)
 
 
 def _load_checkpoint_file(path: str, map_location: Any, *, allow_caches: bool = False) -> Any:

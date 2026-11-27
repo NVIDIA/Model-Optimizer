@@ -296,8 +296,11 @@ def _expert_numbers_job(rank, world_size, tmp_dir, count_known):
     state = ParallelState()
     state.expert_model_parallel_group = _coordinate(rank, world_size)
     state.data_parallel_group = _coordinate(0, 1)
-    for layer in model.model.layers:
+    for i, layer in enumerate(model.model.layers):
         layer.mlp.experts._parallel_state = state
+        # A post-expert norm (transformers 5.20+), replicated whole on every rank.
+        layer.mlp.experts.post_expert_norm = torch.nn.RMSNorm(32)
+        torch.nn.init.constant_(layer.mlp.experts.post_expert_norm.weight, i + 2.0)
     export = tmp_dir / f"export-{count_known}"
     refused = None
     with (
@@ -324,6 +327,8 @@ def _expert_numbers_job(rank, world_size, tmp_dir, count_known):
         expert = re.compile(r"\.experts\.(\d+)\.")
         found = {int(m.group(1)) for k in _load_checkpoint(export) if (m := expert.search(k))}
         assert found == set(range(model.config.num_local_experts)), found
+        norms = {k: v for k, v in _load_checkpoint(export).items() if "post_expert_norm" in k}
+        assert sorted(v.unique().tolist() for v in norms.values()) == [[2.0], [3.0]], norms
     else:
         assert refused is not None and "would write experts" in refused, refused
         assert not list(export.glob("*.safetensors"))
@@ -367,9 +372,9 @@ def test_an_expert_parallel_export_refuses_a_sliced_tensor_beside_the_experts(
 @pytest.mark.parametrize("count_known", [True, False], ids=["count-known", "count-unknown"])
 def test_the_ranks_write_every_expert_number_once(cpu_dist_workers, tmp_path, count_known):
     """Each rank's experts get their global numbers, and the ranks between them write 0..E-1 once
-    each. Without the config's expert count, the split takes a weight over every expert for its
-    group's slice and would shift rank 1's experts past the end: refused on every rank before
-    anything is written."""
+    each, and a post-expert norm under the experts once, whole. Without the config's expert count,
+    the split takes a weight over every expert for its group's slice and would shift rank 1's
+    experts past the end: refused on every rank before anything is written."""
     _save(_mixtral_config(), tmp_path / "src")
     cpu_dist_workers.run(_expert_numbers_job, tmp_dir=tmp_path, count_known=count_known)
 

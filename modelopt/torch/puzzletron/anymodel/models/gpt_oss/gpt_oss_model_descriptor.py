@@ -95,10 +95,7 @@ class GptOssModelDescriptor(ModelDescriptor):
         """Initialize rotary embeddings on the correct device."""
         # GPT-OSS uses RoPE with YARN scaling
 
-        model.model.rotary_emb = GptOssRotaryEmbedding(
-            config=model.config,
-            device=runtime.device,
-        )
+        model.model.rotary_emb = GptOssRotaryEmbedding(config=model.config).to(runtime.device)
 
     @staticmethod
     def input_embedding_name():

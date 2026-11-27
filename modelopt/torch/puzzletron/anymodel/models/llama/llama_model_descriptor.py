@@ -66,7 +66,7 @@ class LlamaModelDescriptor(ModelDescriptor):
 
     @staticmethod
     def init_rotary_embedding(model: LlamaForCausalLM, runtime):
-        model.model.rotary_emb = LlamaRotaryEmbedding(model.config, runtime.device)
+        model.model.rotary_emb = LlamaRotaryEmbedding(model.config).to(runtime.device)
 
     @staticmethod
     def input_embedding_name():
