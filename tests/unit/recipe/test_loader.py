@@ -1067,6 +1067,36 @@ def test_load_recipe_dflash_missing_section_raises(tmp_path):
         load_recipe(bad)
 
 
+@pytest.mark.parametrize("from_file", [True, False])
+def test_load_recipe_speculative_translates_warmup_ratio(tmp_path, from_file):
+    """``warmup_ratio``, removed in transformers 5.15, loads as the same ``warmup_steps`` fraction."""
+
+    def load(training):
+        recipe_path = tmp_path / "ratio.yml"
+        body = "training:\n" + "".join(f"  {k}: {v}\n" for k, v in training.items())
+        recipe_path.write_text(
+            "metadata:\n  recipe_type: speculative_dflash\ndflash: {}\n" + body * from_file
+        )
+        overrides = [] if from_file else [f"training.{k}={v}" for k, v in training.items()]
+        return load_recipe(recipe_path, overrides=overrides).training.model_dump()
+
+    args = load({"warmup_ratio": 0.04})
+    assert args["warmup_steps"] == 0.04
+    assert "warmup_ratio" not in args
+    assert not {"warmup_ratio", "warmup_steps"} & load({"warmup_ratio": "null"}).keys()
+    # Keeping either one silently could turn warmup off.
+    with pytest.raises(ValueError, match="warmup_steps only"):
+        load({"warmup_ratio": 0.04, "warmup_steps": 0})
+
+
+def test_load_recipe_speculative_warmup_ratio_override_replaces_recipe_warmup_steps():
+    """Built-in recipes set ``warmup_steps``, which an old ``warmup_ratio`` override replaces."""
+    recipe = load_recipe(
+        "general/speculative_decoding/dspark", overrides=["training.warmup_ratio=0.1"]
+    )
+    assert recipe.training.warmup_steps == 0.1
+
+
 def test_load_recipe_eagle_with_training_sections(tmp_path):
     """load_recipe populates typed HF trainer sections from all four YAML segments."""
     recipe_path = tmp_path / "eagle.yml"

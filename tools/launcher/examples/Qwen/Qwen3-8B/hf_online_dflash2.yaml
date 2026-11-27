@@ -67,8 +67,7 @@ pipeline:
       - training.max_steps=2000
       - training.training_seq_len=4096
       - training.learning_rate=6.0e-4
-      - training.warmup_ratio=0.04
-      - training.warmup_steps=0
+      - training.warmup_steps=0.04
       - training.lr_scheduler_type=linear
       - training.save_steps=5000
       - training.logging_steps=100

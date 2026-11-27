@@ -192,6 +192,11 @@ def _apply_dotlist(data: dict, overrides: list[str]) -> dict:
     for entry in overrides:
         if "=" not in entry:
             raise ValueError(f"Invalid override (missing '='): {entry!r}")
+    # transformers 5.15 removed warmup_ratio: an old override replaces the recipe's warmup_steps,
+    # which takes the same fraction, rather than conflicting with it.
+    ratio, steps = "training.warmup_ratio=", "training.warmup_steps="
+    if not any(entry.startswith(steps) for entry in overrides):
+        overrides = [steps + e.removeprefix(ratio) if e.startswith(ratio) else e for e in overrides]
     merged = OmegaConf.merge(
         OmegaConf.create(data),
         OmegaConf.from_dotlist(list(overrides)),
