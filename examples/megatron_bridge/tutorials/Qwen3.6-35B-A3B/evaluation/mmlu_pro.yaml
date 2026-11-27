@@ -60,7 +60,7 @@ evaluation:
         request_timeout: 3600
         max_retries: 10
         max_new_tokens: 131072
-        temperature: 0.6
+        temperature: 0.6  # Main results use 0.6. A separate follow-up used 1.0.
         top_p: 0.95
     target:
       api_endpoint:

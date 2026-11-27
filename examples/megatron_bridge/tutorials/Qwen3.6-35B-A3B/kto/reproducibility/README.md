@@ -51,6 +51,8 @@ We run benchmarks and collect results using the [QAD tutorial’s evaluation set
 
 IFBench and MMMU-Pro used 16 matched launches per model, up from eight in the parent tutorial. Each launch used `num_repeats: 1`. The extra runs made the accuracy comparison more precise and helped us check for regressions.
 
+The main results report MMLU-Pro at temperature 0.6, with 14 cap hits for QAD and seven for QAKTO. A separate evaluation at temperature 1.0 recorded two cap hits per model. Higher temperature spreads probability across more continuations, which may help the model break out of doomed reasoning loops. A controlled comparison is needed to isolate temperature’s effect because the evaluation setup also changed.
+
 For tau2-bench Telecom, override `agent_args.presence_penalty` from 1.5 to 0 for both models.
 
 ## Reproducibility limits
