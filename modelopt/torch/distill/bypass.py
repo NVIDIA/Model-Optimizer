@@ -55,6 +55,9 @@ def bypass(
             Zero-step preflight skips validation as well as training.
         device_mesh: Caller-owned placement mesh, adopted by supported integrations.
 
+    Finalization commits boundaries in order. An I/O or allocation failure may leave
+    earlier boundaries committed; reload a saved checkpoint before retrying.
+
     Returns:
         The supplied student, finalized for ordinary ModelOpt save/export. Temporary
         fields, hooks, modes and gradient flags are restored on every exit.

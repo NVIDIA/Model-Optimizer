@@ -702,3 +702,65 @@ def test_public_bypass_recovers_owner_undo_before_restoring_caller_state(monkeyp
     assert not any(hasattr(module, "_local_repair_state") for module in student.modules())
     with mtq.utils.enable_weight_access_and_writeback(student, student, writeback=False):
         torch.testing.assert_close(student.state_dict(), before, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("failure", ["format", "publication"])
+def test_bypass_finalization_failure_preserves_documented_boundary_commits(failure):
+    accelerate = pytest.importorskip("accelerate")
+    student, teacher, batches = _problem()
+    before = copy.deepcopy(student.state_dict())
+    teacher_before = copy.deepcopy(teacher.state_dict())
+    teacher.head.weight.requires_grad_(False)
+    flags = {name: parameter.requires_grad for name, parameter in teacher.named_parameters()}
+    modes = {module: module.training for root in (student, teacher) for module in root.modules()}
+    accelerate.cpu_offload(student, execution_device="cpu", offload_buffers=True)
+    publication_error = RuntimeError("deliberate second-boundary publication failure")
+    armed = True
+
+    def change_format(module, args, output):
+        nonlocal armed
+        if armed:
+            armed = False
+            module.weight_quantizer.num_bits = "iq1_s"
+
+    def fail_publication(module, state_dict, prefix, metadata):
+        nonlocal armed
+        if armed:
+            armed = False
+            raise publication_error
+
+    handle = (
+        student.moe.register_forward_hook(change_format)
+        if failure == "format"
+        else student.moe.register_state_dict_post_hook(fail_publication)
+    )
+    caught = None
+    try:
+        mtd.bypass(
+            student,
+            teacher,
+            batches,
+            {"num_steps": 1, "global_batch_size": 2, "sequence_length": 3},
+        )
+    except BaseException as exc:
+        caught = exc
+    finally:
+        handle.remove()
+    assert not armed
+    if failure == "format":
+        assert isinstance(caught, ValueError)
+    else:
+        assert caught is publication_error
+    assert not any(hasattr(module, "_local_repair_state") for module in student.modules())
+    assert all(module.training == mode for module, mode in modes.items())
+    assert {
+        name: parameter.requires_grad for name, parameter in teacher.named_parameters()
+    } == flags
+    torch.testing.assert_close(teacher.state_dict(), teacher_before, rtol=0, atol=0)
+    with mtq.utils.enable_weight_access_and_writeback(student, student, writeback=False):
+        torch.testing.assert_close(student.moe.weight, before["moe.weight"], rtol=0, atol=0)
+        if failure == "format":
+            torch.testing.assert_close(student.mlp.weight, before["mlp.weight"], rtol=0, atol=0)
+        else:
+            assert not torch.equal(student.mlp.weight, before["mlp.weight"])
+            assert pinned_packed_weight(student.mlp.weight_quantizer, "iq1_m") is not None

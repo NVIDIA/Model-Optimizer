@@ -22,7 +22,11 @@ from functools import partial
 import numpy as np
 import torch
 
-from modelopt.torch.quantization.repair import IQRepairPolicy
+from modelopt.torch.quantization.repair import (
+    IQRepairPolicy,
+    _validate_ownership,
+    _validate_quantizer,
+)
 from modelopt.torch.quantization.utils.core_utils import (
     enable_weight_access_and_writeback,
     module_name_maps,
@@ -175,6 +179,17 @@ class _BypassRunner:
                 with torch.profiler.record_function("modelopt.bypass.update"):
                     self._update(self._measure(window, training=True), step)
                 window.clear()
+            states = {
+                binding: state
+                for policy in self.policies.values()
+                for binding, state, _, _ in policy.adapters
+            }
+            for binding, state in states.items():
+                _validate_quantizer(binding.quantizer)
+                if binding.quantizer.num_bits != state.name:
+                    raise ValueError("The native IQ format changed during repair")
+            _validate_ownership((self.student,), (states,))
+            del states
             for name, policy in self.policies.items():
                 policy.finalize_(
                     weight_access=partial(self._weight_access, name),
