@@ -125,7 +125,7 @@ def run_autotune() -> int:
             num_schemes_per_region=args.num_schemes,
             pattern_cache_file=args.pattern_cache_file,
             state_file=args.state_file,
-            quant_type=args.quant_type,
+            quant_type=args.quant_type if getattr(args, "_explicit_quant_type", False) else None,
             default_dq_dtype=args.default_dq_dtype,
             qdq_baseline_model=args.qdq_baseline,
             node_filter_list=node_filter_list,
@@ -260,7 +260,9 @@ Examples:
         type=str,
         default=DEFAULT_QUANT_TYPE,
         choices=["int8", "fp8"],
-        help=f"Quantization data type (default: {DEFAULT_QUANT_TYPE})",
+        action=StoreWithExplicitFlag,
+        explicit_attr="_explicit_quant_type",
+        help=f"Quantization data type (default: {DEFAULT_QUANT_TYPE}, or inherited from an explicit --state_file)",
     )
     quant_group.add_argument(
         "--default_dq_dtype",

@@ -120,6 +120,24 @@ def test_a_model_records_its_plan_once(recorded_on, again):
         assert distribution_plan(module) == (plan if module in holders else DistributionPlan())
 
 
+def test_models_sharing_a_stateless_module_each_record_their_plan():
+    """A module without parameters or buffers can be one object in every model of a process, as a
+    Hub kernel Transformers attaches to each attention layer is; it records no plan, so a second
+    model holding it is not taken for one already distributed."""
+    shared = nn.Identity()
+    models = [nn.Sequential(nn.Linear(2, 2), shared) for _ in range(2)]
+    plans = [DistributionPlan(world_size=8), DistributionPlan(world_size=8, dense="fsdp")]
+    for model, plan in zip(models, plans):
+        set_distribution_plan(model, plan)
+        assert distribution_plan(model) is plan and distribution_plan(model[0]) is plan
+    assert dist.recorded_distribution_plan(shared) is None
+
+    # One recorded as a model of its own still holds that plan in any model it is added to.
+    set_distribution_plan(shared, plans[0])
+    with pytest.raises(ValueError, match="its plan recorded once"):
+        set_distribution_plan(nn.Sequential(nn.Linear(2, 2), shared), plans[1])
+
+
 def _outcome(call):
     """``(value, None)``, or ``(None, error)`` if ``call()`` raises, a ``SystemExit`` included."""
     try:

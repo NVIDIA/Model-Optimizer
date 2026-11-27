@@ -215,7 +215,7 @@ class HFLiLiCorrModel(HFDFlashModel):
         # The identity `loss == origin_loss + lilicorr_loss` is the cheap parity check
         # on this objective, so both halves are reported next to the total.
         # The base's metrics first, as DFlash2 merges them, so a key of LiLiCorr's own
-        # wins a collision: today the base reports none, but it will.
+        # wins a collision.
         metrics = {**out.metrics, **metrics}
         metrics["origin_loss"] = out.loss.detach().float()
         metrics["origin_accuracy"] = out.accuracy

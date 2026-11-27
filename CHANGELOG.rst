@@ -51,6 +51,7 @@ Changelog
 - Unified HF export now writes model-hub tensor names for models with 3-D weights that do not stack experts. GGML exports of MoE models whose conversion mapping fuses experts, and models with a short convolution such as GLM-5.3-Flash, fell back to transformers' in-memory names, which vLLM cannot load. Re-export affected checkpoints.
 - Fixed a KV-cache length mismatch that could interrupt layerwise GPTQ calibration of Hugging Face models such as Qwen3 in ModelOpt 0.48.0.
 - With ``mto.enable_huggingface_checkpointing()`` and transformers before 5.21, ``save_pretrained`` no longer fails on Hugging Face MoE models with quantized fused experts, and ``from_pretrained`` restores them. A Qwen3-VL-MoE checkpoint does not load on those versions, so save and restore the live model with ``mto.save`` and ``mto.restore`` instead.
+- For dense Qwen3.5 checkpoints with an LM-head size mismatch in TensorRT-LLM 1.3.0, use ``model_type/qwen3_5/auto_quantize/w4a8_awq_beta_fp8_at_6p0bits-decoder_only`` to keep the output head unquantized and outside the 6-bit decoder budget. Rerun from the original weights and omit ``--auto_quantize_checkpoint`` or give it a fresh path.
 
 *ONNX*
 
@@ -58,7 +59,8 @@ Changelog
 - ONNX AutoCast now keeps the variance of decomposed RMSNorm and unfused LayerNorm in FP32 for both FP16 and BF16 conversion, so FP16 models converted without calibration data no longer give wrong outputs on execution providers such as TensorRT-RTX. Reconvert affected models.
 - Fix ``--dq_only`` ONNX export producing a model that ONNX Runtime cannot load when the weights are quantized to an unsigned type. Such exports now load and match the source model.
 - Fix blocked INT4 ONNX exports using the wrong dequantization axis for transposed weights, which prevented TensorRT and ONNX Runtime from executing affected models. Re-export affected models.
-- ONNX AutoTune now rejects checkpoint resumes whose quantization type conflicts with the requested type, instead of silently exporting the checkpoint's type. Use a fresh output directory or a matching state file when switching between INT8 and FP8.
+- Fix ONNX INT4 AWQ-Lite computing per-block weight scales from the wrong rows, which skewed the scale search. Re-run AWQ-Lite quantization on affected models.
+- Standalone ONNX AutoTune now rejects checkpoint resumes whose quantization type conflicts with an explicit or auto-discovered ``--quant_type``, while explicit ``--state_file`` resumes without ``--quant_type`` inherit the saved type and calibrated PTQ AutoTune continues to re-profile. Pass the checkpoint's ``--quant_type`` to resume, or use a fresh output directory and omit or change ``--state_file`` to start over.
 
 *Speculative Decoding*
 
@@ -182,7 +184,7 @@ Changelog
 - ``export_hf_checkpoint`` now reads how a model is distributed from the plan recorded on it, and raises for an FSDP2-sharded model, or one in a multi-rank run, that carries none. ``load_pretrained`` and ``examples/hf_ptq/hf_ptq.py --use_fsdp2`` record it; for a model you distribute yourself (``fsdp2_wrap`` and ``parallel_load_and_prepare_fsdp2`` record none), or export from several ranks as a DDP script does, record one with ``modelopt.torch.utils.distributed.set_distribution_plan`` before calibrating or exporting it, e.g. ``DistributionPlan(world_size)`` when every rank holds the whole model.
 - Streaming speculative-decoding training's vLLM connector (``modelopt.torch.speculative.plugins.rdma_hidden_states_connector``) now requires vLLM 0.22 or later. It is tested with vLLM 0.29 and later.
 - The yes/no environment variables ``MODELOPT_NVFP4_TRITON_SWEEP``, ``MODELOPT_SKIP_WEIGHT_QUANT_CHECK`` and ``MODELOPT_TEGROUPED_COMPILE_WEIGHT_LOOP`` now take ``1``/``0``, ``true``/``false``, ``yes``/``no`` or ``on``/``off`` in any case and raise on any other value, which they used to ignore. ``modelopt.env`` documents every ``MODELOPT_*`` variable ModelOpt reads.
-- The DFlash2 and LiLiCorr training forwards now return their metrics in one ``draft_metrics`` dict of detached 0-dim tensors (call ``.item()`` for a Python float), replacing ``selector_metrics`` and ``lilicorr_metrics``.
+- The DFlash2, LiLiCorr, DSpark and Domino training forwards now return their metrics in one ``draft_metrics`` dict of detached 0-dim tensors (call ``.item()`` for a Python float), replacing ``selector_metrics``, ``lilicorr_metrics``, ``dspark_metrics`` and ``domino_metrics``. DSpark's ``ce_loss``/``l1_loss``/``base_accuracy`` are now ``loss_ce``/``loss_tvd``/``backbone_accuracy``, and Domino's ``final_loss``/``base_loss``/``base_accuracy`` are now ``loss_final``/``loss_backbone``/``backbone_accuracy``.
 
 **Deprecations**
 
