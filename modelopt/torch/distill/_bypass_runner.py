@@ -327,7 +327,12 @@ class _BypassRunner:
         if self.config.checkpoint_dir is not None or self.config.resume_from is not None:
             self.sequence_data = isinstance(train_dataloader, Sequence)
             self.checkpoint = BypassCheckpoint(
-                self.student, self.teacher, self.config, self.runtime, dataloader=train_dataloader
+                self.student,
+                self.teacher,
+                self.config,
+                self.runtime,
+                dataloader=train_dataloader,
+                devices=devices,
             )
             if self.config.resume_from is not None:
                 start, saved = self.checkpoint.load(self.config.resume_from)

@@ -38,10 +38,55 @@ import modelopt.torch.distill as mtd
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.distill._bypass_capture import ModuleBypassAdapter
-from modelopt.torch.distill._bypass_checkpoint import _batch_hash, _model_hash, _rng_state
+from modelopt.torch.distill._bypass_checkpoint import (
+    BypassCheckpoint,
+    _batch_hash,
+    _model_hash,
+    _rng_state,
+)
 from modelopt.torch.distill._bypass_optimizer import Lion
 from modelopt.torch.quantization.qtensor import FP8QTensor, QTensorWrapper
 from modelopt.torch.quantization.utils.native_weight import pin_native_weight
+
+
+def test_checkpoint_refuses_changed_cuda_rng_scope(tmp_path):
+    student, teacher, batches = bypass_problem()
+    config = mtd.BypassConfig(
+        num_steps=1, global_batch_size=2, sequence_length=3, checkpoint_dir=str(tmp_path)
+    )
+    # CPU payloads exercise admission before any CUDA restoration or allocation.
+    saved = BypassCheckpoint(student, teacher, config, dataloader=batches, devices=[0])
+    saved.save(1, fields={}, optimizers={}, data_position={}, rng_state=_rng_state([]))
+    same = BypassCheckpoint(student, teacher, config, dataloader=batches, devices=[0])
+    assert same.load(str(tmp_path))[0] == 1
+    moved = BypassCheckpoint(student, teacher, config, dataloader=batches, devices=[1])
+    with pytest.raises(ValueError, match="identity"):
+        moved.load(str(tmp_path))
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="Needs two visible CUDA devices")
+def test_non_distributed_resume_refuses_cuda_device_move(tmp_path):
+    initial, teacher, batches = bypass_problem()
+    config = {"num_steps": 1, "global_batch_size": 2, "sequence_length": 3}
+    mtd.bypass(
+        copy.deepcopy(initial).to("cuda:0"),
+        copy.deepcopy(teacher).to("cuda:0"),
+        [batches[0].to("cuda:0")],
+        {**config, "checkpoint_dir": str(tmp_path)},
+    )
+    moved = copy.deepcopy(initial).to("cuda:1")
+    target = copy.deepcopy(teacher).to("cuda:1")
+    before = copy.deepcopy(moved.state_dict())
+    caller_rng = _rng_state([0, 1])
+    with pytest.raises(ValueError, match="identity"):
+        mtd.bypass(
+            moved,
+            target,
+            [batches[0].to("cuda:1")],
+            {**config, "resume_from": str(tmp_path)},
+        )
+    _equal(moved.state_dict(), before)
+    _equal(_rng_state([0, 1]), caller_rng)
 
 
 class _SelfAttention(torch.nn.MultiheadAttention):
