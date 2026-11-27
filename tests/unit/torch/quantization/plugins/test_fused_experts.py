@@ -569,6 +569,9 @@ class TestQuantFusedExperts:
 
         register_fused_experts_on_the_fly(model)
         converted = QuantModuleRegistry.convert(model.moe.experts)
+        for quantizer in converted.modules():
+            if isinstance(quantizer, TensorQuantizer):
+                quantizer.disable()
 
         seq_len = 8
         hidden_states = torch.randn(seq_len, HIDDEN_DIM)

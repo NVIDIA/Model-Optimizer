@@ -20,12 +20,21 @@ the router's top-k, its experts dispatch through the experts interface, and its 
 ``base_model_ep_plan``. The generic all-to-all transport takes over unchanged.
 """
 
-from ..specs import EPSpec, ModelSpec, register
+from ..specs import BypassSpec, EPSpec, ModelSpec, register
 
 __all__: list[str] = []
 
 register(
     ModelSpec(
+        bypass_spec=BypassSpec(
+            decoder_paths=(
+                "model.language_model.layers",
+                "language_model.layers",
+                "model.layers",
+                "layers",
+            ),
+            batch_packed_documents=True,
+        ),
         model_type="minimax_m3_vl",
         min_transformers_version="5.13",
         ep_spec=EPSpec(requires_transformers="5.13"),

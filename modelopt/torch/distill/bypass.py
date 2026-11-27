@@ -55,6 +55,9 @@ def bypass(
             Global Python/NumPy/CPU RNG and CUDA RNG on resident model devices are
             seeded and restored. Readers using other CUDA devices must own their
             generators; reader generators and worker state advance independently.
+            The HF adapter additionally derives default validity from ``_packed_seq_ids``:
+            zero denotes padding and positive IDs identify documents. Explicit loss masks win.
+            HF 2D attention masks must be Boolean/integer; floating additive bias uses 4D.
         config: A :class:`BypassConfig`, a dict, or None for the established defaults.
         validation_dataloader: Optional held-out batches for finalized-student valid-token MSE.
             Diagnostic failures propagate after committing training updates to the student.
@@ -67,6 +70,12 @@ def bypass(
     discard the affected model and reload it before reuse. Cleanup failures are
     attached to the primary exception when one is already propagating.
 
+    For HF PTQ, use
+    :meth:`TransformersBypassAdapter.weight_patterns
+    <modelopt.torch.distill.plugins.transformers.TransformersBypassAdapter.weight_patterns>`
+    with the same selectors to obtain ordinary ModelOpt ``weight_quantizer`` globs
+    before quantizing the student. These patterns exclude frozen routing gates.
+
     Returns:
         The supplied student, finalized for ordinary ModelOpt save/export. Temporary
         fields and hooks are removed unless owner restoration fails; caller modes
@@ -77,9 +86,13 @@ def bypass(
         torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1
     ):
         raise ValueError("Distributed Bypass requires its native placement integration")
+    adapter: ModuleBypassAdapter
     if getattr(getattr(student, "config", None), "model_type", None):
-        raise ValueError("Transformers Bypass requires its 5.23.x integration")
-    adapter = ModuleBypassAdapter()
+        from .plugins.transformers import TransformersBypassAdapter
+
+        adapter = TransformersBypassAdapter()
+    else:
+        adapter = ModuleBypassAdapter()
     units = adapter.resolve_units(student, teacher, config)
     plan = plan_iq_repair(
         [student.get_submodule(u.student_path) for u in units], root_model=student
