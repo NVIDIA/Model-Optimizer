@@ -347,9 +347,13 @@ class TensorQuantizerTester:
         with pytest.raises(Exception, match="mutually exclusive"):
             QuantizerAttributeConfig(num_bits=8, use_constant_amax=True, constant_amax=2688.0)
 
-    def test_modelopt_state(self):
-        # Test loading of amax from ref to test
-        tensor_quantizer_ref = TensorQuantizer(QuantizerAttributeConfig(num_bits=4), amax=10.0)
+    @pytest.mark.parametrize("block_sizes", [None, {-1: 4}])
+    def test_modelopt_state(self, block_sizes):
+        # Test loading of amax from ref to test, including real padded block-layout setup.
+        amax = 10.0 if block_sizes is None else torch.full((30, 1), 10.0)
+        tensor_quantizer_ref = TensorQuantizer(
+            QuantizerAttributeConfig(num_bits=4, block_sizes=block_sizes), amax=amax
+        )
         tensor_quantizer_ref.to(self.device)
         tensor_quantizer_test = TensorQuantizer(QuantizerAttributeConfig())
 
@@ -368,16 +372,18 @@ class TensorQuantizerTester:
         tensor_quantizer_test.load_state_dict(tensor_quantizer_ref.state_dict())
         tensor_quantizer_test.to(self.device)
 
+        original_amax = tensor_quantizer_ref._amax
+        amax_before = original_amax.clone()
         x = torch.randn(10, 10).to(self.device)
         assert torch.allclose(tensor_quantizer_ref(x), tensor_quantizer_test(x))
+        assert tensor_quantizer_ref._amax is original_amax
+        torch.testing.assert_close(original_amax, amax_before, rtol=0, atol=0)
+        if block_sizes is not None:
+            assert tensor_quantizer_ref._axis != state_dict["_axis"]
 
         # Runtime repair values must not replace the caller's checkpoint properties.
         allowed = ("_if_calib", "_axis", "_block_sizes", "_slices", "_amax_shape_for_export")
-        originals = {
-            name: getattr(tensor_quantizer_ref, name)
-            for name in allowed
-            if hasattr(tensor_quantizer_ref, name)
-        }
+        originals = {name: state_dict[name] for name in allowed if name in state_dict}
         tensor_quantizer_ref._local_repair_active = True
         object.__setattr__(tensor_quantizer_ref, "_local_repair_state", object())
         tensor_quantizer_ref._fake_quantize = lambda value: value
@@ -401,6 +407,7 @@ class TensorQuantizerTester:
             & saved.keys()
         )
         assert saved["_num_bits"] == state_dict["_num_bits"]
+        assert saved["_pytorch_state_metadata"] == state_dict["_pytorch_state_metadata"]
         for name in allowed:
             if name in originals:
                 assert saved[name] == originals[name]

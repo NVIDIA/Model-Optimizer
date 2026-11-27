@@ -1411,8 +1411,8 @@ class TensorQuantizer(nn.Module):
         for k in self._get_properties_for_modelopt_state():
             modelopt_state[k] = getattr(self, k)
         if (repair_properties := getattr(self, "_local_repair_properties", None)) is not None:
-            # IQRepairPolicy snapshots these before temporary layout setup; missing keys
-            # must stay absent when saving the original model during active repair.
+            # Repair disables calibration: layout setup changes properties, not serialized buffers.
+            # Captured original properties (including absent keys) must describe those buffers.
             for name in ("_if_calib", "_axis", "_block_sizes", "_slices", "_amax_shape_for_export"):
                 if name in repair_properties:
                     modelopt_state[name] = repair_properties[name]
