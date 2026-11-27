@@ -265,7 +265,14 @@ def evaluate_pair(
     try:
         teacher.eval()
         candidate.eval()
-        iterator, exhausted = iter(batches), object()
+        iterator, error = None, None
+        try:
+            iterator = iter(batches)
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
+        _synchronize(adapter, error)
+        assert iterator is not None
+        exhausted = object()
         while True:
             batch, error = exhausted, None
             try:
@@ -285,30 +292,35 @@ def evaluate_pair(
             documents, error = [], None
             try:
                 documents = document_batches(batch)
-            except (ValueError, TypeError, KeyError, IndexError) as exc:
+            except Exception as exc:
                 error = f"{type(exc).__name__}: {exc}"
             _synchronize(adapter, error)
             for index in range(max(_all_rank_values(context, len(documents)))):
-                document = (
-                    documents[index] if index < len(documents) else empty_document_batch(batch)
-                )
-                labels = document.get("labels", torch.full_like(document["input_ids"], -100))
-                valid = _valid_token_mask(document)
-                valid = torch.ones_like(labels, dtype=torch.bool) if valid is None else valid
                 error = None
-                if (
-                    labels.shape != document["input_ids"].shape
-                    or valid.shape != labels.shape
-                    or labels.dtype != torch.long
-                ):
-                    error = "Diagnostic labels/validity must match token IDs and use long integer labels"
-                if use_head:
-                    assert projections[0].head is not None and projections[1].head is not None
-                    vocabulary = projections[0].head.weight.shape[0]
-                    if vocabulary != projections[1].head.weight.shape[0] or bool(
-                        (valid & labels.ne(-100) & ((labels < 0) | (labels >= vocabulary))).any()
+                try:
+                    document = (
+                        documents[index] if index < len(documents) else empty_document_batch(batch)
+                    )
+                    labels = document.get("labels", torch.full_like(document["input_ids"], -100))
+                    valid = _valid_token_mask(document)
+                    valid = torch.ones_like(labels, dtype=torch.bool) if valid is None else valid
+                    if (
+                        labels.shape != document["input_ids"].shape
+                        or valid.shape != labels.shape
+                        or labels.dtype != torch.long
                     ):
-                        error = "Diagnostic target/output vocabulary mismatch"
+                        error = "Diagnostic labels/validity must match token IDs and use long integer labels"
+                    if use_head:
+                        assert projections[0].head is not None and projections[1].head is not None
+                        vocabulary = projections[0].head.weight.shape[0]
+                        if vocabulary != projections[1].head.weight.shape[0] or bool(
+                            (
+                                valid & labels.ne(-100) & ((labels < 0) | (labels >= vocabulary))
+                            ).any()
+                        ):
+                            error = "Diagnostic target/output vocabulary mismatch"
+                except Exception as exc:
+                    error = f"{type(exc).__name__}: {exc}"
                 _synchronize(adapter, error)
                 left = _model_output(teacher, document, adapter, projections[0])
                 right = _model_output(candidate, document, adapter, projections[1])

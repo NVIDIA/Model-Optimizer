@@ -43,8 +43,8 @@ from modelopt.torch.distill.plugins.transformers import TransformersBypassAdapte
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.ggml.common import pinned_packed_weight
 from modelopt.torch.quantization.nn import QuantModuleRegistry, TensorQuantizer
-from modelopt.torch.quantization.repair import IQRepairPolicy
 from modelopt.torch.quantization.plugins.huggingface import register_hf_attentions_on_the_fly
+from modelopt.torch.quantization.repair import IQRepairPolicy
 
 
 @pytest.fixture
