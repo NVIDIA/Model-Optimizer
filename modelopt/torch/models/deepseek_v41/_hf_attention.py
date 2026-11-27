@@ -36,6 +36,19 @@ from .moe import _fp8_inputs
 __all__ = []
 
 
+def _compression_layout(positions, token_mask, ratio):
+    """Group chronological valid tokens, independent of physical padding offsets."""
+    count = positions.shape[1] // ratio
+    order = torch.argsort((~token_mask).int(), dim=-1, stable=True)
+    grouped = order[:, : count * ratio].unflatten(-1, (count, ratio))
+    starts = positions.gather(1, grouped[:, :, 0])
+    lengths = token_mask.long().cumsum(-1).unsqueeze(-1) // ratio
+    valid = torch.arange(count, device=positions.device) < (
+        token_mask.sum(-1, keepdim=True) // ratio
+    )
+    return grouped.flatten(1), starts, lengths, valid
+
+
 class V41Compressor(nn.Module):
     def __init__(self, config, ratio):
         super().__init__()
@@ -46,7 +59,10 @@ class V41Compressor(nn.Module):
         )
         self.norm = V41RMSNorm(config.head_dim, config.rms_norm_eps)
 
-    def forward(self, hidden_states):
+    def forward(self, hidden_states, order):
+        hidden_states = hidden_states.gather(
+            1, order.unsqueeze(-1).expand(-1, -1, hidden_states.shape[-1])
+        )
         if self.ratio == 1:
             return self.norm(self.wkv(hidden_states)).to(hidden_states.dtype)
         cutoff = hidden_states.shape[1] // self.ratio * self.ratio
@@ -68,14 +84,13 @@ class V41Indexer(nn.Module):
             self.wk = V41Linear(config.head_dim, config.index_head_dim)
             self.k_norm = V41RMSNorm(config.index_head_dim, config.rms_norm_eps)
 
-    def forward(
-        self, hidden_states, query_latent, latent, positions, ratio, offset, state, token_mask
-    ):
+    def forward(self, hidden_states, query_latent, latent, positions, ratio, offset, state, layout):
         count = hidden_states.shape[1] // ratio
+        _, compressed_positions, lengths, compressed_valid = layout
         if self.owns_keys:
             key = self.k_norm(self.wk(latent)).to(hidden_states.dtype)
-            key = rotary(key, positions[:, : count * ratio : ratio], self.config, True)
-            state["index_key"] = fp4_inputs(key) if self.config.attention_quantization else key
+            key = rotary(key, compressed_positions, self.config, True)
+            state["index_key"] = (fp4_inputs(key) if self.config.attention_quantization else key,)
         if not count:
             return torch.empty(
                 *hidden_states.shape[:2], 0, dtype=torch.long, device=hidden_states.device
@@ -93,31 +108,33 @@ class V41Indexer(nn.Module):
             / (self.config.index_head_dim * self.config.index_n_heads) ** 0.5
         )
         with torch.autocast(query.device.type, enabled=False):
-            scores = torch.einsum("bshd,btd->bsht", query.float(), state["index_key"].float())
+            scores = torch.einsum("bshd,btd->bsht", query.float(), state["index_key"][0].float())
         scores = (scores.relu() * weights.unsqueeze(-1)).sum(2)
-        lengths = (
-            torch.arange(1, hidden_states.shape[1] + 1, device=hidden_states.device) // ratio
-        ).unsqueeze(-1)
         scores = scores.masked_fill(
             torch.arange(count, device=scores.device) >= lengths, -torch.inf
         )
-        if token_mask is not None:
-            compressed_valid = token_mask[:, : count * ratio].unflatten(-1, (-1, ratio)).all(-1)
-            scores = scores.masked_fill(~compressed_valid[:, None, :], -torch.inf)
+        scores = scores.masked_fill(~compressed_valid[:, None, :], -torch.inf)
         if self.layer_id == self.config.candidate_source_layer_id:
-            state["candidates"] = select_candidates(
-                scores, lengths, self.config.candidate_topk_blocks, self.config.candidate_block_size
+            state["candidates"] = (
+                select_candidates(
+                    scores,
+                    lengths,
+                    self.config.candidate_topk_blocks,
+                    self.config.candidate_block_size,
+                ),
             )
         elif 0 <= self.config.candidate_source_layer_id < self.layer_id:
             if "candidates" not in state:
                 raise ValueError("Candidate source must run before a candidate-filtered indexer.")
-            scores = scores.masked_fill(~state["candidates"], -torch.inf)
+            scores = scores.masked_fill(~state["candidates"][0], -torch.inf)
         indices = (
             scores.topk(min(self.config.index_topk, count), -1, sorted=False)
             .indices.sort(-1)
             .values
         )
-        return torch.where(indices < lengths, indices + offset, -1)
+        return torch.where(
+            (indices < lengths) & ~torch.isneginf(scores.gather(-1, indices)), indices + offset, -1
+        )
 
 
 class V41Attention(nn.Module):
@@ -166,46 +183,46 @@ class V41Attention(nn.Module):
             valid = token_mask.gather(1, indices.clamp_min(0).flatten(1)).reshape_as(indices)
             indices = indices.masked_fill(~valid, -1)
         if self.compress_ratio:
+            mask = (
+                torch.ones_like(positions, dtype=torch.bool) if token_mask is None else token_mask
+            )
+            layout = _compression_layout(positions, mask, self.compress_ratio)
+            order, compressed_positions, _, compressed_valid = layout
             latent = None
             if self.is_kv_source:
                 assert self.compressor is not None
-                latent = self.compressor(hidden_states)
+                latent = self.compressor(hidden_states, order)
             if self.is_index_source:
                 assert self.indexer is not None
-                state["topk"] = self.indexer(
-                    hidden_states,
-                    qr,
-                    latent,
-                    positions,
-                    self.compress_ratio,
-                    sequence,
-                    state,
-                    token_mask,
+                state["topk"] = (
+                    self.indexer(
+                        hidden_states,
+                        qr,
+                        latent,
+                        positions,
+                        self.compress_ratio,
+                        sequence,
+                        state,
+                        layout,
+                    ),
                 )
             if self.is_kv_source:
                 assert latent is not None
-                count = latent.shape[1]
                 compressed = rotary(
                     latent,
-                    positions[:, : count * self.compress_ratio : self.compress_ratio],
+                    compressed_positions,
                     self.config,
                     True,
                 )
                 state["compressed_kv"] = (
                     fp4_inputs(compressed, 16, True)
                     if self.config.attention_quantization
-                    else compressed
+                    else compressed,
                 )
-            kv = torch.cat((kv, state["compressed_kv"]), 1)
-            indices = torch.cat((indices, state["topk"]), -1)
-            if token_mask is not None and state["topk"].shape[-1]:
-                count = state["compressed_kv"].shape[1]
-                valid = (
-                    token_mask[:, : count * self.compress_ratio]
-                    .unflatten(-1, (-1, self.compress_ratio))
-                    .all(-1)
-                )
-                all_valid = torch.cat((token_mask, valid), -1)
+            kv = torch.cat((kv, state["compressed_kv"][0]), 1)
+            indices = torch.cat((indices, state["topk"][0]), -1)
+            if token_mask is not None and state["topk"][0].shape[-1]:
+                all_valid = torch.cat((token_mask, compressed_valid), -1)
                 selected_valid = all_valid.gather(1, indices.clamp_min(0).flatten(1)).reshape_as(
                     indices
                 )

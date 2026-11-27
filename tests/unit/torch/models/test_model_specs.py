@@ -537,7 +537,7 @@ EXPECTED_MOE_LAYOUTS = [
         ("gate_proj", "up_proj"),
     ),
     ("deepseek_v4", ("DeepseekV4SparseMoeBlock",), ("gate_up_proj", "down_proj"), True, None),
-    ("deepseek_v41", ("V41MoE", "DeepseekV41MoE"), ("w1", "w2", "w3"), False, ("w1", "w3")),
+    ("deepseek_v41", ("DeepseekV41MoE",), ("w1", "w2", "w3"), False, ("w1", "w3")),
     (
         "gemma4",
         ("Gemma4TextDecoderLayer",),

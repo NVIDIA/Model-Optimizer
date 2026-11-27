@@ -177,3 +177,16 @@ def test_moe_block_resolves_from_its_declared_version(model_type):
         f"block_names, and min_transformers_version if the rename landed in a later "
         f"release."
     )
+
+
+@pytest.mark.parametrize(
+    "model_type", [s.model_type for s in get_specs() if s.modeling_source == "modelopt"]
+)
+def test_modelopt_moe_blocks_resolve_from_local_port(model_type):
+    spec = get_spec(model_type)
+    if _installed_version() < Version(spec.min_transformers_version):
+        pytest.skip(f"needs transformers >= {spec.min_transformers_version}")
+    port = importlib.import_module(f"modelopt.torch.models.{model_type}")
+    for name in spec.moe_spec.block_names:
+        cls = getattr(port, name)
+        assert isinstance(cls, type)

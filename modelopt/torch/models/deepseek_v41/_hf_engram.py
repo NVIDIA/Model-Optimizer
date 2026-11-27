@@ -135,6 +135,12 @@ class V41NgramHash(nn.Module):
                 "Tokenizer normalization disagrees with the checkpoint's compressed vocabulary."
             )
         self._validate_map(mapping)
+        if self.config.engram_token_map is not None and list(mapping) != list(
+            self.config.engram_token_map
+        ):
+            raise ValueError(
+                "Tokenizer mapping disagrees with the configured exact Engram token map."
+            )
         self.token_map.copy_(torch.tensor(mapping, device=self.token_map.device))
         self.config.engram_token_map = mapping
         self.ready = True

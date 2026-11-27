@@ -95,6 +95,14 @@ def load_published_text_checkpoint(
             return weight, False
         return _decode_weight(weight, scale, shape)
 
+    tied = config.tie_word_embeddings
+    shared = "model.embed.weight"
+    head = "lm_head.weight"
+    if tied and shared not in canonical and head in canonical:
+        canonical[shared] = canonical[head]
+        scale = head.removesuffix("weight") + "scale"
+        if scale in canonical:
+            canonical[shared.removesuffix("weight") + "scale"] = canonical[scale]
     for name, parameter in model.named_parameters():
         fused = re.fullmatch(r"(.+\.experts)\.(gate_up_proj|down_proj)", name)
         if fused:
@@ -130,6 +138,8 @@ def load_published_text_checkpoint(
             decoded[name] = value
         else:
             value, rounded = read(name, parameter.shape, table=".engram.embed." in name)
+            if tied and name == shared:
+                shared_value = value
             fp32 = any(
                 part.startswith("hc_") or part == "gate" for part in name.split(".")
             ) or name.endswith("attn_sink")
@@ -143,8 +153,24 @@ def load_published_text_checkpoint(
                 .detach()
                 .clone()
             )
+            # wo_a is grouped; attention_quantization owns its input rounding in attention.forward.
             if rounded and not name.endswith("wo_a.weight"):
                 quantized.append(name.removesuffix(".weight"))
+    if tied:
+        if head in canonical:
+            if canonical[head] is canonical[shared] and canonical.get(
+                "lm_head.scale"
+            ) is canonical.get("model.embed.scale"):
+                consumed.add(head)
+                scale = head.removesuffix("weight") + "scale"
+                if scale in canonical:
+                    consumed.add(scale)
+            else:
+                value, _ = read(head, model.model.embed.weight.shape)
+                # Validate before dtype conversion can round distinct source values to the same number.
+                if not torch.equal(value.to(shared_value.device), shared_value):
+                    raise ValueError("Tied V4.1 embedding and head checkpoint weights disagree.")
+        decoded[head] = decoded[shared]
     if model.model.engram_hash is not None:
         model.model.engram_hash = V41NgramHash(config).to(target_device)
         if tokenizer is not None:
@@ -163,6 +189,8 @@ def load_published_text_checkpoint(
     if unexpected:
         raise ValueError(f"Unexpected V4.1 text checkpoint tensors: {sorted(unexpected)}")
     model.load_state_dict(decoded, assign=True)
+    if tied:
+        model.lm_head.weight = model.model.embed.weight
     config.checkpoint_quantized_projections = sorted(
         set(quantized) | set(config.checkpoint_quantized_projections)
     )
