@@ -105,10 +105,10 @@ def _model_hash(model):
             # Quantizer buffers belong with this weight owner. Other
             # descendant state needs its own bounded access window.
             # The canonical context walks descendants; do not silently onload a
-            # frozen model under a composite/ancestor preload owner.
+            # frozen model under a composite/ancestor owner, even without preloading.
             raise ValueError(
                 "Checkpoint identity requires individually accessible offload weight owners; "
-                "composite/ancestor preload ownership is unsupported."
+                "composite/ancestor ownership, including non-preload hooks, is unsupported."
             )
         context = (
             enable_weight_access_and_writeback(module, model, names, writeback=False)
