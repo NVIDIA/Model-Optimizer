@@ -82,6 +82,18 @@ def _managed_tensors(module, include_buffers=True, recurse=False):
                 yield name, tensor
 
 
+def _needs_materialize(module, hook):
+    parameters = list(module.parameters(recurse=hook.place_submodules))
+    # A resident parameter may contain caller edits; native onload would overwrite them.
+    return any(tensor.is_meta for tensor in parameters) or (
+        not parameters
+        and hook.offload_buffers
+        and any(
+            tensor.is_meta for _, tensor in _managed_tensors(module, recurse=hook.place_submodules)
+        )
+    )
+
+
 def _rollback_scope(module, materialized):
     scope = {("module", id(mod)) for mod in module.modules()}
     tensors = list(chain(module.parameters(), module.buffers()))
@@ -139,20 +151,21 @@ def _expire_overlapping_rollbacks(module, materialized=(), *, capture_scope=Fals
 
 
 def _snapshot_aliased_weights(entered, retained):
-    """Copy backing tensors that live CPU weights can mutate in place."""
+    """Copy backing tensors that CPU weights can mutate during or after onload."""
     tensors = [
         (hook, name, tensor)
         for mod, hook, _ in entered
         for name, tensor in _managed_tensors(mod, recurse=True)
     ]
     live = (tensor for mod, _, _ in entered for tensor in chain(mod.parameters(), mod.buffers()))
-    live_storages = {
-        tensor.untyped_storage().data_ptr()
-        for tensor in chain(live, retained)
-        if tensor.device.type == "cpu" and tensor.layout == torch.strided
-    }
+    live_storages = set()
+    for tensor in chain(live, retained):
+        if isinstance(tensor, torch.distributed.tensor.DTensor):
+            tensor = tensor.to_local()
+        if tensor.device.type == "cpu" and tensor.layout == torch.strided and tensor.numel() > 0:
+            live_storages.add(tensor.untyped_storage().data_ptr())
     snapshots = {}
-    for hook, name, _ in tensors:
+    for hook, name, managed in tensors:
         weights_map, prefix = _weights_map_and_prefix(hook)
         tensor = _resident_weights_map(weights_map).get(prefix + name)
         if tensor is not None and tensor.layout != torch.strided:
@@ -160,7 +173,10 @@ def _snapshot_aliased_weights(entered, retained):
         if (
             tensor is not None
             and tensor.device.type == "cpu"
-            and tensor.untyped_storage().data_ptr() in live_storages
+            and (
+                tensor.untyped_storage().data_ptr() in live_storages
+                or (managed.is_meta and str(hook.execution_device).split(":")[0] == "cpu")
+            )
         ):
             key = (
                 tensor.untyped_storage().data_ptr(),
@@ -352,7 +368,7 @@ def weight_access_and_writeback_context(module, writeback: bool = True, *, rollb
     An expired callback raises before restoring anything;
     a completed callback stays idempotent. Tracking holds weak callbacks and metadata,
     never global tensor/model references.
-    CPU tensors sharing live or retained master storage require host snapshots;
+    CPU tensors sharing live, retained master, or CPU-onload backing storage require host snapshots;
     backing views must have provably disjoint strides (ordinary stepped slices are supported).
     Other rollback state holds references and metadata, without copying execution-device weights.
     Only rollback windows refuse mixed meta/resident owners; ordinary windows retain native onload.
@@ -377,7 +393,7 @@ def _weight_access_and_writeback_context(module, writeback: bool = True, *, roll
         hook = _get_offload_hook(mod._hf_hook)
         if hook is None:
             continue
-        needs_materialize = any(p.device.type == "meta" for p in mod.parameters())
+        needs_materialize = _needs_materialize(mod, hook)
         materialized.append((mod, hook, needs_materialize))
 
     scope = _expire_overlapping_rollbacks(module, materialized, capture_scope=rollback)
@@ -520,18 +536,21 @@ def _weight_access_and_writeback_context(module, writeback: bool = True, *, roll
     receipt_ref = ref(undo)
 
     try:
+        if rollback:
+            # CPU onload can alias and mutate the backing even before the hook returns.
+            snapshots = _snapshot_aliased_weights(
+                materialized, (data for _, data in originals.values())
+            )
         for mod, hook, needs_materialize in materialized:
             if needs_materialize or (hook.offload_buffers and hook.place_submodules):
                 _carry_quantizers_with_offload(hook)
             # An enclosing hook may already have loaded this owner's parameters.
-            loads = any(p.device.type == "meta" for p in mod.parameters())
+            loads = _needs_materialize(mod, hook)
             # pre_forward can fail after loading only part of this owner's tensors.
             entered.append((mod, hook, loads))
             if loads:
                 hook.pre_forward(mod)
             hook.offload = False
-        if rollback:
-            snapshots = _snapshot_aliased_weights(entered, (data for _, data in originals.values()))
         ready = True
         yield undo if rollback else None
     except BaseException as exc:

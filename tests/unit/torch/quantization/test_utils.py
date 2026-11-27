@@ -678,7 +678,10 @@ def _fsdp2_receipt_inspection_failure_job(rank, size, direct, inject, stage):
     alias = torch.nn.Linear(8, 4, bias=False)
     alias.weight = torch.nn.Parameter(layer.weight.to_local().detach())
     cpu_offload(alias, execution_device="cpu")
-    with offload_plugin.weight_access_and_writeback_context(alias, rollback=True) as undo:
+    # A resident TP/FSDP shard may coexist with the independent offloaded owner.
+    mixed = torch.nn.ModuleDict({"offloaded": alias, "resident": torch.nn.Module()})
+    mixed["resident"].register_parameter("weight", layer.weight)
+    with offload_plugin.weight_access_and_writeback_context(mixed, rollback=True) as undo:
         pass
     failure = RuntimeError("rank-local receipt inspection failure")
     inspect = offload_plugin._rollback_scope

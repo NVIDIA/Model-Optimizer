@@ -979,18 +979,33 @@ def _invalidate_pending_accelerate_rollbacks(module, *, strict=True):
 
 @contextmanager
 def _expire_accelerate_rollbacks_on_exit(module, context, *, fsdp_access=False, writeback=True):
+    error = None
+
+    def scan(strict):
+        try:
+            _invalidate_pending_accelerate_rollbacks(module, strict=strict)
+        except Exception as exc:
+            if error is None:
+                raise
+            error.add_note(f"Accelerate rollback receipt inspection failed: {exc!r}")
+
     try:
         with context as owner_rollback:
             try:
                 yield owner_rollback
+            except BaseException as exc:
+                error = exc
+                raise
             finally:
-                _invalidate_pending_accelerate_rollbacks(
-                    module, strict=not (fsdp_access and not writeback)
-                )
+                scan(not (fsdp_access and not writeback))
+        error = None
+    except BaseException as exc:
+        error = exc
+        raise
     finally:
         # After FSDP consensus, bookkeeping must not introduce rank-local failure.
         # Clearing all receipts on inspection failure also covers restored shard aliases.
-        _invalidate_pending_accelerate_rollbacks(module, strict=not fsdp_access)
+        scan(not fsdp_access)
 
 
 @contextmanager
@@ -1057,7 +1072,7 @@ def _enable_weight_access_and_writeback(module, root_model, names, writeback, *,
     ):
         # HF transformers TP sharded linear layer
         context = module.enable_weight_access_and_writeback()
-    elif has_accelerate_offload(module):
+    elif any(hasattr(child, "_hf_hook") for child in module.modules()):
         from ..plugins.accelerate import weight_access_and_writeback_context
 
         accelerate_access = True

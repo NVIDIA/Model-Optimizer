@@ -990,11 +990,19 @@ def test_weight_access_refuses_custom_mapping_before_onload(mapping_mode, writeb
     assert model.weight.is_meta and hook.offload
 
 
-def test_weight_access_dispatches_hookless_composite():
+@pytest.mark.parametrize("buffer_only", [False, True, "resident_child"])
+def test_weight_access_dispatches_hookless_composite(buffer_only):
     model = nn.Sequential(nn.Linear(4, 4, bias=False), nn.Linear(4, 4, bias=False))
+    if buffer_only:
+        for owner in model:
+            weight = owner.weight.detach()
+            del owner.weight
+            owner.register_buffer("weight", weight)
     expected = [owner.weight.detach().clone() + 1 for owner in model]
     for owner in model:
-        cpu_offload(owner, execution_device="cpu")
+        cpu_offload(owner, execution_device="cpu", offload_buffers=bool(buffer_only))
+        if buffer_only == "resident_child":
+            owner.resident = nn.Linear(4, 4, bias=False)
     assert not hasattr(model, "_hf_hook")
     with enable_weight_access_and_writeback(model, model), torch.no_grad():
         assert all(not owner.weight.is_meta for owner in model)
@@ -1005,6 +1013,80 @@ def test_weight_access_dispatches_hookless_composite():
         for owner, weight in zip(model, expected, strict=True):
             torch.testing.assert_close(owner.weight, weight, rtol=0, atol=0)
     assert all(owner.weight.is_meta for owner in model)
+
+
+@pytest.mark.parametrize("later_failure", [False, True])
+def test_weight_access_rollback_preserves_values_before_onload(later_failure):
+    class MutatingOnload(AlignDevicesHook):
+        def pre_forward(self, module, *args, **kwargs):
+            result = super().pre_forward(module, *args, **kwargs)
+            with torch.no_grad():
+                module.weight.add_(3)
+            return result
+
+    model = nn.Sequential(nn.Linear(4, 4, bias=False), nn.Linear(4, 4, bias=False))
+    model[1].register_buffer("scale", torch.ones(4))
+    backings = [dict(owner.state_dict()) for owner in model]
+    originals = [backing["weight"].clone() for backing in backings]
+    for index, owner in enumerate(model):
+        hook_class = AlignDevicesHook if index else MutatingOnload
+        add_hook_to_module(
+            owner, hook_class(execution_device="cpu", offload=True, weights_map=backings[index])
+        )
+    if later_failure:
+        missing = backings[1].pop("weight")
+        with pytest.raises(KeyError), offload_weight_access(model, rollback=True):
+            pytest.fail("Incomplete onload yielded")
+        torch.testing.assert_close(backings[0]["weight"], originals[0], rtol=0, atol=0)
+        assert all(owner.weight.is_meta and owner._hf_hook.offload for owner in model)
+        backings[1]["weight"] = missing
+    with offload_weight_access(model, rollback=True) as undo:
+        torch.testing.assert_close(model[0].weight, originals[0] + 3, rtol=0, atol=0)
+    undo()
+    undo()
+    for owner, backing, original in zip(model, backings, originals, strict=True):
+        torch.testing.assert_close(backing["weight"], original, rtol=0, atol=0)
+        assert owner.weight.is_meta and owner._hf_hook.offload
+
+
+@pytest.mark.parametrize("inner_composite", [False, True])
+def test_weight_access_dispatches_nested_active_accelerate(inner_composite):
+    owner = nn.Linear(4, 4, bias=False)
+    model = nn.Sequential(owner)
+    cpu_offload(owner, execution_device="cpu")
+    with enable_weight_access_and_writeback(model, model), torch.no_grad():
+        owner.weight.add_(2)
+        original = owner.weight
+        expected = original.clone()
+        inner = model if inner_composite else owner
+        with enable_weight_access_and_writeback(inner, model, rollback=True) as undo:
+            assert callable(undo)
+            assert owner.weight is original
+            torch.testing.assert_close(owner.weight, expected, rtol=0, atol=0)
+            owner.weight = nn.Parameter(torch.zeros_like(original))
+        undo()
+        assert owner.weight is original
+        torch.testing.assert_close(owner.weight, expected, rtol=0, atol=0)
+        plain_module = nn.Linear(4, 4)
+        with enable_weight_access_and_writeback(plain_module, plain_module, rollback=True) as plain:
+            assert plain is None
+    assert owner.weight.is_meta
+
+
+def test_weight_access_dispatcher_preserves_body_error_during_receipt_inspection():
+    pending = nn.Linear(4, 4, bias=False)
+    cpu_offload(pending, execution_device="cpu")
+    with offload_weight_access(pending, rollback=True) as undo:
+        pass
+    plain = nn.Module()
+    failure = RuntimeError("caller failed")
+    with pytest.raises(Exception) as error, enable_weight_access_and_writeback(plain, plain):
+        plain.register_parameter("lazy", nn.parameter.UninitializedParameter())
+        raise failure
+    assert error.value is failure
+    assert len(error.value.__notes__) >= 1
+    with pytest.raises(RuntimeError):
+        undo()
 
 
 def test_weight_access_publishes_duplicate_hook_slots_before_parent_reload(monkeypatch):

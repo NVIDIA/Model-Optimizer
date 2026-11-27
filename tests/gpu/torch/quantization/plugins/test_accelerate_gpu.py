@@ -157,6 +157,8 @@ def test_offloaded_quantizer_keeps_what_its_setter_wrote(tmp_path):
     assert quantizer._amax.device.type == "cpu"
     assert torch.equal(quantizer._amax, amax)
 
+
+def test_offloaded_quantizer_rollback_restores_carried_cpu_alias():
     # A descendant CPU quantizer master can alias an offload map even when buffers
     # are not managed by Accelerate. Carrying it to CUDA must not hide that alias.
     owner = nn.Linear(4, 4, bias=False)
