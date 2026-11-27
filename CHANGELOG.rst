@@ -31,6 +31,8 @@ Changelog
 
 *Speculative Decoding*
 
+- Add an experimental vLLM streaming dataset for Megatron-LM EAGLE3 and support pre-normalization teacher features in the Megatron EAGLE offline forward pass.
+
 *Megatron Framework (M-LM / M-Bridge)*
 
 *Misc*

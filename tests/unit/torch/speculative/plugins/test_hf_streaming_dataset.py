@@ -43,6 +43,7 @@ from modelopt.torch.speculative.plugins import hf_streaming_dataset
 from modelopt.torch.speculative.plugins.hf_streaming_dataset import (
     EagleVllmStreamingConfig,
     EagleVllmStreamingDataset,
+    MegatronEagleVllmStreamingDataset,
     StreamingConfig,
     StreamingDataset,
 )
@@ -387,6 +388,31 @@ def test_eagle_vllm_dataset_end_to_end(monkeypatch):
         # labels are input_ids shifted by 1, last position is IGNORE
         assert torch.equal(b["labels"][:-1], b["input_ids"][1:])
         assert b["labels"][-1].item() == hf_streaming_dataset.IGNORE_TOKEN_ID
+
+
+@pytest.mark.parametrize("seq", [3, 5])
+def test_megatron_streaming_preserves_label_and_feature_alignment(seq):
+    tokenizer = _tokenizer_returning(seq)
+    tokenizer.eos_token_id = 99
+    dataset = MegatronEagleVllmStreamingDataset(
+        _entries(1),
+        tokenizer,
+        EagleVllmStreamingConfig(server_urls="http://mock", model="mock", max_seq_len=5),
+    )
+    planes = torch.arange(seq * 4 * 8, dtype=torch.float32).view(seq, 4, 8).bfloat16()
+    token_mask = torch.tensor([0] + [1] * (seq - 1))
+    sample = dataset._format(
+        {"token_ids": torch.arange(seq), "hidden_states": planes, "loss_mask": token_mask}
+    )
+
+    assert sample["input_ids"].tolist() == list(range(seq)) + [99] * (6 - seq)
+    assert sample["loss_mask"][1:].tolist() == [1] * (seq - 1) + [0] * (6 - seq)
+    assert sample["hidden_states"].shape == (5, 8)
+    assert sample["aux_hidden_states"].shape == (5, 24)
+    torch.testing.assert_close(sample["hidden_states"][:seq], planes[:, -1])
+    torch.testing.assert_close(sample["aux_hidden_states"][:seq], planes[:, :-1].reshape(seq, -1))
+    assert not sample["hidden_states"][seq:].any()
+    assert not sample["aux_hidden_states"][seq:].any()
 
 
 def test_fetch_round_robins_across_server_urls(monkeypatch):

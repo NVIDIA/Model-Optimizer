@@ -19,10 +19,12 @@ Every mistake these tests guard against is silent: the draft trains on another t
 another request's hidden states, and nothing raises.
 """
 
+import os
 from types import SimpleNamespace
 
 import pytest
 import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 from vllm.model_executor.models.extract_hidden_states import CacheOnlyAttentionMetadata
 from vllm.v1.kv_cache_interface import (
@@ -32,6 +34,10 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from modelopt.torch.speculative.plugins import rdma_hidden_states_connector
+from modelopt.torch.speculative.plugins.hf_streaming_dataset import (
+    EagleVllmStreamingConfig,
+    MegatronEagleVllmStreamingDataset,
+)
 from modelopt.torch.speculative.plugins.rdma_hidden_states_connector import (
     RdmaHiddenStatesConnector,
     _hidden_state_group_index,
@@ -139,3 +145,90 @@ def test_the_capture_group_is_found_however_vllm_groups_it(config, index):
 def test_no_capture_group_among_several_is_refused():
     with pytest.raises(RuntimeError):
         _hidden_state_group_index(_groups(ATTENTION, ATTENTION))
+
+
+def test_live_megatron_stream_at_capture_limit():
+    """Exercise real vLLM HTTP/NIXL capture, padding, and advertised slot capacity."""
+    url = os.getenv("EAGLE_STREAMING_TEST_URL")
+    model_path = os.getenv("EAGLE_STREAMING_TEST_TEACHER")
+    if not url or not model_path:
+        pytest.skip("start the Qwen3 teacher server in examples/speculative_decoding/README.md")
+
+    cap = 256
+    tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True)
+    entries = [
+        {
+            "conversation_id": name,
+            "messages": [
+                {"role": "user", "content": question},
+                {
+                    "role": "assistant",
+                    "content": "A drafter proposes tokens and a teacher verifies them.",
+                },
+            ],
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
+        for name, question in (
+            ("short", "What does the teacher do?"),
+            ("capped", "Explain speculative decoding. " * cap),
+        )
+    ]
+    config = EagleVllmStreamingConfig(
+        server_urls=url, model="qwen3-teacher", max_seq_len=cap, request_timeout=15
+    )
+    dataset = MegatronEagleVllmStreamingDataset(entries, tokenizer, config)
+
+    oversized = config.model_copy(update={"max_seq_len": cap + 1})
+    with pytest.raises(
+        RuntimeError, match="serve connector max_tokens=256 < trainer max_seq_len=257"
+    ):
+        MegatronEagleVllmStreamingDataset(entries[:1], tokenizer, oversized)[0]
+
+    model = (
+        AutoModelForCausalLM.from_pretrained(
+            model_path, dtype=torch.bfloat16, local_files_only=True
+        )
+        .eval()
+        .cuda()
+    )
+    norm_inputs = []
+    before_norm = model.model.norm.register_forward_pre_hook(
+        lambda _module, args: norm_inputs.append(args[0])
+    )
+    try:
+        for index, entry in enumerate(entries):
+            prompt = tokenizer.apply_chat_template(
+                entry["messages"], tokenize=True, return_dict=False, enable_thinking=False
+            )
+            assert (len(prompt) > cap) == (index == 1)
+            ids = torch.tensor(prompt[:cap], dtype=torch.long)
+            length = ids.numel()
+            sample = dataset[index]
+
+            assert sample["input_ids"].shape == sample["loss_mask"].shape == (cap + 1,)
+            torch.testing.assert_close(sample["input_ids"][:length], ids)
+            assert (sample["input_ids"][length:] == tokenizer.eos_token_id).all()
+            assert (sample["loss_mask"][:length] == 1).all()
+            assert not sample["loss_mask"][length:].any()
+
+            with torch.inference_mode():
+                reference = model(ids[None].cuda(), output_hidden_states=True)
+            hidden = model.config.hidden_size
+            assert sample["aux_hidden_states"].shape == (cap, 3 * hidden)
+            assert sample["hidden_states"].shape == (cap, hidden)
+            aux = sample["aux_hidden_states"].reshape(cap, 3, hidden)
+            expected = [
+                (aux[:length, plane], reference.hidden_states[depth][0])
+                for plane, depth in enumerate((2, 14, 25))
+            ]
+            expected.append((sample["hidden_states"][:length], norm_inputs.pop()[0]))
+            for actual, want in expected:
+                assert actual.dtype == torch.bfloat16
+                similarity = torch.nn.functional.cosine_similarity(
+                    actual.cuda().float().flatten(), want.float().flatten(), dim=0
+                )
+                assert similarity > 0.99
+            assert not aux[length:].any()
+            assert not sample["hidden_states"][length:].any()
+    finally:
+        before_norm.remove()
