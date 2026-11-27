@@ -253,11 +253,14 @@ def native_weight_partition(quantizer, view, source=None):
         _pinned_native_fields(quantizer, view, fields, source)
     axis = quantizer.axis
     axes = (axis,) if isinstance(axis, int) else axis or ()
+    # An empty reduction list means a global maximum, not a per-element maximum.
+    retained = {value % 2 for value in axes}
     # Dynamic maxima are preserved only when the split does not divide their reduction.
     dynamic_is_local = (
         quantizer._dynamic
         and not quantizer.block_sizes
-        and view.dim in {value % 2 for value in axes}
+        and retained != {0, 1}
+        and view.dim in retained
     )
     if (
         not quantizer.is_mx_format
@@ -265,7 +268,7 @@ def native_weight_partition(quantizer, view, source=None):
         and not quantizer._use_constant_amax
         and quantizer.backend != "ggml"
         and getattr(quantizer, "_amax", None) is None
-        and ("_scale" not in fields or quantizer._dynamic)
+        and (getattr(quantizer, "_native_weight_meta", None) is None or quantizer._dynamic)
     ):
         raise ValueError(
             "Native TP fields require calibrated thresholds, shard-local dynamic reductions "
@@ -294,6 +297,14 @@ def prepare_packed_weights_for_tp(model):
         quantizer = getattr(module, "weight_quantizer", None)
         if not isinstance(quantizer, TensorQuantizer):
             raise ValueError("Packed TP staging requires one physical weight quantizer.")
+        # The fake-quant forward can use staged native codes only under this policy.
+        # Refuse before publishing any master instead of failing on its first forward.
+        if (
+            not quantizer._pass_through_bwd
+            or getattr(quantizer, "_lsq", False)
+            or any(parameter.requires_grad for parameter in quantizer.parameters())
+        ):
+            raise ValueError("Packed TP staging requires a supported native backward policy.")
         native = weight.get_qtensor()
         if len(native.metadata["shape"]) != 2:
             raise ValueError("Packed TP staging requires a logical matrix parameter.")

@@ -21,15 +21,18 @@ import pytest
 import torch
 from torch.nn import functional as F
 
+import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
+from modelopt.torch.quantization import repair_partition
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY, IQ_FORMAT_REGISTRY
 from modelopt.torch.quantization.ggml.common import pin_packed_weight
 from modelopt.torch.quantization.nn import TensorQuantizer
-from modelopt.torch.quantization.qtensor import FP8QTensor
+from modelopt.torch.quantization.qtensor import FP8QTensor, NVFP4QTensor, QTensorWrapper
 from modelopt.torch.quantization.repair_partition import (
     NativeWeightPartition,
     native_weight_partition,
+    prepare_packed_weights_for_tp,
 )
 from modelopt.torch.quantization.utils.native_weight import (
     get_pinned_native_weight,
@@ -40,10 +43,6 @@ from modelopt.torch.quantization.utils.native_weight import (
 @pytest.mark.parametrize("name", [*sorted(IQ_FORMAT_REGISTRY), "q8_0"])
 @pytest.mark.parametrize("dim", [0, 1])
 def test_native_partition_preserves_pinned_projection(name, dim):
-    from modelopt.torch.quantization.repair_partition import (
-        NativeWeightPartition,
-        native_weight_partition,
-    )
 
     torch.manual_seed(59)
     fmt = GGML_FORMAT_REGISTRY[name]
@@ -97,17 +96,6 @@ def test_native_partition_preserves_pinned_projection(name, dim):
 )
 @pytest.mark.parametrize("inference_staging", [False, True])
 def test_packed_frozen_projection_staging_and_restore(format_name, inference_staging, tmp_path):
-    import modelopt.torch.opt as mto
-    from modelopt.torch.quantization.qtensor import FP8QTensor, NVFP4QTensor, QTensorWrapper
-    from modelopt.torch.quantization.repair_partition import (
-        NativeWeightPartition,
-        native_weight_partition,
-        prepare_packed_weights_for_tp,
-    )
-    from modelopt.torch.quantization.utils.native_weight import (
-        get_pinned_native_weight,
-        pin_native_weight,
-    )
 
     torch.manual_seed(60)
     columns = 258 if format_name == "fp8_block_padded" else 256
@@ -213,11 +201,8 @@ def test_packed_frozen_projection_staging_and_restore(format_name, inference_sta
         restored(x)
 
 
-@pytest.mark.parametrize("failure", [RuntimeError, KeyboardInterrupt])
+@pytest.mark.parametrize("failure", [RuntimeError, KeyboardInterrupt, "clipped", "lsq", "learned"])
 def test_packed_staging_rolls_back_all_modules(monkeypatch, failure):
-    from modelopt.torch.quantization import repair_partition
-    from modelopt.torch.quantization.qtensor import FP8QTensor, QTensorWrapper
-    from modelopt.torch.quantization.repair_partition import prepare_packed_weights_for_tp
 
     model = mtq.quantize(
         torch.nn.Sequential(torch.nn.Linear(16, 16), torch.nn.Linear(16, 16)),
@@ -235,6 +220,15 @@ def test_packed_staging_rolls_back_all_modules(monkeypatch, failure):
         snapshots.append(
             (layer.weight, dict(q._buffers), q._fake_quant, q._rotate, q._enable_pre_quant_scale)
         )
+    if isinstance(failure, str):
+        q = model[1].weight_quantizer
+        q.enable()
+        if failure == "clipped":
+            q._pass_through_bwd = False
+        elif failure == "lsq":
+            q._lsq = True
+        else:
+            q.register_parameter("learned_scale", torch.nn.Parameter(torch.ones(())))
     original = repair_partition.pin_native_weight
     calls = 0
 
@@ -245,8 +239,12 @@ def test_packed_staging_rolls_back_all_modules(monkeypatch, failure):
             raise failure("staging interrupted")
         return original(*args)
 
-    monkeypatch.setattr(repair_partition, "pin_native_weight", fail_second)
-    with pytest.raises(failure, match="staging interrupted"):
+    if not isinstance(failure, str):
+        monkeypatch.setattr(repair_partition, "pin_native_weight", fail_second)
+    with pytest.raises(
+        ValueError if isinstance(failure, str) else failure,
+        match="native backward policy" if isinstance(failure, str) else "staging interrupted",
+    ):
         prepare_packed_weights_for_tp(model)
     for layer, (weight, buffers, fake_quant, rotate, pre_scale) in zip(model, snapshots):
         q = layer.weight_quantizer
@@ -261,7 +259,7 @@ def test_packed_staging_rolls_back_all_modules(monkeypatch, failure):
         assert not hasattr(q, "_native_weight_meta")
 
 
-@pytest.mark.parametrize("policy", ["uncalibrated", "constant", "dynamic"])
+@pytest.mark.parametrize("policy", ["uncalibrated", "scale_only", "constant", "dynamic"])
 def test_native_partition_preserves_threshold_policy(policy):
     quantizer = TensorQuantizer(
         QuantizerAttributeConfig(
@@ -273,7 +271,9 @@ def test_native_partition_preserves_threshold_policy(policy):
     )
     view = NativeWeightPartition((16, 32), 0, 0, 2)
     assert getattr(quantizer, "_amax", None) is None
-    if policy == "uncalibrated":
+    if policy == "scale_only":
+        quantizer._set_buffer("_scale", torch.ones(16, 1))
+    if policy in ("uncalibrated", "scale_only"):
         with pytest.raises(ValueError, match="require calibrated thresholds"):
             native_weight_partition(quantizer, view)
     else:
@@ -281,7 +281,7 @@ def test_native_partition_preserves_threshold_policy(policy):
         assert "_amax" not in fields
 
 
-@pytest.mark.parametrize("axis", [0, 1, -1, -2, (0,), (-2,), None])
+@pytest.mark.parametrize("axis", [0, 1, -1, -2, (0,), (-2,), (0, 1), (-1, -2), None])
 @pytest.mark.parametrize("dim", [0, 1])
 def test_dynamic_partition_requires_local_threshold_reductions(axis, dim):
     torch.manual_seed(7)
@@ -292,7 +292,8 @@ def test_dynamic_partition_requires_local_threshold_reductions(axis, dim):
     view = NativeWeightPartition(tuple(weight.shape), dim, 0, 2)
     axes = (axis,) if isinstance(axis, int) else axis or ()
     before = copy.deepcopy(quantizer.state_dict())
-    if dim not in {value % 2 for value in axes}:
+    retained = {value % 2 for value in axes}
+    if dim not in retained or retained == {0, 1}:
         with pytest.raises(ValueError, match="require calibrated thresholds"):
             native_weight_partition(quantizer, view)
     else:

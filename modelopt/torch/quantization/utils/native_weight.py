@@ -153,6 +153,7 @@ def get_pinned_native_weight(quantizer, source):
     Unversioned inference tensors are rechecked on every read to detect in-place
     changes. Packed staging creates versioned masters even inside inference mode.
     """
+    # Deferred: base_qtensor imports the quantization utils package at module scope.
     from ..qtensor.base_qtensor import get_native_tensor_class
 
     meta = getattr(quantizer, "_native_weight_meta", None)

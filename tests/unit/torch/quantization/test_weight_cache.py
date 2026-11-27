@@ -41,6 +41,7 @@ from modelopt.torch.quantization.utils import (
     weight_cache_scope,
 )
 from modelopt.torch.quantization.utils.native_weight import (
+    dequantize_pinned_native,
     get_pinned_native_weight,
     pin_native_weight,
 )
@@ -335,7 +336,6 @@ def test_pinned_native_weights_preserve_backward_policy(policy):
 
 
 def test_pinned_native_scales_are_live_codec_fields():
-    from modelopt.torch.quantization.utils.native_weight import dequantize_pinned_native
 
     model = _quantized_mlp(num_bits=(4, 3))
     q, source = model[0].weight_quantizer, model[0].weight
