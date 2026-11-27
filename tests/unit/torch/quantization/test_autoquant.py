@@ -23,6 +23,7 @@ import pytest
 import torch
 from _test_utils.torch.quantization.models import SimpleConv, SimpleConvLinear, SimpleLinear
 from packaging.version import Version
+from torch.distributed.device_mesh import init_device_mesh
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
@@ -51,7 +52,9 @@ from modelopt.torch.utils.distributed import (
     DistributedProcessGroup,
     DistributionPlan,
     ParallelState,
+    set_distribution_plan,
 )
+from modelopt.torch.utils.moe import register_torch_a2a
 
 
 class _AttentionLayer(torch.nn.Module):
@@ -1210,6 +1213,7 @@ def test_data_parallel_moe_score_module(cpu_dist_workers):
 
 
 def _tiny_qwen3_moe(experts_implementation):
+    # transformers is optional here: the tests that reach this importorskip it.
     from transformers import Qwen3MoeConfig, Qwen3MoeForCausalLM
 
     # Every input width a multiple of INT4's 128-wide blocks: the KV-cache search after a weight
@@ -1235,10 +1239,9 @@ def _tiny_qwen3_moe(experts_implementation):
 def _sharded_like_the_expert_parallel_load(model, size):
     """Shard the experts over every rank as transformers' expert-parallel load does from 5.16, with
     the torch_a2a styles the load swaps in, and seed each module's groups as the load does."""
-    from torch.distributed.device_mesh import init_device_mesh
+    # transformers is optional here, and model_load_utils imports it.
     from transformers.distributed.tensor_parallel import apply_tensor_parallelism
 
-    from modelopt.torch.utils.distributed import set_distribution_plan
     from modelopt.torch.utils.plugins.model_load_utils import _seed_parallel_states
 
     mesh = init_device_mesh("cpu", (size,))
@@ -1261,7 +1264,7 @@ def _sharded_like_the_expert_parallel_load(model, size):
 
 
 def _test_expert_parallel_auto_quantize(rank, size, methods):
-    from modelopt.torch.utils.moe import register_torch_a2a
+    # model_load_utils imports transformers, which is optional here.
     from modelopt.torch.utils.plugins.model_load_utils import _seed_parallel_states
 
     register_torch_a2a()
