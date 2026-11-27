@@ -26,7 +26,12 @@ import torch
 from torch.utils._pytree import tree_map
 
 from modelopt.torch.quantization.nn import QuantModule, TensorQuantizer
-from modelopt.torch.quantization.repair import _iq_quantizer, _router_paths, _storage_span
+from modelopt.torch.quantization.repair import (
+    _iq_quantizer,
+    _router_paths,
+    _storage_spans,
+    _validate_storage_ranges,
+)
 
 _MSE_CHUNK_ELEMENTS = {"cpu": 1 << 18, "cuda": 1 << 24}
 
@@ -80,10 +85,10 @@ def _ownership_tensors(module, backings):
     seen = set()
     for owner in module.modules():
         for name, tensor in chain(owner._parameters.items(), owner._buffers.items()):
-            if tensor is None or id(tensor) in seen:
-                continue
-            seen.add(id(tensor))
-            yield backings.get((owner, name), tensor) if tensor.is_meta else tensor
+            for value in (tensor, backings.get((owner, name))):
+                if value is not None and id(value) not in seen:
+                    seen.add(id(value))
+                    yield value
 
 
 def validate_unit_ownership(student, teacher, units):
@@ -102,22 +107,34 @@ def validate_unit_ownership(student, teacher, units):
         for b in paths[:i]
     ):
         raise ValueError("Bypass boundaries overlap; select disjoint owning modules")
-    backings = {}
+    backings, slots = {}, {}
     for root in (student, teacher):
-        if any(t.is_meta for t in chain(root.parameters(), root.buffers())) and any(
-            hasattr(owner, "_hf_hook") for owner in root.modules()
-        ):
-            # Ancestor preload hooks may own the backing for a selected descendant.
+        hooks = [getattr(owner, "_hf_hook", None) for owner in root.modules()]
+        while hooks:
+            hook = hooks.pop()
+            hooks.extend(getattr(hook, "hooks", ()))
+            if getattr(hook, "weights_map", None) is None or not (
+                getattr(hook, "offload", False) or hasattr(hook, "original_devices")
+            ):
+                continue
+            # Optional Accelerate backings remain owned while native hooks are suspended.
             from modelopt.torch.quantization.plugins.accelerate import _offloaded_tensor_backings
 
-            backings.update(_offloaded_tensor_backings(root))
-    _validate_student_owners(student, paths, backings)
+            retained, publications = _offloaded_tensor_backings(root)
+            backings.update(retained)
+            slots.update(publications)
+            break
+    _validate_student_owners(student, paths, backings, slots)
     teacher_storage = {}
     for tensor in _ownership_tensors(teacher, backings):
-        span = _storage_span(tensor)
-        if span is not None:
-            key, start, stop = span
+        for key, start, stop in _storage_spans(tensor):
             teacher_storage.setdefault(key, []).append((start, stop))
+    teacher_slots = {
+        slot
+        for owner in teacher.modules()
+        for name in (*owner._parameters, *owner._buffers)
+        for slot in slots.get((owner, name), ())
+    }
     owned, teacher_owners = set(), set()
     for unit in units:
         try:
@@ -129,19 +146,23 @@ def validate_unit_ownership(student, teacher, units):
             if id(tensor) in teacher_owners:
                 raise ValueError("Teacher Bypass boundaries share ownership")
             teacher_owners.add(id(tensor))
+        if any(
+            teacher_slots.intersection(slots.get((owner, name), ()))
+            for owner in module.modules()
+            for name in (*owner._parameters, *owner._buffers)
+        ):
+            raise ValueError("Student Bypass state shares a teacher publication slot")
         for tensor in _ownership_tensors(module, backings):
             if id(tensor) in owned:
                 raise ValueError("Student Bypass boundaries share ownership")
             owned.add(id(tensor))
-            span = _storage_span(tensor)
-            if span is not None:
-                key, start, stop = span
+            for key, start, stop in _storage_spans(tensor):
                 if any(start < end and begin < stop for begin, end in teacher_storage.get(key, ())):
                     raise ValueError("Student Bypass state aliases teacher storage")
 
 
-def _validate_student_owners(student, paths, backings):
-    modules, tensors, storage = {}, {}, {}
+def _validate_student_owners(student, paths, backings, slots):
+    modules, tensors, storage, publications = {}, {}, {}, {}
     for path, module in student.named_modules(remove_duplicate=False):
         selected = any(not root or path == root or path.startswith(root + ".") for root in paths)
         if isinstance(module, TensorQuantizer):
@@ -152,24 +173,35 @@ def _validate_student_owners(student, paths, backings):
         for name, tensor in chain(module._parameters.items(), module._buffers.items()):
             if tensor is None:
                 continue
-            if tensor.is_meta:
-                tensor = backings.get((module, name), tensor)
-            previous = tensors.get(id(tensor))
-            if previous is not None and (selected or previous):
-                raise ValueError("Selected Bypass state shares a tensor owner")
-            tensors[id(tensor)] = selected
-            span = _storage_span(tensor)
-            if span is not None:
-                key, start, stop = span
-                storage.setdefault(key, []).append((start, stop, selected))
-    for spans in storage.values():
-        any_end = selected_end = -1
-        for start, stop, selected in sorted(spans):
-            if start < (any_end if selected else selected_end):
-                raise ValueError("Selected Bypass state overlaps another student's storage")
-            any_end = max(any_end, stop)
-            if selected:
-                selected_end = max(selected_end, stop)
+            for slot in slots.get((module, name), ()):
+                previous = publications.get(slot)
+                if previous is not None and (selected or previous):
+                    raise ValueError("Selected Bypass state shares an offload publication slot")
+                publications[slot] = selected
+            local = {}
+            representations = {
+                id(value): value
+                for value in (tensor, backings.get((module, name)))
+                if value is not None
+            }
+            for identity, value in representations.items():
+                previous = tensors.get(identity)
+                if previous is not None and (selected or previous):
+                    raise ValueError("Selected Bypass state shares a tensor owner")
+                tensors[identity] = selected
+                for key, start, stop in _storage_spans(value):
+                    local.setdefault(key, []).append((start, stop))
+            for key, spans in local.items():
+                merged = []
+                for start, stop in sorted(spans):
+                    if merged and start <= merged[-1][1]:
+                        merged[-1] = (merged[-1][0], max(stop, merged[-1][1]))
+                    else:
+                        merged.append((start, stop))
+                storage.setdefault(key, []).extend(
+                    (start, stop, selected) for start, stop in merged
+                )
+    _validate_storage_ranges(storage)
 
 
 def _valid_token_mask(batch):

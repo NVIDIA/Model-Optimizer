@@ -23,6 +23,7 @@ import subprocess
 import sys
 import time
 from collections import OrderedDict
+from contextlib import ExitStack
 
 import numpy as np
 import pytest
@@ -594,3 +595,110 @@ def test_bypass_cuda_mse_bounds_scratch_and_preserves_masked_vjp(monkeypatch, ca
         }
     with capsys.disabled():
         print("Bypass CUDA MSE metrics: " + json.dumps(metrics, sort_keys=True), flush=True)
+
+
+@pytest.mark.parametrize("shared", [False, True])
+def test_bypass_checks_retained_backings_inside_resident_offload_windows(shared):
+    accelerate = pytest.importorskip("accelerate")
+    student, teacher, batches = _problem()
+    student_state = {
+        name: value.double() if value.is_floating_point() else value.clone()
+        for name, value in student.state_dict().items()
+    }
+    teacher_state = {
+        name: value.double() if value.is_floating_point() else value.clone()
+        for name, value in teacher.state_dict().items()
+    }
+    if shared:
+        teacher_state["mlp.weight"] = student_state["mlp.weight"].view_as(
+            student_state["mlp.weight"]
+        )
+    for model, state in ((student, student_state), (teacher, teacher_state)):
+        accelerate.cpu_offload(
+            model, execution_device="cpu", offload_buffers=True, state_dict=state
+        )
+    with ExitStack() as stack:
+        for model in (student, teacher):
+            stack.enter_context(
+                mtq.utils.enable_weight_access_and_writeback(model, model, writeback=False)
+            )
+        assert not student.mlp._hf_hook.offload and not teacher.mlp._hf_hook.offload
+        assert (
+            student.mlp.weight.untyped_storage().data_ptr()
+            != teacher.mlp.weight.untyped_storage().data_ptr()
+        )
+        parameters = list(student.parameters())
+        if shared:
+            with pytest.raises(ValueError):
+                mtd.bypass(student, teacher, batches, {"num_steps": 0, "modules": ["mlp"]})
+        else:
+            assert (
+                mtd.bypass(student, teacher, batches, {"num_steps": 0, "modules": ["mlp"]})
+                is student
+            )
+        assert all(
+            actual is original
+            for actual, original in zip(student.parameters(), parameters, strict=True)
+        )
+        assert not any(hasattr(module, "_local_repair_state") for module in student.modules())
+
+
+def test_public_bypass_recovers_owner_undo_before_restoring_caller_state(monkeypatch):
+    accelerate = pytest.importorskip("accelerate")
+    student, teacher, batches = _problem()
+    teacher.head.weight.requires_grad_(False)
+    modes = {module: module.training for model in (student, teacher) for module in model.modules()}
+    teacher_flags = {
+        name: parameter.requires_grad for name, parameter in teacher.named_parameters()
+    }
+    before = copy.deepcopy(student.state_dict())
+    masters = {
+        name: value.double() if value.is_floating_point() else value.clone()
+        for name, value in before.items()
+    }
+    accelerate.cpu_offload(
+        student, execution_device="cpu", offload_buffers=True, state_dict=masters
+    )
+    publication_error = RuntimeError("deliberate publication failure")
+    publish_armed = undo_armed = True
+    remaining_undo_failures = 2
+
+    copy_tensor = torch.Tensor.copy_
+
+    def fail_owner_copy(tensor, *args, **kwargs):
+        nonlocal undo_armed, remaining_undo_failures
+        if not publish_armed and tensor is masters["mlp.weight"] and remaining_undo_failures:
+            remaining_undo_failures -= 1
+            undo_armed = remaining_undo_failures > 0
+            raise RuntimeError("transient owner recovery failure")
+        return copy_tensor(tensor, *args, **kwargs)
+
+    def fail_publication(module, state_dict, prefix, metadata):
+        nonlocal publish_armed
+        if publish_armed:
+            publish_armed = False
+            raise publication_error
+
+    monkeypatch.setattr(torch.Tensor, "copy_", fail_owner_copy)
+    handle = student.mlp.register_state_dict_post_hook(fail_publication)
+    caught = None
+    try:
+        mtd.bypass(
+            student,
+            teacher,
+            batches,
+            {"num_steps": 1, "global_batch_size": 2, "sequence_length": 3},
+        )
+    except BaseException as exc:
+        caught = exc
+    finally:
+        handle.remove()
+    assert not publish_armed and not undo_armed
+    assert caught is publication_error
+    assert all(module.training == mode for module, mode in modes.items())
+    assert {
+        name: parameter.requires_grad for name, parameter in teacher.named_parameters()
+    } == teacher_flags
+    assert not any(hasattr(module, "_local_repair_state") for module in student.modules())
+    with mtq.utils.enable_weight_access_and_writeback(student, student, writeback=False):
+        torch.testing.assert_close(student.state_dict(), before, rtol=0, atol=0)

@@ -155,6 +155,7 @@ class _BypassRunner:
             for module in self.teacher.modules()
             for name, parameter in module.named_parameters(recurse=False, remove_duplicate=False)
         ]
+        error = None
         try:
             self.student.eval()
             self.teacher.eval().requires_grad_(False)
@@ -185,10 +186,27 @@ class _BypassRunner:
                     {n: (e / c).item() for n, (e, c) in statistics.items()},
                 )
             return self.student
+        except BaseException as exc:
+            error = exc
+            raise
         finally:
-            for policy in self.policies.values():
-                policy.close()
+            cleanup_error = None
+            for name, policy in self.policies.items():
+                try:
+                    if policy._pending_rollback is not None:
+                        policy._restore_publication(partial(self._weight_access, name), None)
+                    policy.close()
+                except BaseException as exc:
+                    if cleanup_error is None:
+                        cleanup_error = exc
+                    else:
+                        cleanup_error.add_note(f"Another Bypass policy cleanup failed: {exc!r}")
             for module, name, flag in teacher_flags:
                 module.get_parameter(name).requires_grad_(flag)
             for module, mode in modes.items():
                 module.training = mode
+            if cleanup_error is not None:
+                if error is not None:
+                    error.add_note(f"Bypass cleanup also failed: {cleanup_error!r}")
+                else:
+                    raise cleanup_error
