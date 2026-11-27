@@ -908,6 +908,7 @@ def remove_input_dq_and_output_q(
     ]
     q_indices = []
     dq_indices = []
+    removed_dq_outputs = set()
 
     # Remove DQ nodes in the input of custom ops
     for node_idx, node in dq_nodes:
@@ -959,6 +960,7 @@ def remove_input_dq_and_output_q(
 
                 # Track DequantizeLinear node indices for cleanup
                 dq_indices.append(node_idx)
+                removed_dq_outputs.add(node.output[0])
 
             except Exception as e:
                 raise RuntimeError(f"Failed to convert node {node.name}: {e!s}")
@@ -986,9 +988,20 @@ def remove_input_dq_and_output_q(
                 if producer.op_type not in quantizable_custom_ops:
                     continue
 
+                # The DQ was already removed because it feeds a quantized custom op input: connect that
+                # consumer directly to this custom op's output if it's quantized, otherwise keep the Q.
+                if dq_node[0].output[0] in removed_dq_outputs:
+                    out_idx = list(producer.output).index(node.input[0])
+                    if out_idx not in quantizable_custom_ops[producer.op_type]["out"]:
+                        continue
+                    for consumer in graph.node:
+                        for cons_idx, cons_inp in enumerate(consumer.input):
+                            if cons_inp == out_name:
+                                consumer.input[cons_idx] = node.input[0]
+
                 # Rewire graph to connect the output of custom op to the input of DQ (skip Q)
                 # If the output tensor is meant to be quantized, delete Q. Otherwise, delete both Q/DQ.
-                if quantizable_custom_ops[producer.op_type]["out"]:
+                elif quantizable_custom_ops[producer.op_type]["out"]:
                     dq_node[0].input[0] = producer.output[0]
                 else:
                     dq_node_next = tensor_consumers.get(dq_node[0].output[0], None)

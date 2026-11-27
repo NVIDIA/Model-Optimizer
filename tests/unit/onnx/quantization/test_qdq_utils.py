@@ -40,6 +40,7 @@ from modelopt.onnx.quantization.qdq_utils import (
     qdq_to_dq,
     quantize_weights_to_int4,
     quantize_weights_to_mxfp8,
+    remove_input_dq_and_output_q,
     replace_zero_scale_with_smallest_nonzero,
 )
 from modelopt.onnx.quantization.quant_utils import pack_float32_to_4bit_cpp_based
@@ -1580,6 +1581,110 @@ class TestLegacyEdgeLLMShims:
         assert "linear.weight_f8_scale" in initializer_names
         assert "linear.weight_f8_scale_f32_scale" in initializer_names
         assert "linear.weight" not in initializer_names
+
+
+def _build_custom_op_chain_model(with_relu: bool):
+    """Build ``x -> QDQ -> PluginA -> QDQ -> [Relu -> QDQ ->] PluginB -> QDQ -> Identity``."""
+    initializers, nodes = [], []
+
+    def qdq(tensor):
+        scale, zp = f"{tensor}_scale", f"{tensor}_zp"
+        initializers.append(numpy_helper.from_array(np.array(0.1, np.float32), scale))
+        initializers.append(numpy_helper.from_array(np.array(0, np.int8), zp))
+        nodes.append(
+            helper.make_node("QuantizeLinear", [tensor, scale, zp], [f"{tensor}_q"], f"{tensor}_Q")
+        )
+        nodes.append(
+            helper.make_node(
+                "DequantizeLinear", [f"{tensor}_q", scale, zp], [f"{tensor}_dq"], f"{tensor}_DQ"
+            )
+        )
+        return f"{tensor}_dq"
+
+    nodes.append(helper.make_node("PluginA", [qdq("x")], ["a"], "plugin_a", domain="custom"))
+    plugin_b_input = qdq("a")
+    if with_relu:
+        nodes.append(helper.make_node("Relu", [plugin_b_input], ["r"], "relu"))
+        plugin_b_input = qdq("r")
+    nodes.append(helper.make_node("PluginB", [plugin_b_input], ["b"], "plugin_b", domain="custom"))
+    nodes.append(helper.make_node("Identity", [qdq("b")], ["y"], "out"))
+    graph = helper.make_graph(
+        nodes,
+        "chain",
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, [1, 8])],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, [1, 8])],
+        initializers,
+    )
+    return helper.make_model(
+        graph, opset_imports=[helper.make_opsetid("", 19), helper.make_opsetid("custom", 1)]
+    )
+
+
+@pytest.mark.parametrize("with_relu", [False, True])
+def test_remove_input_dq_and_output_q_custom_op_chain(with_relu):
+    model = _build_custom_op_chain_model(with_relu)
+    custom_ops = {"PluginA": {"inp": [0], "out": [0]}, "PluginB": {"inp": [0], "out": [0]}}
+    out = remove_input_dq_and_output_q(model, custom_ops)
+    onnx.checker.check_model(out)
+
+    nodes = {node.name: node for node in out.graph.node}
+    producers = {o: node for node in out.graph.node for o in node.output}
+    plugin_a, plugin_b = nodes["plugin_a"], nodes["plugin_b"]
+
+    assert producers[plugin_a.input[0]].op_type == "QuantizeLinear"
+    b_producer = producers[plugin_b.input[0]]
+    if with_relu:
+        assert b_producer.op_type == "QuantizeLinear"
+        assert producers[b_producer.input[0]].op_type == "Relu"
+        assert producers[nodes["relu"].input[0]].op_type == "DequantizeLinear"
+    else:
+        assert plugin_b.input[0] == plugin_a.output[0]
+    assert [n.op_type for n in out.graph.node if plugin_b.output[0] in n.input] == [
+        "DequantizeLinear"
+    ]
+
+
+@pytest.mark.parametrize("quantized_out", [[1], [0], []])
+def test_remove_input_dq_and_output_q_multi_output_custom_op_chain(quantized_out):
+    """Only PluginA's second output feeds PluginB; it is wired directly only if that output is quantized."""
+    initializers = [
+        numpy_helper.from_array(np.array(0.1, np.float32), "scale"),
+        numpy_helper.from_array(np.array(0, np.int8), "zp"),
+    ]
+    nodes = [
+        helper.make_node("QuantizeLinear", ["x", "scale", "zp"], ["x_q"], "x_Q"),
+        helper.make_node("DequantizeLinear", ["x_q", "scale", "zp"], ["x_dq"], "x_DQ"),
+        helper.make_node("PluginA", ["x_dq"], ["a0", "a1"], "plugin_a", domain="custom"),
+        helper.make_node("QuantizeLinear", ["a1", "scale", "zp"], ["a1_q"], "a1_Q"),
+        helper.make_node("DequantizeLinear", ["a1_q", "scale", "zp"], ["a1_dq"], "a1_DQ"),
+        helper.make_node("PluginB", ["a1_dq"], ["y"], "plugin_b", domain="custom"),
+    ]
+    graph = helper.make_graph(
+        nodes,
+        "multi_output_chain",
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, [1, 8])],
+        [
+            helper.make_tensor_value_info("a0", TensorProto.FLOAT, [1, 8]),
+            helper.make_tensor_value_info("y", TensorProto.FLOAT, [1, 8]),
+        ],
+        initializers,
+    )
+    model = helper.make_model(
+        graph, opset_imports=[helper.make_opsetid("", 19), helper.make_opsetid("custom", 1)]
+    )
+    custom_ops = {
+        "PluginA": {"inp": [0], "out": quantized_out},
+        "PluginB": {"inp": [0], "out": []},
+    }
+    out = remove_input_dq_and_output_q(model, custom_ops)
+    onnx.checker.check_model(out)
+
+    plugin_b = next(node for node in out.graph.node if node.name == "plugin_b")
+    if quantized_out == [1]:
+        assert plugin_b.input[0] == "a1"
+    else:
+        assert plugin_b.input[0] == "a1_q"
+        assert any(node.name == "a1_Q" for node in out.graph.node)
 
 
 @pytest.mark.parametrize("blocked_axis", [0, 1])
