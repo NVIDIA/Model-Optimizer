@@ -188,6 +188,14 @@ class DeepseekV41Config(PreTrainedConfig):
                 kv_owner = layer
             if layer in self.index_source_layer_ids:
                 index_owner = layer
+                source = self.candidate_source_layer_id
+                if 0 <= source < layer and (
+                    source not in self.index_source_layer_ids
+                    or self.compress_ratios[source] != ratio
+                ):
+                    raise ValueError(
+                        "Candidate source and consuming indexers require the same compression ratio."
+                    )
             if ratio and (
                 kv_owner is None
                 or index_owner is None

@@ -29,7 +29,7 @@ register(
             batch_packed_documents=False,
         ),
         moe_spec=MoESpec(
-            block_names=("V41MoE", "DeepseekV41MoE"),
+            block_names=("DeepseekV41MoE",),
             expert_linear_names=("w1", "w2", "w3"),
             gate_up_pair=("w1", "w3"),
         ),

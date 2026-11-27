@@ -32,7 +32,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from transformers import GenerationMixin, PreTrainedModel
-from transformers.cache_utils import Cache
+from transformers.cache_utils import Cache, KVSharingDict
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 
 from ._hf_attention import V41Attention
@@ -102,13 +102,10 @@ class DeepseekV41RecomputeCache(Cache):
             if value is not None:
                 setattr(self, name, value.repeat_interleave(repeats, dim=0))
 
-    def crop(self, tokens_to_remove):
-        """Remove the requested negative count of trailing prefix positions."""
-        if tokens_to_remove > 0:
-            raise ValueError("Use a negative integer to remove tokens from the prefix cache.")
-        if tokens_to_remove == 0:
-            return
-        length = max(0, self.get_seq_length() + tokens_to_remove)
+    def crop(self, max_length):
+        """Crop to an absolute length, or remove a negative count of trailing tokens."""
+        length = max_length if max_length >= 0 else max(0, self.get_seq_length() + max_length)
+        length = min(length, self.get_seq_length())
         for name in ("input_ids", "inputs_embeds", "position_ids", "attention_mask"):
             value = getattr(self, name)
             if value is not None:
@@ -215,6 +212,25 @@ class DeepseekV41PreTrainedModel(PreTrainedModel):
             raise ValueError("V4.1 supports eager and its exact grouped_mm experts implementation.")
         return implementation
 
+    @classmethod
+    def from_pretrained(cls, *args, **kwargs):
+        """Load native weights; use ModelOpt placement for expert parallelism."""
+        distributed = kwargs.get("distributed_config")
+        if distributed is None:
+            config = kwargs.get("config")
+            distributed = getattr(config, "distributed_config", None)
+        ep_size = (
+            distributed.get("ep_size")
+            if isinstance(distributed, Mapping)
+            else getattr(distributed, "ep_size", None)
+        )
+        if ep_size is not None and ep_size > 1:
+            raise ValueError(
+                "Native HF EP loading is unsupported for V4.1; use ModelOpt placement "
+                "to install the model-owned pre-down dispatcher."
+            )
+        return super().from_pretrained(*args, **kwargs)
+
     def _init_weights(self, module):
         std = self.config.initializer_range
         if isinstance(module, (nn.Linear, nn.Embedding, V41GroupedProjection)):
@@ -276,11 +292,12 @@ class DeepseekV41Model(DeepseekV41PreTrainedModel):
         **kwargs,
     ):
         """Run the complete causal text backbone, optionally replaying a cached prefix."""
+        # Positions are reconstructed from the replay prefix, so cache_position is redundant.
         if kwargs:
             unsupported = {
                 key
                 for key, value in kwargs.items()
-                if value is not None and key not in ("cache_position", "num_items_in_batch")
+                if value is not None and key != "cache_position"
             }
             if unsupported:
                 raise ValueError(f"Unsupported V4.1 text inputs: {sorted(unsupported)}")
@@ -322,6 +339,7 @@ class DeepseekV41Model(DeepseekV41PreTrainedModel):
             else:
                 inputs_embeds = torch.cat((cache.inputs_embeds, inputs_embeds), 1)
             position_ids = torch.cat((cache.position_ids, position_ids), 1)
+        caller_mask = attention_mask
         if attention_mask is None:
             attention_mask = torch.ones(batch, new_length, dtype=torch.bool, device=current.device)
             if prefix_length:
@@ -345,7 +363,7 @@ class DeepseekV41Model(DeepseekV41PreTrainedModel):
             self.config.hc_mult,
         ).float()
         collected = () if output_hidden_states else None
-        shared = {}
+        shared = KVSharingDict()
         for layer in self.layers:
             if output_hidden_states:
                 collected += (hyper_pre(hidden_states, pre_mix)[:, prefix_length:],)
@@ -362,10 +380,17 @@ class DeepseekV41Model(DeepseekV41PreTrainedModel):
             collected += (hidden_states,)
         if use_cache:
             cache = cache if cache is not None else DeepseekV41RecomputeCache()
-            cache.input_ids = None if input_ids is None else input_ids.detach()
-            cache.inputs_embeds = None if inputs_embeds is None else inputs_embeds.detach()
-            cache.position_ids = position_ids.detach()
-            cache.attention_mask = attention_mask.detach()
+            # Initial inputs belong to the caller; concatenated continuation storage is ours.
+            for name, value in (
+                ("input_ids", input_ids),
+                ("inputs_embeds", inputs_embeds),
+                ("position_ids", position_ids),
+                ("attention_mask", attention_mask),
+            ):
+                saved = None if value is None else value.detach()
+                if saved is not None and (not prefix_length or value is caller_mask):
+                    saved = saved.clone()
+                setattr(cache, name, saved)
         else:
             cache = None
         result = BaseModelOutputWithPast(
@@ -428,6 +453,9 @@ class DeepseekV41ForCausalLM(DeepseekV41PreTrainedModel, GenerationMixin):
         **kwargs,
     ):
         """Return causal text logits and optional shifted cross-entropy loss."""
+        if isinstance(logits_to_keep, int) and logits_to_keep < 0:
+            raise ValueError("logits_to_keep must be nonnegative.")
+        num_items_in_batch = kwargs.pop("num_items_in_batch", None)
         outputs = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -443,8 +471,6 @@ class DeepseekV41ForCausalLM(DeepseekV41PreTrainedModel, GenerationMixin):
         selection = (
             slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
         )
-        if isinstance(logits_to_keep, int) and logits_to_keep < 0:
-            raise ValueError("logits_to_keep must be nonnegative.")
         hidden = outputs.last_hidden_state
         loss = None
         if labels is not None:
@@ -453,7 +479,10 @@ class DeepseekV41ForCausalLM(DeepseekV41PreTrainedModel, GenerationMixin):
                 full_logits[:, :-1].reshape(-1, self.config.vocab_size),
                 labels[:, 1:].reshape(-1),
                 ignore_index=-100,
+                reduction="mean" if num_items_in_batch is None else "sum",
             )
+            if num_items_in_batch is not None:
+                loss = loss / num_items_in_batch
             logits = full_logits[:, selection]
         else:
             logits = self.lm_head(hidden[:, selection]).float()

@@ -82,14 +82,14 @@ class DeepseekV41MoEConfig:
 
 def _fp8_inputs(value):
     """Round checkpoint-quantized GEMM inputs with the published MXFP8 scale rule."""
-    if value.shape[-1] % 32:
-        raise ValueError("Checkpoint FP8 activation widths must divide into groups of 32.")
-    grouped = value.float().unflatten(-1, (-1, 32))
+    width = value.shape[-1]
+    # Zero padding preserves each partial MX block's amax and leaves only real features in GEMMs.
+    grouped = F.pad(value.float(), (0, -width % 32)).unflatten(-1, (-1, 32))
     amax = grouped.abs().amax(-1, keepdim=True).clamp_min(1e-4)
     scale = torch.exp2(torch.ceil(torch.log2(amax / 448.0)))
     rounded = (grouped / scale).clamp(-448, 448).to(torch.float8_e4m3fn).float() * scale
     # Quantized values match inference; STE leaves repair gradients through their inputs.
-    return (grouped + (rounded - grouped).detach()).flatten(-2).to(value.dtype)
+    return (grouped + (rounded - grouped).detach()).flatten(-2)[..., :width].to(value.dtype)
 
 
 class _V41Router(nn.Module):

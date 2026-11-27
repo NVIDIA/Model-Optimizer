@@ -26,6 +26,12 @@ from torch.distributed.device_mesh import init_device_mesh
 
 pytest.importorskip("transformers", minversion="5.23")
 
+# This port uses the dedicated 5.23 lane; admit it before importing versioned HF APIs.
+from accelerate.utils import send_to_device
+from tokenizers import Tokenizer, models
+from transformers import PreTrainedTokenizerFast
+from transformers.distributed.configuration_utils import DistributedConfig
+
 expert_parallel = pytest.importorskip("transformers.distributed.expert_parallel")
 
 
@@ -223,6 +229,11 @@ def test_v41_fp8_reconstruction_preserves_partial_scale_blocks():
     expected[32:, 32:] *= 8
     restored = DeepseekV41MoE.from_checkpoint(config, source, dtype=torch.float32)
     torch.testing.assert_close(restored.shared_experts.w1.weight, expected, rtol=0, atol=0)
+    inputs = torch.randn(2, 35, requires_grad=True)
+    actual = restored(inputs)
+    assert torch.isfinite(actual).all()
+    actual.sum().backward()
+    assert torch.isfinite(inputs.grad).all()
 
 
 @pytest.mark.parametrize("ratio", [0, 1, 2])
@@ -270,9 +281,14 @@ def test_v41_hf_two_layer_text_is_causal_differentiable_and_cache_equivalent(rat
     for cached, full in zip(resumed.hidden_states, output.hidden_states, strict=True):
         torch.testing.assert_close(cached, full[:, 4:], rtol=0, atol=0)
     torch.testing.assert_close(resumed.logits, output.logits[:, 4:], rtol=1e-6, atol=1e-7)
-    with pytest.raises(ValueError, match="negative"):
-        resumed.past_key_values.crop(1)
+    resumed.past_key_values.crop(9)
     assert resumed.past_key_values.get_seq_length() == 6
+    resumed.past_key_values.crop(1)
+    assert resumed.past_key_values.get_seq_length() == 1
+    resumed.past_key_values.crop(0)
+    assert resumed.past_key_values.get_seq_length() == 0
+    normalized = model(ids, labels=ids, num_items_in_batch=10).loss
+    torch.testing.assert_close(normalized, output.loss.detach() * 0.5)
     torch.testing.assert_close(model(ids, logits_to_keep=2).logits, output.logits[:, -2:])
     assert model.config.base_model_ep_plan["layers.*.ffn.experts"] == "ep_dispatch_experts"
     if ratio == 2:
@@ -291,7 +307,19 @@ def test_v41_hf_cache_retains_padding_when_continuation_omits_mask(ratio):
     ids = torch.tensor([[3, 7, 11, 5, 8, 4]])
     mask = torch.tensor([[False, True, True, True, True, True]])
     expected = model(ids, attention_mask=mask, output_hidden_states=True)
-    prefill = model(ids[:, :3], attention_mask=mask[:, :3], use_cache=True)
+    source_ids, source_mask = ids[:, :3].clone(), mask[:, :3].clone()
+    source_positions = torch.arange(3).unsqueeze(0)
+    prefill = model(
+        source_ids, attention_mask=source_mask, position_ids=source_positions, use_cache=True
+    )
+    source_ids.fill_(9)
+    source_mask.fill_(False)
+    source_positions.fill_(99)
+    with pytest.raises(ValueError, match="nonnegative"):
+        model(
+            ids[:, 3:], past_key_values=prefill.past_key_values, use_cache=True, logits_to_keep=-1
+        )
+    assert prefill.past_key_values.get_seq_length() == 3
     actual = model(
         ids[:, 3:],
         past_key_values=prefill.past_key_values,
@@ -303,6 +331,13 @@ def test_v41_hf_cache_retains_padding_when_continuation_omits_mask(ratio):
         actual.hidden_states[-1], expected.hidden_states[-1][:, 3:], rtol=0, atol=0
     )
     torch.testing.assert_close(actual.logits, expected.logits[:, 3:], rtol=1e-6, atol=1e-7)
+    actual.past_key_values.crop(3)
+    full_mask = mask.clone()
+    repeated = model(
+        ids[:, 3:], past_key_values=actual.past_key_values, attention_mask=full_mask, use_cache=True
+    )
+    full_mask.zero_()
+    torch.testing.assert_close(repeated.past_key_values.attention_mask, mask)
 
 
 def test_v41_hf_fused_moe_preserves_published_router_and_predown_weighting():
@@ -327,10 +362,15 @@ def test_v41_hf_fused_moe_preserves_published_router_and_predown_weighting():
     torch.testing.assert_close(x.grad, y.grad, atol=1e-7, rtol=1e-5)
 
 
-@pytest.mark.parametrize("quantized", [False, True])
-def test_v41_hf_published_checkpoint_fusion_and_native_roundtrip(tmp_path, quantized):
+@pytest.mark.parametrize(
+    ("quantized", "tied_keys"),
+    [(False, None), (True, None), (False, "both"), (False, "embed"), (False, "head")],
+)
+def test_v41_hf_published_checkpoint_fusion_and_native_roundtrip(tmp_path, quantized, tied_keys):
     torch.manual_seed(17)
-    model = DeepseekV41ForCausalLM(_tiny_hf_config(2)).eval()
+    model = DeepseekV41ForCausalLM(
+        _tiny_hf_config(2, tie_word_embeddings=tied_keys is not None)
+    ).eval()
     published = {}
     for name, tensor in model.state_dict().items():
         if name == "model.engram_hash.token_map":
@@ -346,6 +386,19 @@ def test_v41_hf_published_checkpoint_fusion_and_native_roundtrip(tmp_path, quant
                 published[prefix + str(index) + ".w2.weight"] = tensor[index].clone()
         else:
             published[name.replace("lm_head.weight", "model.head.weight")] = tensor.clone()
+    if tied_keys is not None:
+        if tied_keys == "both":
+            weight = published["model.head.weight"]
+            invalid = {
+                **published,
+                "model.head.weight": torch.nextafter(weight, torch.full_like(weight, torch.inf)),
+            }
+            with pytest.raises(ValueError, match="Tied"):
+                DeepseekV41ForCausalLM.from_checkpoint(model.config, invalid, dtype=torch.bfloat16)
+        elif tied_keys == "embed":
+            del published["model.head.weight"]
+        else:
+            del published["model.embed.weight"]
     if quantized:
         for projection in ("w1", "w3"):
             key = f"model.layers.0.ffn.experts.0.{projection}.weight"
@@ -359,6 +412,8 @@ def test_v41_hf_published_checkpoint_fusion_and_native_roundtrip(tmp_path, quant
     restored = DeepseekV41ForCausalLM.from_checkpoint(
         model.config, published, dtype=torch.float32
     ).eval()
+    if tied_keys is not None:
+        assert restored.lm_head.weight is restored.model.embed.weight
     ids = torch.tensor([[3, 5, 7, 11]])
     torch.testing.assert_close(restored(ids).logits, model(ids).logits, rtol=0, atol=0)
     restored.save_pretrained(tmp_path)
@@ -438,8 +493,17 @@ def _v41_weighted_dispatch_job(rank, world_size, *, prepare_only=False):
                 inputs = hidden.detach()[rows].clone().requires_grad_()
                 routing = weights.detach()[rows].clone().requires_grad_()
                 actual = local(inputs, indices[rows], routing)
-                assert actual.dtype == torch.float32
-                torch.testing.assert_close(actual, expected.detach()[rows], rtol=1e-5, atol=2e-6)
+                error = None
+                try:
+                    assert actual.dtype == torch.float32
+                    torch.testing.assert_close(
+                        actual, expected.detach()[rows], rtol=1e-5, atol=2e-6
+                    )
+                except AssertionError as exc:
+                    error = str(exc)
+                errors = [None] * world_size
+                torch.distributed.all_gather_object(errors, error)
+                assert not any(errors), errors
                 (actual * upstream[rows]).sum().backward()
                 grad_rtol, grad_atol = (1e-5, 2e-6) if dtype == torch.float32 else (0.03, 0.004)
                 # Separate BF16 gate/up projections round their input gradients before adding;
@@ -474,3 +538,68 @@ def v41_dispatch_workers(cpu_dist_workers):
 
 def test_v41_native_ep_dispatch_preserves_predown_weights_and_fp32_output(v41_dispatch_workers):
     v41_dispatch_workers.run(_v41_weighted_dispatch_job)
+
+
+@pytest.mark.parametrize("ratio", [1, 2])
+def test_v41_compressed_attention_is_independent_of_left_padding(ratio):
+    torch.manual_seed(61)
+    model = DeepseekV41ForCausalLM(_tiny_hf_config(ratio)).eval()
+    ids = torch.tensor([[3, 7, 11, 5, 8, 4]])
+    expected = model(ids).logits
+    # Accelerate moves arguments at each decoder boundary, including shared KV ownership.
+    for layer in model.model.layers:
+        layer.register_forward_pre_hook(lambda module, args: send_to_device(args, "cpu"))
+    padded = F.pad(ids, (1, 0))
+    mask = padded != 0
+    positions = (mask.long().cumsum(-1) - 1).clamp_min(0)
+    actual = model(padded, attention_mask=mask, position_ids=positions).logits[:, 1:]
+    torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)
+
+
+def test_v41_rejects_incompatible_candidate_owners_and_native_ep_loading(tmp_path):
+    with pytest.raises(ValueError, match="Candidate"):
+        _tiny_hf_config(
+            2, compress_ratios=[2, 1], kv_source_layer_ids=[0, 1], index_source_layer_ids=[0, 1]
+        )
+    with pytest.raises(ValueError, match="ModelOpt placement"):
+        DeepseekV41ForCausalLM.from_pretrained(
+            tmp_path, distributed_config=DistributedConfig(ep_size=2, tp_size=2)
+        )
+
+
+def test_v41_engram_tokenizer_preserves_configured_exact_map():
+    tokenizer = PreTrainedTokenizerFast(
+        tokenizer_object=Tokenizer(models.WordLevel({str(i): i for i in range(31)}, unk_token="0"))
+    )
+    config = _tiny_hf_config(0)
+    model = DeepseekV41ForCausalLM(config)
+    model.set_engram_tokenizer(tokenizer)
+    expected = model.model.engram_hash.token_map.clone()
+    config.engram_token_map = list(reversed(range(31)))
+    with pytest.raises(ValueError, match="exact Engram"):
+        model.set_engram_tokenizer(tokenizer)
+    torch.testing.assert_close(model.model.engram_hash.token_map, expected)
+
+
+def test_v41_indexer_never_reintroduces_excluded_candidates():
+    model = DeepseekV41ForCausalLM(
+        _tiny_hf_config(
+            1,
+            index_source_layer_ids=[0, 1],
+            index_topk=6,
+            candidate_block_size=1,
+        )
+    ).eval()
+    observed = []
+
+    def check_selected(module, args, output):
+        state = args[2]
+        selected = state["topk"][0] - args[0].shape[1]
+        allowed = state["candidates"][0].gather(-1, selected.clamp_min(0))
+        assert ((selected < 0) | allowed).all()
+        assert (selected[:, -1] >= 0).sum() == 1
+        observed.append(True)
+
+    model.model.layers[1].attn.register_forward_hook(check_selected)
+    model(torch.tensor([[3, 7, 11, 5, 8, 4]]))
+    assert observed
