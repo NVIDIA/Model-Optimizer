@@ -183,7 +183,7 @@ def get_node_names_from_bytes(model_bytes: bytes) -> list[str]:
     """This function returns all node names from the given onnx model in bytes.
 
     Args:
-        model: onnx model in bytes.
+        model_bytes: onnx model in bytes.
 
     Returns:
         List of node names of the model.

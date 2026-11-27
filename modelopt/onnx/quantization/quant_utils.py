@@ -166,7 +166,6 @@ def update_block_size(
     """Update the block size for quantization.
 
     Args:
-        num_bits (int): Number of bits for quantization.
         layer_info (dict[str, dict] | None): Optional dictionary mapping tensor names
             to layer configuration dict.
         name (str | None): Name of the tensor.
