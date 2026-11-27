@@ -301,6 +301,7 @@ def region_pattern_autotuning_workflow(
                     autotuner.pattern_cache.add_pattern_schemes(pattern_schemes)
             autotuner.profiled_patterns.clear()
             autotuner.baseline_latency_ms = None
+            config.default_quant_type = requested_quant_type or autotuner.config.default_quant_type
             autotuner.config = config
             logger.info("Re-profiling checkpoint measurements for transformed models")
     else:

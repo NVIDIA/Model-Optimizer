@@ -119,11 +119,17 @@ def test_cli_and_workflow_inherit_saved_type_when_explicit_state_omits_quant_typ
     assert resumed.config.default_quant_type == "fp8"
 
 
-def test_workflow_transformed_cross_type_resume_remeasures_baseline(monkeypatch, tmp_path):
-    """Calibrated PTQ resumes with model_transform replace baseline timing and adopt quant_type."""
+@pytest.mark.parametrize(
+    ("saved_type", "requested_type", "expected_type"),
+    [("int8", "fp8", "fp8"), ("fp8", None, "fp8")],
+)
+def test_workflow_transformed_resume_remeasures_baseline_and_resolves_type(
+    monkeypatch, tmp_path, saved_type, requested_type, expected_type
+):
+    """Transformed resumes replace baseline timing and honor explicit or inherited quant_type."""
     simple_conv_model = _test_models._create_simple_conv_onnx_model()
-    state_path = tmp_path / "int8_state.yaml"
-    _save_checkpoint(simple_conv_model, state_path, "int8", baseline_ms=0.5)
+    state_path = tmp_path / "saved_state.yaml"
+    _save_checkpoint(simple_conv_model, state_path, saved_type, baseline_ms=0.5)
     measured = iter([1.25, 1.10, 1.05])
     monkeypatch.setattr(workflows, "benchmark_onnx_model", lambda *args, **kwargs: next(measured))
 
@@ -132,11 +138,11 @@ def test_workflow_transformed_cross_type_resume_remeasures_baseline(monkeypatch,
         output_dir=tmp_path / "transformed_out",
         state_file=str(state_path),
         num_schemes_per_region=1,
-        quant_type="fp8",
+        quant_type=requested_type,
         model_transform=lambda m: m,
     )
 
-    assert autotuner.config.default_quant_type == "fp8"
+    assert autotuner.config.default_quant_type == expected_type
     assert autotuner.baseline_latency_ms == pytest.approx(1.25)
 
 
