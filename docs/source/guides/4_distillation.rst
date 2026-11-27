@@ -2,6 +2,8 @@
 Distillation
 ============
 
+For native IQ scale repair of an existing PTQ model, see :ref:`IQ Bypass <iq-bypass>`.
+
 Introduction
 ============
 

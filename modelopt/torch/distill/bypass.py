@@ -103,8 +103,9 @@ def bypass(
     before quantizing the student. These patterns exclude frozen routing gates.
 
     Returns:
-        The supplied student, finalized for ordinary ModelOpt save/export. Temporary
-        fields and hooks are removed unless owner restoration fails; caller modes
+        The supplied student, finalized in its original placement. Unsharded students
+        support ordinary ModelOpt save/export. Temporary fields and hooks are removed
+        unless owner restoration fails; caller modes
         and teacher gradient flags are restored on every exit.
     """
     config = config if isinstance(config, BypassConfig) else BypassConfig(**(config or {}))
