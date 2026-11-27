@@ -53,7 +53,7 @@ class _QuantLinear(QuantLinearConvBase):
             and not kwargs
             and not getattr(quantizer, "rotate_back_is_enabled", False)
         ):
-            # Keep native helper lookup late-bound for repair_formats instrumentation.
+            # Import lazily: repair_formats imports nn.modules, including this module.
             from ...repair_formats import _packed_projection_qualified, repair_linear
 
             if _packed_projection_qualified(input, state.name, state.weight_shape):

@@ -35,7 +35,7 @@ import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.ggml import IQ_FORMAT_REGISTRY
 from modelopt.torch.quantization.ggml.common import pin_packed_weight, pinned_packed_weight
 from modelopt.torch.quantization.repair import IQRepairPolicy, plan_iq_repair
-from modelopt.torch.quantization.repair_formats import _packed_projection_qualified, _ReplayScales
+from modelopt.torch.quantization.repair_formats import _packed_projection_qualified
 from modelopt.torch.quantization.utils import enable_weight_access_and_writeback
 
 
