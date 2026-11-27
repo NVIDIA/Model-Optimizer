@@ -146,12 +146,30 @@ def test_teacher_replay_caches_model_scans_without_changing_targets():
         **batch,
         "attention_mask": torch.ones(1, 1, 4, 4, dtype=torch.bool).tril_(),
     }
-    adapter.validate_batch(packed_4d, mtd.BypassConfig(sequence_length=4))
-    current = []
-    adapter.teacher_microbatch(
-        teacher, units, packed_4d, lambda _unit, record: current.append(record.target)
-    )
-    torch.testing.assert_close(torch.cat(current), targets[0], rtol=0, atol=0)
+    for item in (
+        packed_4d,
+        {**packed_4d, "position_ids": torch.arange(4).expand(3, 1, -1)},
+    ):
+        adapter.validate_batch(item, mtd.BypassConfig(sequence_length=4))
+        current = []
+        for microbatch in adapter.microbatches(item, 1):
+            adapter.teacher_microbatch(
+                teacher, units, microbatch, lambda _unit, record: current.append(record.target)
+            )
+        torch.testing.assert_close(torch.cat(current), targets[0], rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    ("family", "path"),
+    [("deepseek_v4", "model.layers"), ("nemotron_h_omni", "language_model.model.layers")],
+)
+def test_declared_decoder_paths_resolve_native_models(family, path):
+    from _test_utils.transformers_families import build_model, cases
+
+    model = build_model(cases([family])[0], "meta")
+    decoder = TransformersBypassAdapter()._decoder_layers(model)
+    assert isinstance(decoder, nn.ModuleList) and len(decoder)
+    assert decoder is model.get_submodule(path)
 
 
 def _quantize(model, batch, bits="iq1_m", *, patterns=None):

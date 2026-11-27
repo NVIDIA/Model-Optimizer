@@ -314,6 +314,7 @@ class TransformersBypassAdapter(ModuleBypassAdapter):
 
     def microbatches(self, batch, size):
         """Preserve [RoPE axes,batch,sequence] wrapper positions when slicing samples."""
+        batch = self._batch_with_validity(batch)
         positions = batch.get("position_ids") if isinstance(batch, dict) else None
         if not isinstance(positions, torch.Tensor) or positions.ndim != 3:
             yield from super().microbatches(batch, size)
