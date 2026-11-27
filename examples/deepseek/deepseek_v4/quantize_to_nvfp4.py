@@ -51,8 +51,7 @@ Outputs:
   * An ``hf_quant_config.json`` manifest listing the NVFP4-quantized layers.
     MTP expert weights are left in the source format.
   * Ancillary files (``tokenizer.json``, ``LICENSE``, ``encoding/``,
-    ``inference/``, ...) are linked from the source when possible, with a
-    copy fallback across filesystems.
+    ``inference/``, ...) are copied from the source.
 
 Uncalibrated-expert handling: some routed experts receive zero tokens during
 calibration (common in V4's first ``n_hash_layers`` with deterministic
@@ -101,8 +100,8 @@ from safetensors.torch import save_file
 from modelopt.torch.export.shard_cast_utils import (
     build_w13_amax_overrides,
     build_w13_kmax_overrides,
+    copy_aux_files,
     dequantize_mxfp4_to_bf16,
-    link_aux_files,
     mxfp4_kmax,
     prepare_output_dir,
     quantize_mxfp4_to_nvfp4,
@@ -358,7 +357,7 @@ def convert_shard(
     return added, removed
 
 
-# Top-level names never hard-linked from source (rewritten or excluded).
+# Top-level names never copied from source (rewritten or excluded).
 _SKIP_TOP_LEVEL = {
     "model.safetensors.index.json",  # rewritten
     "config.json",  # rewritten (mark hybrid FP8 + NVFP4 MoE)
@@ -600,8 +599,8 @@ def main():
         args.output_ckpt,
         sorted(quantized),
     )
-    _log(f"[aux] linking ancillary files from {args.source_ckpt}")
-    link_aux_files(
+    _log(f"[aux] copying ancillary files from {args.source_ckpt}")
+    copy_aux_files(
         args.source_ckpt,
         args.output_ckpt,
         skip_top_level=_SKIP_TOP_LEVEL,

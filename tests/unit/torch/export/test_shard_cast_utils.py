@@ -16,6 +16,7 @@
 """Tests for shared streaming checkpoint-cast utilities."""
 
 import os
+import stat
 import sys
 
 import pytest
@@ -25,14 +26,21 @@ import modelopt.torch.export as modelopt_export
 import modelopt.torch.export.shard_cast_utils as shard_cast_utils
 from modelopt.torch.export.shard_cast_utils import (
     build_w13_kmax_overrides,
+    copy_aux_files,
     dequantize_mxfp4_to_bf16,
-    link_aux_files,
     mxfp4_kmax,
     quantize_mxfp4_to_nvfp4_lossless,
     resolve_checkpoint_file,
     validate_aux_files,
 )
 from modelopt.torch.quantization.qtensor import MXFP4QTensor, NVFP4QTensor
+
+
+@pytest.fixture(autouse=True)
+def _hub_cache_elsewhere(tmp_path, monkeypatch):
+    """Keep the test's files out of the configured Hugging Face cache, whatever the environment
+    sets; a test that needs a cache sets its own."""
+    monkeypatch.setattr("huggingface_hub.constants.HF_HUB_CACHE", str(tmp_path / "hf-hub-cache"))
 
 
 def test_mxfp4_to_nvfp4_lossless_cast_preserves_dequantized_values():
@@ -84,7 +92,7 @@ def test_public_api_contains_only_cast_helpers():
     assert not hasattr(modelopt_export, "log")
 
 
-def test_link_aux_files_preserves_sidecars_and_applies_skips(tmp_path):
+def test_copy_aux_files_preserves_sidecars_and_applies_skips(tmp_path):
     source = tmp_path / "source"
     output = tmp_path / "output"
     (source / "assets").mkdir(parents=True)
@@ -92,9 +100,12 @@ def test_link_aux_files_preserves_sidecars_and_applies_skips(tmp_path):
     (source / "tokenizer_config.json").write_text("{}")
     (source / "model.safetensors").write_bytes(b"shard")
     (source / "assets" / "config.txt").write_text("keep")
+    (source / "assets" / "config.txt").chmod(0o600)
+    (source / "assets" / "run.sh").write_text("#!/bin/sh\n")
+    (source / "assets" / "run.sh").chmod(0o755)
     (source / ".cache" / "stale.json").write_text("{}")
 
-    link_aux_files(
+    copy_aux_files(
         source,
         output,
         skip_top_level={".cache"},
@@ -104,27 +115,56 @@ def test_link_aux_files_preserves_sidecars_and_applies_skips(tmp_path):
 
     assert (output / "tokenizer_config.json").read_text() == "{}"
     assert (output / "assets" / "config.txt").read_text() == "keep"
+    assert os.access(output / "assets" / "run.sh", os.X_OK)  # a shipped helper still runs
+    if sys.platform != "win32":  # Windows keeps only a read-only flag, not POSIX modes
+        # A copy is a new file of the output's, so an owner-only source takes the output's mode.
+        (output / ".new-file").touch()
+        new_file_mode = stat.S_IMODE((output / ".new-file").stat().st_mode)
+        assert stat.S_IMODE((output / "assets" / "config.txt").stat().st_mode) == new_file_mode
     assert not (output / "model.safetensors").exists()
     assert not (output / ".cache").exists()
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="requires POSIX symlink support")
-def test_link_aux_files_accepts_huggingface_snapshot_blobs(tmp_path):
+def test_copy_aux_files_accepts_huggingface_snapshot_blobs(tmp_path, monkeypatch):
+    monkeypatch.setattr("huggingface_hub.constants.HF_HUB_CACHE", str(tmp_path))
     repository = tmp_path / "models--moonshotai--Kimi-K3"
     snapshot = repository / "snapshots" / "revision"
     blob = repository / "blobs" / "tokenizer-blob"
     snapshot.mkdir(parents=True)
     blob.parent.mkdir()
-    blob.write_text("tokenizer")
+    blob.write_text("tokenizer.json")
     (snapshot / "tokenizer.json").symlink_to(os.path.relpath(blob, snapshot))
+    # Since huggingface_hub 1.32, a repo blob may link on into a store the whole cache shares.
+    shared = {
+        "tiktoken.model": tmp_path / "blobs" / "ab" / "tiktoken-payload",
+        "vocab.json": tmp_path / "blobs" / "cd" / "vocab-payload",
+    }
+    for name, payload in shared.items():
+        payload.parent.mkdir(parents=True)
+        payload.write_text(name)
+        (repository / "blobs" / name).symlink_to(os.path.relpath(payload, repository / "blobs"))
+        (snapshot / name).symlink_to(f"../../blobs/{name}")
+    shared["tiktoken.model"].chmod(0o400)  # as the hub keeps them in a private cache; vocab.json's
+    # stays writable
 
     assert resolve_checkpoint_file(snapshot, "tokenizer.json") == blob.resolve()
     validate_aux_files(snapshot)
     output = tmp_path / "output"
-    link_aux_files(snapshot, output)
+    output.mkdir()
+    (output / "tiktoken.model").symlink_to(tmp_path / "outside")  # a dangling link where it copies
+    copy_aux_files(snapshot, output)
 
-    assert (output / "tokenizer.json").read_text() == "tokenizer"
+    assert not (tmp_path / "outside").exists()
     assert not (output / "tokenizer.json").is_symlink()
+    (output / ".new-file").touch()
+    new_file_mode = stat.S_IMODE((output / ".new-file").stat().st_mode)
+    assert stat.S_IMODE((output / "tiktoken.model").stat().st_mode) == new_file_mode
+    # Copies, never links: every output file is writable, and editing it leaves the cache unchanged.
+    for name, source in {"tokenizer.json": blob, **shared}.items():
+        assert (output / name).read_text() == name
+        (output / name).write_text("edited")
+        assert source.read_text() == name
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="requires POSIX symlink and FIFO support")
@@ -132,7 +172,7 @@ def test_link_aux_files_accepts_huggingface_snapshot_blobs(tmp_path):
     ("source_kind", "message"),
     [("symlink", "outside the checkpoint directory"), ("fifo", "regular file")],
 )
-def test_link_aux_files_rejects_unsafe_sources(tmp_path, source_kind, message):
+def test_copy_aux_files_rejects_unsafe_sources(tmp_path, source_kind, message):
     source = tmp_path / "source"
     source.mkdir()
     unsafe = source / "unsafe"
@@ -146,7 +186,7 @@ def test_link_aux_files_rejects_unsafe_sources(tmp_path, source_kind, message):
     with pytest.raises(ValueError, match=message):
         resolve_checkpoint_file(source, unsafe.name)
     with pytest.raises(ValueError, match=message):
-        link_aux_files(source, tmp_path / "output")
+        copy_aux_files(source, tmp_path / "output")
 
     assert not (tmp_path / "output").exists()
 
