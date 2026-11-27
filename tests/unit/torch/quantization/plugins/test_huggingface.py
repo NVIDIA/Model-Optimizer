@@ -36,17 +36,24 @@ from _test_utils.torch.transformers_models import (
 import modelopt.torch.quantization as mtq
 from modelopt.recipe.loader import load_recipe
 from modelopt.torch.quantization.algorithms import _AutoQuantizeBaseSearcher
-from modelopt.torch.quantization.config import LayerwiseConfig
+from modelopt.torch.quantization.config import LayerwiseConfig, QuantizerAttributeConfig
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY
-from modelopt.torch.quantization.ggml.common import pinned_importance, pinned_packed_weight
+from modelopt.torch.quantization.ggml.common import (
+    pin_packed_weight,
+    pinned_importance,
+    pinned_packed_weight,
+)
 from modelopt.torch.quantization.nn import QuantLinear, QuantModuleRegistry, TensorQuantizer
 from modelopt.torch.quantization.plugins.huggingface import (
     _QuantHFParallelLinear,
+    _transposed_quantize,
     _TransposedExpertsCalibMixin,
     convert_hf_parallel_linears_on_the_fly,
     get_homogeneous_hf_decoder_layers,
     is_homogeneous_hf_model,
 )
+from modelopt.torch.quantization.repair import IQRepairPolicy
+from modelopt.torch.quantization.repair_formats import IQScaleState
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 from modelopt.torch.utils.distributed import DistributionPlan, set_distribution_plan
 
@@ -55,6 +62,10 @@ pytest.importorskip("transformers")
 import transformers
 from transformers import AutoModelForCausalLM, LlamaForCausalLM
 from transformers.integrations.finegrained_fp8 import FP8Linear
+from transformers.models.gpt_oss.configuration_gpt_oss import GptOssConfig
+from transformers.models.gpt_oss.modeling_gpt_oss import GptOssExperts
+from transformers.models.llama4.configuration_llama4 import Llama4TextConfig
+from transformers.models.llama4.modeling_llama4 import Llama4TextExperts
 
 
 class HFModel(nn.Module):
@@ -414,22 +425,63 @@ def test_is_homogeneous_hf_model_gpt_oss():
     assert is_homogeneous_hf_model(model)
 
 
-def test_gpt_oss_experts_iter_weights_for_calibration_transposed():
-    """``_QuantGptOssExperts`` quantizes its expert weights *transposed* in the forward
-    (``_transposed_quantize`` puts the contraction ``in_dim`` last). Weight-only
-    calibration must yield the same transposed view; otherwise the unconditional
-    ``weight_only_quantize`` locks a non-transposed block-quant ``_original_shape`` and the
-    calibration forward then raises "Input shape has changed" for static-block NVFP4.
-    """
-    # Use intermediate_size != hidden_size so both expert weights are non-square and the
-    # transpose is observable in the shape.
-    model = get_tiny_gpt_oss(num_hidden_layers=1, hidden_size=32, intermediate_size=48)
-    mtq.replace_quant_module(model)
-    experts = model.model.layers[0].mlp.experts
-    assert hasattr(experts, "gate_up_proj_weight_quantizer")
+@pytest.mark.parametrize("sequential", [False, True])
+@pytest.mark.parametrize("expert_cls", [Llama4TextExperts, GptOssExperts])
+def test_transposed_experts_calibration_and_repair_gradients(expert_cls, sequential):
+    """Expert forwards use the calibrated layout and train native IQ masters while weights freeze."""
+    set_seed(17)
+    config_cls = Llama4TextConfig if expert_cls is Llama4TextExperts else GptOssConfig
+    experts = expert_cls(
+        config_cls(
+            hidden_size=256,
+            intermediate_size=512,
+            num_local_experts=2,
+            num_experts_per_tok=1,
+        )
+    )
+    weight_config = {"num_bits": "iq2_s", "backend": "ggml", "block_sizes": {-1: 256}}
+    mtq.quantize(
+        experts,
+        {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {
+                    "quantizer_name": "*weight_quantizer",
+                    "cfg": [{"num_bits": 8}, weight_config] if sequential else weight_config,
+                },
+            ],
+            "algorithm": None,
+        },
+    )
+    fmt = GGML_FORMAT_REGISTRY["iq2_s"]
+    with torch.no_grad():
+        for parameter in experts.parameters():
+            parameter.zero_()
+        for name in ("gate_up_proj", "down_proj"):
+            weight = experts._parameters[name]
+            container = getattr(experts, name + "_weight_quantizer")
+            if sequential:
+                container[0].disable()
+            quantizer = container[1] if sequential else container
+            shape = weight.transpose(-1, -2).shape
+            packed = torch.randint(
+                0,
+                256,
+                (*shape[:-1], shape[-1] // fmt.block_size, fmt.block_bytes),
+                dtype=torch.uint8,
+            )
+            packed = fmt.replace_payload_scales(
+                packed.reshape(-1, fmt.block_bytes),
+                torch.full((weight.numel() // fmt.block_size,), 2**-6, dtype=torch.float16),
+            ).reshape_as(packed)
+            weight.copy_(
+                fmt.dequantize(packed, torch.tensor(shape), dtype=weight.dtype).transpose(-1, -2)
+            )
+            quantizer._setup_for_blockquant(weight.transpose(-1, -2))
+            processed = quantizer._process_for_blockquant(weight.transpose(-1, -2))
+            pin_packed_weight(quantizer, fmt.name, packed, source=processed)
 
     yielded = {q: w for w, q in experts.iter_weights_for_calibration()}
-    # Stored weights are (num_experts, in_dim, out_dim); calibration must see (…, out_dim, in_dim).
     assert (
         yielded[experts.gate_up_proj_weight_quantizer].shape
         == experts.gate_up_proj.transpose(-1, -2).shape
@@ -438,6 +490,51 @@ def test_gpt_oss_experts_iter_weights_for_calibration_transposed():
         yielded[experts.down_proj_weight_quantizer].shape
         == experts.down_proj.transpose(-1, -2).shape
     )
+    inputs = (torch.randn(4, 256) * 0.05).requires_grad_()
+    routing = (
+        {"router_indices": torch.tensor([[0], [1], [0], [1]]), "routing_weights": torch.ones(4, 1)}
+        if expert_cls is GptOssExperts
+        else {}
+    )
+    policy = IQRepairPolicy()
+    try:
+        fields = policy.prepare(experts)
+        before = experts(inputs, **routing)
+        before.square().sum().backward()
+        assert all(field.grad is not None and field.grad.abs().sum() > 0 for field in fields)
+        assert all(parameter.grad is None for parameter in experts.parameters())
+        if expert_cls is GptOssExperts and sequential:
+            with pytest.raises(RuntimeError):
+                experts(inputs[:, :-1], **routing)
+            for name, (weight, _) in zip(
+                ("gate_up_proj", "down_proj"), experts.iter_weights_for_calibration(), strict=True
+            ):
+                assert (
+                    weight.untyped_storage().data_ptr()
+                    == experts._parameters[name].untyped_storage().data_ptr()
+                )
+        with torch.no_grad():
+            for field in fields:
+                field.add_(field.grad, alpha=-0.01)
+        policy.project_()
+        updated = experts(inputs, **routing).detach()
+        assert not torch.equal(before, updated)
+        native = {
+            binding.quantizer: state.native_payload().clone()
+            for binding, state, _, _ in policy.adapters
+        }
+        policy.finalize_()
+        ordinary = experts(inputs, **routing)
+        torch.testing.assert_close(ordinary, updated, rtol=1e-5, atol=1e-6)
+        gradients = torch.autograd.grad(
+            ordinary.sum(),
+            tuple(experts._parameters[name] for name in ("gate_up_proj", "down_proj")),
+        )
+        assert all(gradient.abs().sum() > 0 for gradient in gradients)
+        for quantizer, expected in native.items():
+            assert torch.equal(pinned_packed_weight(quantizer, fmt.name), expected)
+    finally:
+        policy.close()
 
 
 def test_transposed_experts_calib_mixin_yields_transposed_views():
@@ -611,3 +708,30 @@ def test_gpt_oss_experts_reconfiguration_and_failed_forward_cleanup(sequential):
     finally:
         for hook in hooks:
             hook.remove()
+
+
+def test_transposed_native_fields_keep_master_gradients_and_ordinary_ste():
+    torch.manual_seed(17)
+    weight = torch.randn(256, 2)
+    quantizer = TensorQuantizer(
+        QuantizerAttributeConfig(num_bits="iq1_m", backend="ggml", block_sizes={-1: 256})
+    )
+    quantizer(weight.T.contiguous())
+    state = IQScaleState(quantizer, weight.T.contiguous(), weight.T.shape)
+    object.__setattr__(quantizer, "_fake_quantize", state)
+    quantizer._local_repair_active = True
+    try:
+        output = _transposed_quantize(weight, quantizer)
+        torch.testing.assert_close(output, state(weight.T.contiguous()).T, rtol=0, atol=0)
+        output.square().sum().backward()
+        assert all(p.grad is not None and p.grad.abs().sum() > 0 for p in state.parameters())
+        assert not weight.requires_grad and weight.grad is None
+    finally:
+        del quantizer._fake_quantize
+        del quantizer._local_repair_active
+    source = weight.clone().requires_grad_()
+    ordinary = _transposed_quantize(source, quantizer)
+    torch.testing.assert_close(ordinary, quantizer(source.T.contiguous()).T, rtol=0, atol=0)
+    torch.testing.assert_close(
+        torch.autograd.grad(ordinary.sum(), source)[0], torch.ones_like(source)
+    )
