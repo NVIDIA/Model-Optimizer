@@ -468,16 +468,6 @@ def validate_native_weight_partition(quantizer, view):
         view.intervals(2 if packed else 1)
 
 
-def validate_activation_partition(quantizer, view):
-    """Validate calibrated input fields without copying their storage."""
-    probe = copy.copy(quantizer)
-    probe._buffers = {
-        name: torch.empty_like(value, device="meta") if isinstance(value, torch.Tensor) else value
-        for name, value in quantizer._buffers.items()
-    }
-    activation_partition(probe, view)
-
-
 def validate_tp_output_quantizer(quantizer, view):
     """Accept only output quantizers that need no reduction or field transport."""
     if quantizer is None or view.size == 1:
