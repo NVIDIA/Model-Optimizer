@@ -25,6 +25,7 @@ from torch.nn.attention.flex_attention import create_mask
 
 import modelopt.torch.speculative as mtsp
 import modelopt.torch.speculative.plugins.hf_dflash as hf_dflash
+import modelopt.torch.speculative.plugins.modeling_dflash as modeling_dflash
 
 SEQ_LEN = 32
 BLOCK_SIZE = 4
@@ -50,6 +51,26 @@ _HEADS = {
         "conv_group_size": 4,
         "selector_rank": 4,
         "selector_top_k": 5,
+    },
+    "lilicorr": {
+        "projector_type": "lilicorr",
+        "conv_kernel_size": 2,
+        "conv_group_size": 4,
+        "lilicorr_candidate_topk": 4,
+        "lilicorr_hidden_size": 16,
+        "lilicorr_factor_dim": 16,
+        "lilicorr_num_layers": 2,
+        "lilicorr_num_heads": 4,
+        "lilicorr_mlp_ratio": 2.0,
+        "lilicorr_logit_scale": 8.0,
+        "lilicorr_vector_eps": 1.0e-4,
+        # Top-level dflash keys rather than architecture keys: the Bolt recipe's objective.
+        "dflash_config": {
+            "dflash_lilicorr_w_ce": 0.05,
+            "dflash_lilicorr_w_margin": 0.0,
+            "dflash_lilicorr_w_pen": 0.0,
+            "dflash_lilicorr_w_cal": 0.45,
+        },
     },
 }
 
@@ -93,16 +114,27 @@ def _reference_layout(anchors, keep, mem_count, window, causal):
     return visible, positions
 
 
-def _model(window=WINDOW, head=None, causal=False, offline=True):
+def _model(window=WINDOW, head=None, causal=False, offline=True, sink=False):
     model = get_tiny_llama(num_hidden_layers=4)
     model.config.num_orig_hidden_layers = 4
     config = get_dflash_config(block_size=BLOCK_SIZE, offline=offline)
     config["dflash_swa_window_size"] = window
     config["dflash_draft_attention"] = "causal" if causal else "bidirectional"
     config["dflash_num_anchors"] = ANCHORS.shape[1]
-    config["dflash_architecture_config"].update(head or {})
+    config["dflash_attention_sink"] = sink
+    head = dict(head or {})
+    config.update(head.pop("dflash_config", {}))
+    config["dflash_architecture_config"].update(head)
     mtsp.convert(model, [("dflash", config)])
     return model.float().train()
+
+
+@pytest.fixture
+def eager_sink(monkeypatch):
+    """The sink attention without torch.compile, which it is numerically interchangeable with."""
+    monkeypatch.setattr(
+        modeling_dflash, "_compiled_sink_attention", modeling_dflash._sink_attention_impl
+    )
 
 
 def _batch(model, counts=COUNTS):
@@ -177,10 +209,11 @@ def test_layout_matches_the_reference(mem_count, causal, window):
     assert torch.equal(model._build_position_ids(SEQ_LEN, ANCHORS, "cpu", mem_rows), positions)
 
 
+@pytest.mark.parametrize("sink", [False, True], ids=["no_sink", "sink"])
 @pytest.mark.parametrize("row", [0, 1])
-def test_a_memory_row_reaches_its_own_block_only(row):
+def test_a_memory_row_reaches_its_own_block_only(row, sink, eager_sink):
     """Block 1 of row 0 has one memory row: row 0 changes that block's output, row 1 nothing."""
-    model = _model()
+    model = _model(sink=sink)
     batch = _batch(model)
     before = _draft_hidden(model, batch)
     batch["rejmem_mem_aux_hidden"][0, 1, row] += 1.0
@@ -191,15 +224,16 @@ def test_a_memory_row_reaches_its_own_block_only(row):
     assert torch.equal(changed[TRAINED], expected[TRAINED])
 
 
+@pytest.mark.parametrize("sink", [False, True], ids=["no_sink", "sink"])
 @pytest.mark.parametrize("memory", ["omitted", "zero_counts"])
 @pytest.mark.parametrize("window", [None, WINDOW], ids=["full", "window"])
-def test_rounds_without_memory_train_as_the_step_without_it(window, memory):
+def test_rounds_without_memory_train_as_the_step_without_it(window, memory, sink, eager_sink):
     """Rounds without memory train what the same blocks train without ``rejmem_*`` kwargs.
 
     Bitwise when the memory pair is left out. Zero counts still append the memory rows, which
     lengthens the projections and SDPA's key axis and so reorders sums: equal to rounding.
     """
-    model = _model(window=window)
+    model = _model(window=window, sink=sink)
     batch = _batch(model, counts=torch.zeros_like(COUNTS))
     if memory == "omitted":
         del batch["rejmem_mem_count"], batch["rejmem_mem_aux_hidden"]
