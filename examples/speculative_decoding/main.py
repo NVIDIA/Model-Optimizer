@@ -164,6 +164,21 @@ def init_distributed_env(training_args: transformers.TrainingArguments) -> None:
         )
 
 
+def check_dflash_context_parallel(model, recipe, training_args) -> None:
+    """Refuse a DFlash run whose ``cp_size > 1`` setup is not supported."""
+    if recipe.data.mode != "offline":
+        raise ValueError(
+            "DFlash context parallelism (cp_size > 1) needs data.offline_data_path; "
+            f"data.mode={recipe.data.mode!r} is not supported."
+        )
+    if training_args.training_seq_len % training_args.cp_size:
+        raise ValueError(
+            f"training_seq_len ({training_args.training_seq_len}) must be divisible by "
+            f"cp_size ({training_args.cp_size})."
+        )
+    model.check_context_parallel_support()
+
+
 def _is_hf_format_checkpoint(checkpoint: str | None) -> bool:
     """True if the checkpoint dir holds consolidated HF weights (from_pretrained-loadable).
 
@@ -492,8 +507,11 @@ def train():
             )
         return
 
-    print_rank_0("Loading dataset...")
     is_dflash = isinstance(recipe, ModelOptDFlashRecipe)
+    if is_dflash and training_args.cp_size > 1:
+        check_dflash_context_parallel(model, recipe, training_args)
+
+    print_rank_0("Loading dataset...")
     if recipe.data.mode == "sparse" and not isinstance(recipe, ModelOptExternalDraftRecipe):
         # Only the external draft reads a sparse policy. Any other mode would build the
         # dataset, hand the collator's teacher_topk_* to a forward that ignores them, and
@@ -572,6 +590,9 @@ def train():
 
     if os.environ.get("PATCH_FSDP2_BUFFERS_TF457") == "1":
         fsdp2_buffer_patch.patch_accelerator(trainer.accelerator)
+
+    if is_dflash and training_args.cp_size > 1:
+        model.enable_context_parallel(trainer.accelerator.torch_device_mesh["cp"].get_group())
 
     # DFlash: export the draft submodule after each checkpoint save — but only under FSDP2
     # SHARDED_STATE_DICT, where checkpoints are distributed shards the post-training

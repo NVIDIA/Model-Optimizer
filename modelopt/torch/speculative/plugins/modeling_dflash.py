@@ -44,8 +44,10 @@ The draft architecture is independent of the target model.
 from dataclasses import dataclass
 
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 from torch import nn
+from torch.utils.checkpoint import checkpoint
 from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 from transformers.models.qwen3.modeling_qwen3 import Qwen3MLP as _MLP_CLS  # noqa: N814
@@ -166,6 +168,26 @@ def apply_rotary_pos_emb(q, k, cos, sin):
     return q_embed, k_embed
 
 
+class _GatherContext(torch.autograd.Function):
+    """All-gather each rank's slice of the context along the sequence dimension.
+
+    Every rank attends over the same gathered tensor and so receives the same gradient:
+    backward keeps this rank's slice, scaled by the group size because the trainer averages
+    gradients over ranks while the slices' gradients must be summed.
+    """
+
+    @staticmethod
+    def forward(ctx, local, group):
+        ctx.rank, ctx.size = dist.get_rank(group), dist.get_world_size(group)
+        slices = [torch.empty_like(local) for _ in range(ctx.size)]
+        dist.all_gather(slices, local.contiguous(), group=group)
+        return torch.cat(slices, dim=1)
+
+    @staticmethod
+    def backward(ctx, grad):
+        return grad.chunk(ctx.size, dim=1)[ctx.rank] * ctx.size, None
+
+
 class DFlashAttention(nn.Module):
     """Attention with KV injection, using HF's attention dispatch."""
 
@@ -183,6 +205,8 @@ class DFlashAttention(nn.Module):
         self.scaling = self.head_dim**-0.5
         self.attention_dropout = getattr(config, "attention_dropout", 0.0)
         self.is_causal = False
+        # Set under context parallelism, where ``target_hidden`` is one rank's slice.
+        self.context_group = None
 
         attn_bias = getattr(config, "attention_bias", False)
         self.q_proj = nn.Linear(config.hidden_size, self.num_heads * self.head_dim, bias=attn_bias)
@@ -231,8 +255,14 @@ class DFlashAttention(nn.Module):
         K and V are projected from the concatenation of target hidden states (context from the
         base model) and noise block, so the draft can attend to both context and its own block.
         """
+        inputs = (hidden_states, target_hidden, position_embeddings, attention_mask)
+        if self.context_group is None or not torch.is_grad_enabled():
+            return self._attend(*inputs)
+        # Backward gathers the context again, so no layer holds a full-length copy of it.
+        return checkpoint(self._attend, *inputs, use_reentrant=False)
+
+    def _attend(self, hidden_states, target_hidden, position_embeddings, attention_mask):
         bsz, q_len, _ = hidden_states.shape
-        ctx_len = target_hidden.shape[1]
 
         # Q from noise block only (the draft tokens being predicted), with QK-norm
         q = self.q_proj(hidden_states).view(bsz, q_len, -1, self.head_dim)
@@ -240,12 +270,17 @@ class DFlashAttention(nn.Module):
 
         # K from context + noise, with QK-norm
         k_ctx = self.k_proj(target_hidden)
+        if self.context_group is not None:
+            k_ctx = _GatherContext.apply(k_ctx, self.context_group)
+        ctx_len = k_ctx.shape[1]
         k_noise = self.k_proj(hidden_states)
         k = torch.cat([k_ctx, k_noise], dim=1).view(bsz, ctx_len + q_len, -1, self.head_dim)
         k = self.k_norm(k).transpose(1, 2)
 
         # V from context + noise (no norm)
         v_ctx = self.v_proj(target_hidden)
+        if self.context_group is not None:
+            v_ctx = _GatherContext.apply(v_ctx, self.context_group)
         v_noise = self.v_proj(hidden_states)
         v = (
             torch.cat([v_ctx, v_noise], dim=1)
@@ -427,6 +462,11 @@ class DFlashModule(nn.Module):
         # Outside the compiled body: lazy rotary init mutates the module.
         self._maybe_init_rotary_emb(device=noise_embedding.device)
         return self._body()(noise_embedding, target_hidden, position_ids, attention_mask)
+
+    def set_context_group(self, group):
+        """Attend over a context whose slices are spread across ``group``'s ranks."""
+        for layer in self.layers:
+            layer.self_attn.context_group = group
 
     def compile_body(self):
         """Inductor-compile the draft stack; ``_body`` runs it in training only.

@@ -31,6 +31,8 @@ Changelog
 
 *Speculative Decoding*
 
+- Offline training of the plain DFlash draft now supports context parallelism (``training.cp_size > 1``); other DFlash-family setups with ``cp_size > 1`` now raise an error.
+
 *Megatron Framework (M-LM / M-Bridge)*
 
 *Misc*

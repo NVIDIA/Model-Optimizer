@@ -77,6 +77,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 import torch
+import torch.distributed as dist
 from transformers import PreTrainedModel
 from transformers.models.qwen3.configuration_qwen3 import Qwen3Config as _Qwen3Config
 from transformers.trainer_pt_utils import LabelSmoother
@@ -205,6 +206,9 @@ class HFDFlashModel(DFlashModel):
     # the anchor's own position onward, so slot 0 (the given anchor) is never supervised.
     _label_shift = 0
 
+    # The process group the context is sharded over; set by enable_context_parallel.
+    _context_group = None
+
     @property
     def _base_model(self):
         return self.get_submodule(self.base_model_path)
@@ -269,6 +273,7 @@ class HFDFlashModel(DFlashModel):
         super().modify(config)
 
         self.dflash_fp32_master_weights = config.dflash_fp32_master_weights
+        self._projector_type = config.dflash_architecture_config.get("projector_type")
 
         base_config = self._base_llm_config
         # Use Qwen3Config (not generic PretrainedConfig) so rope_parameters is
@@ -507,6 +512,47 @@ class HFDFlashModel(DFlashModel):
         self.dflash_module._maybe_init_rotary_emb(device=base_device)
         self._draft_placed = True
 
+    @property
+    def context_parallel_enabled(self):
+        """Whether the training forward expects one rank's slice of the context."""
+        return self._context_group is not None
+
+    def check_context_parallel_support(self):
+        """Raise ``ValueError`` if this draft cannot train with context parallelism."""
+        unsupported = []
+        if self._projector_type not in (None, "dflash"):
+            unsupported.append(f"projector_type={self._projector_type!r}")
+        if not self.dflash_offline:
+            unsupported.append("online training")
+        if self.dflash_use_torch_compile:
+            unsupported.append("dflash_use_torch_compile=true")
+        if self.dflash_config.attention_dropout:
+            unsupported.append("attention_dropout > 0")
+        if unsupported:
+            raise ValueError(
+                "DFlash context parallelism (cp_size > 1) supports only the plain DFlash draft, "
+                "trained offline without torch.compile or attention dropout. Unsupported here: "
+                f"{', '.join(unsupported)}. Change these or set cp_size=1."
+            )
+
+    def enable_context_parallel(self, group):
+        """Shard the training context over ``group``, whose ranks must train on the same batch.
+
+        Each rank then passes only its slice of ``aux_hidden_states`` (see
+        :meth:`shard_context`), and gradients must be averaged over the ranks, as DDP and
+        FSDP2 do.
+        """
+        self.check_context_parallel_support()
+        self._context_group = group
+        self.dflash_module.set_context_group(group)
+
+    def shard_context(self, base_model_outputs: dict):
+        """Replace a batch's ``aux_hidden_states`` with this rank's slice of the sequence."""
+        group = self._context_group
+        slices = base_model_outputs["aux_hidden_states"].chunk(dist.get_world_size(group), dim=1)
+        # clone() so that nothing keeps the full-length tensor alive.
+        base_model_outputs["aux_hidden_states"] = slices[dist.get_rank(group)].clone()
+
     # Draft-module entries that legitimately come from the base model rather than the
     # exported draft checkpoint, so their absence (or presence) is not an error.
     _INIT_CKPT_IGNORED_KEYS = ("embed_tokens.weight", "lm_head.weight")
@@ -656,6 +702,9 @@ class HFDFlashModel(DFlashModel):
 
         keep = cols < torch.minimum(valid_counts, cap).unsqueeze(1)
         anchors = torch.where(keep, anchors, torch.tensor(0, dtype=torch.long, device=device))
+        if self._context_group is not None:
+            # Every rank of the group has to draft the same blocks, whatever its RNG state.
+            dist.broadcast(anchors, group=self._context_group, group_src=0)
         return anchors, keep
 
     def _build_noise_embedding(self, input_ids, anchor_positions, block_keep_mask, n_blocks):
@@ -1067,6 +1116,14 @@ class HFDFlashModel(DFlashModel):
                 **kwargs,
             )
         target_hidden = base_outputs.target_hidden
+        if self._context_group is not None:
+            cp_size = dist.get_world_size(self._context_group)
+            if target_hidden.shape[1] * cp_size != seq_len:
+                raise ValueError(
+                    f"Under context parallelism each rank passes seq_len / cp_size = "
+                    f"{seq_len}/{cp_size} positions of aux_hidden_states, got "
+                    f"{target_hidden.shape[1]}. Use shard_context() on the batch."
+                )
 
         # 2. Build loss mask.
         loss_mask = self._build_loss_mask(
