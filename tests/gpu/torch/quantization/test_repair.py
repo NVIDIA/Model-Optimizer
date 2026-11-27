@@ -49,8 +49,9 @@ def _iq(path, name):
 @pytest.mark.parametrize("name", sorted(IQ_FORMAT_REGISTRY))
 @pytest.mark.parametrize("input_grad", [False, True])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("off_device", [False, True])
 @pytest.mark.timeout(180)
-def test_packed_iq_linear_matches_native_vjp(name, input_grad, dtype, capsys):
+def test_packed_iq_linear_matches_native_vjp(name, input_grad, dtype, capsys, off_device):
     # Packed kernels require optional Triton; materialized replay also supports CPU.
     pytest.importorskip("triton")
     from modelopt.torch.kernels.quantization.iq_gemm import iq_linear
@@ -58,16 +59,22 @@ def test_packed_iq_linear_matches_native_vjp(name, input_grad, dtype, capsys):
 
     if not torch.cuda.is_available():
         pytest.skip("Packed IQ projection math requires CUDA")
+    if off_device and torch.cuda.device_count() < 2:
+        pytest.skip("Noncurrent-device IQ repair requires two CUDA devices")
+    caller_device = torch.cuda.current_device()
+    device = torch.device(
+        "cuda", (caller_device + 1) % torch.cuda.device_count() if off_device else caller_device
+    )
     torch.manual_seed(103)
     shapes = [(13, 512)]
-    if input_grad and dtype == torch.bfloat16 and name in ("iq1_m", "iq2_xxs"):
+    if not off_device and input_grad and dtype == torch.bfloat16 and name in ("iq1_m", "iq2_xxs"):
         shapes.append((2048, 4096))
     for shape in shapes:
-        model = nn.Linear(shape[1], shape[0], bias=False).cuda().to(dtype)
+        model = nn.Linear(shape[1], shape[0], bias=False).to(device=device, dtype=dtype)
         mtq.quantize(
             model,
             _config([_iq("*weight_quantizer", name)]),
-            lambda m: m(torch.randn(1, shape[1], device="cuda", dtype=dtype)),
+            lambda m: m(torch.randn(1, shape[1], device=device, dtype=dtype)),
         )
         policy = IQRepairPolicy()
         try:
@@ -80,11 +87,11 @@ def test_packed_iq_linear_matches_native_vjp(name, input_grad, dtype, capsys):
             torch.testing.assert_close(fused_levels, levels.reshape(shape), rtol=0, atol=0)
             measure = shape == (2048, 4096)
             for tokens in (8, 1024) if measure else (7, 0):
-                x = torch.randn(tokens, shape[1] * 2, device="cuda", dtype=dtype)[:, ::2]
+                x = torch.randn(tokens, shape[1] * 2, device=device, dtype=dtype)[:, ::2]
                 if measure and tokens == 1024:
                     x = x.contiguous()
                 x = x.detach().requires_grad_(input_grad)
-                bias = torch.randn(shape[0], device="cuda", dtype=dtype, requires_grad=True)
+                bias = torch.randn(shape[0], device=device, dtype=dtype, requires_grad=True)
                 steps = state.projected_steps().detach().requires_grad_(True)
                 if not measure and tokens == 7:
                     for wrong_shape in (steps.t(), steps.reshape(shape[0], -1)):
@@ -93,7 +100,7 @@ def test_packed_iq_linear_matches_native_vjp(name, input_grad, dtype, capsys):
                     for wrong_dtype in (torch.float16, torch.bfloat16):
                         with pytest.raises(ValueError):
                             iq_linear(x, state.packed, steps.to(wrong_dtype), name, shape, bias)
-                upstream = torch.randn(tokens, shape[0], device="cuda", dtype=dtype)
+                upstream = torch.randn(tokens, shape[0], device=device, dtype=dtype)
                 parameters = [steps, bias, *([x] if input_grad else [])]
                 saved = []
 
@@ -105,17 +112,17 @@ def test_packed_iq_linear_matches_native_vjp(name, input_grad, dtype, capsys):
                     warmup = iq_linear(x, state.packed, steps, name, shape, bias)
                     warmup_grad = torch.autograd.grad(warmup, parameters, upstream)
                     del warmup, warmup_grad
-                    torch.cuda.synchronize()
-                    baseline = torch.cuda.memory_allocated()
-                    torch.cuda.reset_peak_memory_stats()
+                    torch.cuda.synchronize(device)
+                    baseline = torch.cuda.memory_allocated(device)
+                    torch.cuda.reset_peak_memory_stats(device)
                     started = time.perf_counter()
                 with torch.autograd.graph.saved_tensors_hooks(observe, lambda value: value):
                     actual = iq_linear(x, state.packed, steps, name, shape, bias)
                 actual_grad = torch.autograd.grad(actual, parameters, upstream)
                 if measure:
-                    torch.cuda.synchronize()
+                    torch.cuda.synchronize(device)
                     seconds = time.perf_counter() - started
-                    peak = torch.cuda.max_memory_allocated()
+                    peak = torch.cuda.max_memory_allocated(device)
                     incremental = peak - baseline
                     with capsys.disabled():
                         print(
@@ -168,6 +175,7 @@ def test_packed_iq_linear_matches_native_vjp(name, input_grad, dtype, capsys):
                     torch.testing.assert_close(
                         actual_grad[2], reference_grad[2], rtol=0.01, atol=0.015
                     )
+                assert torch.cuda.current_device() == caller_device
                 assert (torch.Size(shape), dtype) not in saved
                 frozen_x = x.detach().requires_grad_(input_grad)
                 frozen_bias = bias.detach().requires_grad_(True)
