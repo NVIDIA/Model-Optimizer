@@ -211,7 +211,7 @@ class _DynamicConvNd(DynamicModule):
             channels_ratio: The ratios of the desired number of out/in channels over original
                 number of out/in channels.
             channel_divisor: The divisor of the out/in channels.
-            kernel_sizes: The desired kernel sizes.
+            kernel_size: The desired kernel sizes.
         """
         # modify both in_channels and out_channels
         channels = ["in_channels", "out_channels"]

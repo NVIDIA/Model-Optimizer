@@ -96,7 +96,6 @@ class SearchSpace(DynamicSpace):
         """Sample configurable hparams using the provided sample_func and return resulting config.
 
         Args:
-            model: A configurable model that contains one or more DynamicModule(s).
             sample_func: A sampling function for hyperparameters. If a
                 dict is provided, the key indicates a Unix shell-style wildcard pattern which is
                 used to match the hyperparameter name. The default is random sampling corresponding
