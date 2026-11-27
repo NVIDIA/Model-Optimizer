@@ -794,18 +794,22 @@ class QuantRecipeHparam(Hparam):
         cost_weight = self.cost_weight if cost_weight is None else cost_weight
         cost = 0
         for quant_module in self.quant_modules:
-            weight_size = (
-                _AutoQuantizeBaseSearcher._get_total_weight_size([quant_module]) * cost_weight
+            weights = (
+                _get_module_weights(quant_module)
+                if _AutoQuantizeBaseSearcher._is_auto_quantize_module(quant_module)
+                else []
             )
             parallel_state = getattr(quant_module, "parallel_state", None)
 
             if parallel_state is None:
-                cost += weight_size * recipe.compression
+                cost += sum(w.numel() for w in weights) * cost_weight * recipe.compression
                 continue
 
             # A plain tensor is this rank's shard over the TP and EP groups. A DTensor's size is the
             # whole tensor's already, as for the routed experts transformers shards expert-parallel.
-            if not any(isinstance(w, DTensor) for w in _get_module_weights(quant_module)):
+            shards = [w for w in weights if not isinstance(w, DTensor)]
+            weight_size = sum(w.numel() for w in shards) * cost_weight
+            if shards:
                 weight_size = DistributedProcessGroup.get_dist_syncd_obj(
                     weight_size,
                     [
@@ -814,6 +818,7 @@ class QuantRecipeHparam(Hparam):
                     ],
                     sum,
                 )
+            weight_size += sum(w.numel() for w in weights if isinstance(w, DTensor)) * cost_weight
 
             # Across data parallel groups, the weight size is the same for all the ranks.
             weight_size = DistributedProcessGroup.get_dist_syncd_obj(
@@ -862,20 +867,10 @@ def _quantization_formats_signature(quant_recipes) -> tuple[str, ...]:
     return tuple(sorted(recipe.checkpoint_signature for recipe in quant_recipes))
 
 
-# The checkpoint fields the search checks or branches on, each rank on its own file.
-_RESUME_POINT_KEYS = (
-    "method",
-    "cost_model",
-    "active_moe_expert_ratio",
-    "scoring_config",
-    "quantization_formats_signature",
-    "fixed_quantization_config_signature",
-    "module_search_space_signature",
-    "resolved_search_setup_signature",
-    "format_shard",
-    "num_calib_steps",
-    "num_score_steps",
-)
+# The checkpoint fields the ranks compare in short before resuming, the calibrated quantizer states
+# (their own on each rank) by format and the scores by whether there are any, or not at all, the
+# solved result; they compare every other field, each a field the search checks or branches on.
+_SUMMARIZED_ON_RESUME = ("quantizer_states", "candidate_stats", "best")
 
 
 def _resume_together(progresses: list) -> None:
@@ -1028,11 +1023,13 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             nonlocal loaded
             loaded = self.load_search_checkpoint()
             state = self.state_dict()
-            return (
-                {key: state.get(key) for key in _RESUME_POINT_KEYS},
-                sorted(map(str, state["quantizer_states"])),
-                bool(state["candidate_stats"]),
-            )
+            return {
+                **{key: value for key, value in state.items() if key not in _SUMMARIZED_ON_RESUME},
+                "quantizer_states": sorted(
+                    r.checkpoint_signature for r in state["quantizer_states"]
+                ),
+                "candidate_stats": bool(state["candidate_stats"]),
+            }
 
         if is_distributed_run():
             # Each rank resumes from its own file and checks and branches on what it holds. Read in

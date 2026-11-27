@@ -1175,6 +1175,7 @@ def _test_resume_from_another_point_on_one_rank(rank, size, directory, rank1_fil
             loss_func=lambda output, data: output.sum(),
             num_calib_steps=2,
             num_score_steps=2,
+            method="aumann_shapley" if rank1_file == "other_scoring" else None,
             checkpoint=str(directory),
         )
 
@@ -1189,8 +1190,10 @@ def _test_resume_from_another_point_on_one_rank(rank, size, directory, rank1_fil
             state = safe_load(path)
             if rank1_file == "older":  # saved after calibrating, before scoring
                 state["candidate_stats"] = {}
-            else:  # from a search whose groups resolved otherwise
+            elif rank1_file == "other_setup":  # from a search whose groups resolved otherwise
                 state["resolved_search_setup_signature"] = ()
+            else:  # scored at the same progress, with other path settings
+                state["scoring_signature"] = {"num_path_nodes": -1}
             safe_save(state, path)
     # Rank 1 alone would calibrate or score again, refuse its setup or fail to load its file, while
     # rank 0 went on: every rank raises instead, rank 0 naming rank 1's failure to load.
@@ -1204,7 +1207,9 @@ def _test_resume_from_another_point_on_one_rank(rank, size, directory, rank1_fil
         search()
 
 
-@pytest.mark.parametrize("rank1_file", ["missing", "older", "other_setup", "truncated"])
+@pytest.mark.parametrize(
+    "rank1_file", ["missing", "older", "other_setup", "other_scoring", "truncated"]
+)
 def test_resume_from_another_point_on_one_rank_raises_on_every_rank(
     cpu_dist_workers, tmp_path, rank1_file
 ):
@@ -1487,6 +1492,30 @@ def test_expert_parallel_kv_search_refuses_a_dense_layer_sharded_tensor_parallel
     if Version(transformers.__version__) < Version("5.16"):
         pytest.skip("transformers' expert-parallel load shards the experts as DTensors from 5.16")
     cpu_dist_workers.run(_test_kv_search_refuses_a_dense_layer_sharded_tensor_parallel)
+
+
+def _test_cost_counts_each_projection_by_its_own_layout(rank, size):
+    register_torch_a2a()
+    model = _sharded_like_the_expert_parallel_load(_tiny_qwen3_moe("torch_a2a"), size)
+    mtq.quantize(model, mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG)
+    experts = model.model.layers[0].mlp.experts
+    whole = experts.gate_up_proj.numel() + experts.down_proj.numel()  # DTensors: the whole sizes
+    # One projection this rank's plain EP shard, beside the other's DTensor.
+    experts.down_proj = torch.nn.Parameter(experts.down_proj.to_local())
+    hparam = QuantRecipeHparam(
+        [QuantRecipe(mtq.INT8_DEFAULT_CFG)],
+        quant_modules=[experts],
+        quant_module_names=["model.layers.0.mlp.experts"],
+    )
+    assert hparam.get_cost(QuantRecipe(quant_cfg=None)) == whole
+
+
+def test_expert_parallel_cost_counts_each_projection_by_its_own_layout(cpu_dist_workers):
+    """A plain projection is summed over the expert-parallel group; a DTensor one is whole already."""
+    transformers = pytest.importorskip("transformers")
+    if Version(transformers.__version__) < Version("5.16"):
+        pytest.skip("transformers' expert-parallel load shards the experts as DTensors from 5.16")
+    cpu_dist_workers.run(_test_cost_counts_each_projection_by_its_own_layout)
 
 
 def _test_kv_resume_with_one_stale_expert_shard(rank, size, directory):
