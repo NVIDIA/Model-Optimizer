@@ -54,6 +54,7 @@ Changelog
 - With ``mto.enable_huggingface_checkpointing()`` and transformers before 5.21, ``save_pretrained`` no longer fails on Hugging Face MoE models with quantized fused experts, and ``from_pretrained`` restores them. A Qwen3-VL-MoE checkpoint does not load on those versions, so save and restore the live model with ``mto.save`` and ``mto.restore`` instead.
 - For dense Qwen3.5 checkpoints with an LM-head size mismatch in TensorRT-LLM 1.3.0, use ``model_type/qwen3_5/auto_quantize/w4a8_awq_beta_fp8_at_6p0bits-decoder_only`` to keep the output head unquantized and outside the 6-bit decoder budget. Rerun from the original weights and omit ``--auto_quantize_checkpoint`` or give it a fresh path.
 - AutoQuantize now counts the ``up_proj`` of non-gated fused MoE experts, such as Nemotron-H's, in its effective-bits cost; it left them out, so the budget weighed those experts too low. A search resumed from an earlier checkpoint counts its costs again.
+- A KV-cache AutoQuantize search after a weight search no longer fails when a selected weight format pads its blocks, i.e. its block size does not divide a weight's width.
 
 *ONNX*
 
