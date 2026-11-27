@@ -47,6 +47,7 @@ class _QuantLinear(QuantLinearConvBase):
         state = quantizer.__dict__.get("_local_repair_state")
         if (
             state is not None
+            and not is_torch_export_mode()
             and self.original_cls.forward is nn.Linear.forward
             and not hasattr(self, "_forward_pre_dm")
             and not args
