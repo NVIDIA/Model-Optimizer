@@ -22,6 +22,7 @@ from _test_utils.torch.quantization.quant_utils import quant
 from modelopt.torch.quantization import tensor_quant
 from modelopt.torch.quantization import utils as quant_utils
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
+from modelopt.torch.quantization.conversion import preserve_quantizer_attributes_context
 from modelopt.torch.quantization.model_calib import (
     enable_stats_collection,
     finish_stats_collection,
@@ -347,9 +348,14 @@ class TensorQuantizerTester:
         with pytest.raises(Exception, match="mutually exclusive"):
             QuantizerAttributeConfig(num_bits=8, use_constant_amax=True, constant_amax=2688.0)
 
-    def test_modelopt_state(self):
-        # Test loading of amax from ref to test
-        tensor_quantizer_ref = TensorQuantizer(QuantizerAttributeConfig(num_bits=4), amax=10.0)
+    @pytest.mark.parametrize("block_sizes", [None, {-1: 4}])
+    @pytest.mark.parametrize("repair_check", ["checkpoint", "live"])
+    def test_modelopt_state(self, block_sizes, repair_check):
+        # Test loading of amax from ref to test, including real padded block-layout setup.
+        amax = 10.0 if block_sizes is None else torch.full((30, 1), 10.0)
+        tensor_quantizer_ref = TensorQuantizer(
+            QuantizerAttributeConfig(num_bits=4, block_sizes=block_sizes), amax=amax
+        )
         tensor_quantizer_ref.to(self.device)
         tensor_quantizer_test = TensorQuantizer(QuantizerAttributeConfig())
 
@@ -368,8 +374,68 @@ class TensorQuantizerTester:
         tensor_quantizer_test.load_state_dict(tensor_quantizer_ref.state_dict())
         tensor_quantizer_test.to(self.device)
 
+        original_amax = tensor_quantizer_ref._amax
+        amax_before = original_amax.clone()
         x = torch.randn(10, 10).to(self.device)
         assert torch.allclose(tensor_quantizer_ref(x), tensor_quantizer_test(x))
+        assert tensor_quantizer_ref._amax is original_amax
+        torch.testing.assert_close(original_amax, amax_before, rtol=0, atol=0)
+        if block_sizes is not None:
+            assert tensor_quantizer_ref._axis != state_dict["_axis"]
+
+        # Runtime repair values must not replace the caller's checkpoint properties.
+        allowed = TensorQuantizer._repair_overlay_properties
+        originals = {name: state_dict[name] for name in allowed if name in state_dict}
+        tensor_quantizer_ref._local_repair_active = True
+        object.__setattr__(tensor_quantizer_ref, "_local_repair_state", object())
+        tensor_quantizer_ref._fake_quantize = lambda value: value
+        tensor_quantizer_ref._local_repair_properties = {
+            **originals,
+            "_num_bits": 1,
+            "arbitrary": 7,
+        }
+        tensor_quantizer_ref._if_calib = not originals["_if_calib"]
+        tensor_quantizer_ref._slices = (slice(0, 1),)
+        tensor_quantizer_ref._amax_shape_for_export = (1,)
+        if repair_check == "live":
+            live_properties = {name: getattr(tensor_quantizer_ref, name) for name in allowed}
+            with preserve_quantizer_attributes_context(tensor_quantizer_ref):
+                tensor_quantizer_ref._if_calib = not tensor_quantizer_ref._if_calib
+            live = tensor_quantizer_ref.get_modelopt_state(properties_only=True)
+            for name, value in live_properties.items():
+                assert live[name] == value
+                assert getattr(tensor_quantizer_ref, name) == value
+        saved = tensor_quantizer_ref.get_modelopt_state()
+        assert (
+            not {
+                "_local_repair_state",
+                "_local_repair_active",
+                "_local_repair_properties",
+                "_fake_quantize",
+                "arbitrary",
+            }
+            & saved.keys()
+        )
+        assert saved["_num_bits"] == state_dict["_num_bits"]
+        assert saved["_pytorch_state_metadata"] == state_dict["_pytorch_state_metadata"]
+        for name in allowed:
+            if name in originals:
+                assert saved[name] == originals[name]
+            else:
+                assert name not in saved
+        restored = TensorQuantizer()
+        restored.set_from_modelopt_state(saved)
+        restored.load_state_dict(tensor_quantizer_ref.state_dict())
+        restored.to(self.device)
+        torch.testing.assert_close(restored(x), tensor_quantizer_test(x), rtol=0, atol=0)
+
+        for missing in (*TensorQuantizer._repair_required_properties, None):
+            malformed = originals.copy() if missing is not None else {}
+            if missing is not None:
+                del malformed[missing]
+            tensor_quantizer_ref._local_repair_properties = malformed
+            with pytest.raises(ValueError):
+                tensor_quantizer_ref.get_modelopt_state()
 
     def test_amax_export(self):
         a = torch.randn(4, 6, 8)

@@ -149,6 +149,9 @@ class TensorQuantizer(nn.Module):
             which can be used to construct amax tensor.
     """
 
+    _repair_required_properties = ("_if_calib", "_axis", "_block_sizes")
+    _repair_overlay_properties = (*_repair_required_properties, "_slices", "_amax_shape_for_export")
+
     _skip_properties_for_save_restore = {
         # Buffer/parameter layouts are serialized separately from quantizer properties.
         "_pytorch_state_metadata",
@@ -176,6 +179,12 @@ class TensorQuantizer(nn.Module):
         "pre_bwd_fn",
         # quantizer cache for custom backends, like luts
         "_quantizer_cache",
+        # Bypass masters and replay overrides belong to the active repair policy.
+        "_local_repair_state",
+        "_local_repair_active",
+        "_fake_quantize",
+        # Only its allowlisted original property values are merged into checkpoints.
+        "_local_repair_properties",
         # Runtime-only set of storage attributes tied to shared state. The tied
         # aliases are rebuilt from calibration config and tensor state during restore.
         "_shared_quant_tied_attrs",
@@ -1404,9 +1413,22 @@ class TensorQuantizer(nn.Module):
         modelopt_state = {}
         for k in self._get_properties_for_modelopt_state():
             modelopt_state[k] = getattr(self, k)
-
+        # Property-only callers preserve live execution state rather than checkpoint originals.
         if properties_only:
             return modelopt_state
+
+        if (repair_properties := getattr(self, "_local_repair_properties", None)) is not None:
+            if any(name not in repair_properties for name in self._repair_required_properties):
+                raise ValueError("Incomplete original quantizer properties captured for repair")
+            # Repair disables calibration: layout setup changes properties, not serialized buffers.
+            # Captured original properties (including absent keys) must describe those buffers.
+            # The producer must delete this snapshot on close, including failed preparation;
+            # non-adapter quantizers also need it while their calibration is disabled.
+            for name in self._repair_overlay_properties:
+                if name in repair_properties:
+                    modelopt_state[name] = repair_properties[name]
+                else:
+                    modelopt_state.pop(name, None)
 
         modelopt_state["_pytorch_state_metadata"] = self._get_pytorch_state_metadata()
 
