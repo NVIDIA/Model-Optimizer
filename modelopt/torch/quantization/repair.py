@@ -333,7 +333,9 @@ def plan_iq_repair(units, *, root_model=None):
                 if hasattr(quantizer, "_local_repair_state"):
                     raise ValueError("An IQ repair operation is already active")
                 seen_quantizers.add(id(quantizer))
-                bindings.append(_WeightBinding(module, index, quantizer, f"{unit_index}.{path}.{index}"))
+                bindings.append(
+                    _WeightBinding(module, index, quantizer, f"{unit_index}.{path}.{index}")
+                )
         if not bindings:
             raise ValueError("A selected Bypass boundary has no enabled native IQ weights")
         plans.append(tuple(bindings))

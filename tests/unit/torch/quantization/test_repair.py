@@ -565,7 +565,7 @@ def test_iq_policy_restores_first_flags_of_shared_frozen_modules(separate_polici
     assert all(not hasattr(q, "_local_repair_properties") for q in units.modules())
 
 
-def test_iq_resident_nonoffload_hook_needs_no_optional_offload_plugin(monkeypatch):
+def test_iq_policy_resident_nonoffload_hook_needs_no_optional_offload_plugin(monkeypatch):
     model = nn.Linear(256, 2, bias=False)
     mtq.quantize(model, {**_config([_iq("weight_quantizer", "iq1_s")]), "algorithm": None})
     model._hf_hook = SimpleNamespace(offload=False)
