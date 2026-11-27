@@ -58,7 +58,7 @@ def _optional(manager, dims):
 
 
 def _combine(mesh, axes, name):
-    active = [axis for axis in axes if axis in mesh.mesh_dim_names and mesh[axis].size() > 1]
+    active = [axis for axis in mesh.mesh_dim_names if axis in axes and mesh[axis].size() > 1]
     active = active or [next(axis for axis in axes if axis in mesh.mesh_dim_names)]
     return mesh[active[0]] if len(active) == 1 else mesh[tuple(active)]._flatten(name)
 
