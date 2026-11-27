@@ -125,6 +125,19 @@ def _invalidate_rollbacks(scope):
             _ROLLBACK_RECEIPTS.pop(receipt, None)
 
 
+def _expire_overlapping_rollbacks(module, materialized=(), *, capture_scope=False, strict=True):
+    if not capture_scope and not _ROLLBACK_RECEIPTS:
+        return None
+    try:
+        scope = _rollback_scope(module, materialized)
+        _invalidate_rollbacks(scope)
+        return scope
+    except BaseException as exc:
+        _ROLLBACK_RECEIPTS.clear()
+        if strict or not isinstance(exc, Exception):
+            raise
+
+
 def _snapshot_aliased_weights(entered, retained):
     """Copy backing tensors that live CPU weights can mutate in place."""
     tensors = [
@@ -156,18 +169,17 @@ def _snapshot_aliased_weights(entered, retained):
                 tensor.stride(),
                 tensor.dtype,
             )
-            if torch._debug_has_internal_overlap(tensor) != 0:
-                # TooHard includes ordinary sliced views. Prove disjoint strides without a
-                # full-size offset tensor; ambiguous interleaved layouts remain unsupported.
-                span = 1
-                for stride, size in sorted(zip(tensor.stride(), tensor.shape, strict=True)):
-                    if size <= 1:
-                        continue
-                    if stride < span:
-                        raise ValueError(
-                            "Accelerate rollback cannot restore overlapping or unproven backing views"
-                        )
-                    span += (size - 1) * stride
+            # Prove disjoint strides without a full-size offset tensor; ambiguous
+            # interleaved layouts remain unsupported, while ordinary stepped slices work.
+            span = 1
+            for stride, size in sorted(zip(tensor.stride(), tensor.shape, strict=True)):
+                if size <= 1:
+                    continue
+                if stride < span:
+                    raise ValueError(
+                        "Accelerate rollback cannot restore overlapping or unproven backing views"
+                    )
+                span += (size - 1) * stride
             if key not in snapshots:
                 snapshots[key] = tensor, tensor.detach().clone()
     return snapshots.values()
@@ -368,14 +380,7 @@ def _weight_access_and_writeback_context(module, writeback: bool = True, *, roll
         needs_materialize = any(p.device.type == "meta" for p in mod.parameters())
         materialized.append((mod, hook, needs_materialize))
 
-    scope = None
-    if rollback or _ROLLBACK_RECEIPTS:
-        try:
-            scope = _rollback_scope(module, materialized)
-            _invalidate_rollbacks(scope)
-        except BaseException:
-            _ROLLBACK_RECEIPTS.clear()
-            raise
+    scope = _expire_overlapping_rollbacks(module, materialized, capture_scope=rollback)
 
     for mod, hook, _ in materialized:
         assert len(hook.weights_map) > 0

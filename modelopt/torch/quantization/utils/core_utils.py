@@ -674,7 +674,8 @@ def fsdp2_weight_access_and_writeback_context(
     require job termination.
 
     Direct entry and publication expire overlapping Accelerate rollback callbacks, as the dispatcher
-    does; disjoint callbacks remain valid.
+    does; disjoint callbacks remain valid. Outside writable consensus, a receipt-inspection error
+    conservatively expires all callbacks without raising or changing the native FSDP outcome.
 
     Raises:
         RuntimeError: Another thread holds the process-local weight-access guard.
@@ -686,6 +687,8 @@ def fsdp2_weight_access_and_writeback_context(
             _fsdp2_weight_access_and_writeback_context(
                 module, root_model, writeback, names, rollback=rollback
             ),
+            fsdp_access=True,
+            writeback=writeback,
         ),
     ):
         yield
@@ -697,7 +700,7 @@ def _fsdp2_weight_access_and_writeback_context(module, root_model, writeback, na
     fsdp_module = _get_enclosing_fsdp_module(module, root_model, names)
     assert fsdp_module is not None, "Module is not wrapped by FSDP"
     if not writeback:
-        _invalidate_pending_accelerate_rollbacks(module)
+        _invalidate_pending_accelerate_rollbacks(module, strict=False)
         with _fsdp2_unshard_context(fsdp_module):
             yield
         return
@@ -967,28 +970,27 @@ def _weight_access_guard():
         _WEIGHT_ACCESS_LOCK.release()
 
 
-def _invalidate_pending_accelerate_rollbacks(module):
+def _invalidate_pending_accelerate_rollbacks(module, *, strict=True):
     # A pending callback implies the optional plugin is already loaded.
     plugin = sys.modules.get("modelopt.torch.quantization.plugins.accelerate")
-    if plugin is not None and plugin._ROLLBACK_RECEIPTS:
-        try:
-            plugin._invalidate_rollbacks(plugin._rollback_scope(module, ()))
-        except BaseException:
-            plugin._ROLLBACK_RECEIPTS.clear()
-            raise
+    if plugin is not None:
+        plugin._expire_overlapping_rollbacks(module, strict=strict)
 
 
 @contextmanager
-def _expire_accelerate_rollbacks_on_exit(module, context):
+def _expire_accelerate_rollbacks_on_exit(module, context, *, fsdp_access=False, writeback=True):
     try:
         with context as owner_rollback:
             try:
                 yield owner_rollback
             finally:
-                _invalidate_pending_accelerate_rollbacks(module)
+                _invalidate_pending_accelerate_rollbacks(
+                    module, strict=not (fsdp_access and not writeback)
+                )
     finally:
-        # Owner exit can restore persistent storage hidden by its materialized view.
-        _invalidate_pending_accelerate_rollbacks(module)
+        # After FSDP consensus, bookkeeping must not introduce rank-local failure.
+        # Clearing all receipts on inspection failure also covers restored shard aliases.
+        _invalidate_pending_accelerate_rollbacks(module, strict=not fsdp_access)
 
 
 @contextmanager
@@ -1064,7 +1066,9 @@ def _enable_weight_access_and_writeback(module, root_model, names, writeback, *,
         context = nullcontext()
 
     if not accelerate_access:
-        context = _expire_accelerate_rollbacks_on_exit(module, context)
+        context = _expire_accelerate_rollbacks_on_exit(
+            module, context, fsdp_access=fsdp_access, writeback=writeback
+        )
     with context as owner_rollback:
         yield owner_rollback
 
@@ -1073,7 +1077,9 @@ def requires_weight_materialization(module, root_model, names: "ModuleNames | No
     """Whether ``module``'s own weights are currently unreadable and need a window.
 
     Checks the module's own weight owners; the dispatcher also accepts composite modules
-    with offloaded descendants. Two things must hold: the module owns tensors that are
+    with offloaded descendants. Gated export callers visit descendants separately, so checking
+    descendants here would repeatedly materialize containers and their children.
+    Two things must hold: the module owns tensors that are
     not directly readable right now
     (offloaded to meta, or a sharded ``DTensor``), and a context exists that can
     materialize them. Modules already materialized are excluded -- re-entering a window

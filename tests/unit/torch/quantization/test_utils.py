@@ -594,7 +594,6 @@ def _fsdp2_owns_its_params_in_every_state_job(rank, size, asymmetric, receipt_st
         return inspect_scope(owner, materialized)
 
     with (
-        pytest.raises(RuntimeError, match="post-publication") if scope_failure else nullcontext(),
         mock.patch.object(offload_plugin, "_rollback_scope", post_publication_scope)
         if scope_failure
         else nullcontext(),
@@ -665,7 +664,7 @@ def test_fsdp2_owns_its_parameters_in_every_shard_state(
         cpu_dist_workers.job_timeout, cpu_dist_workers.failure_grace = timeout, grace
 
 
-def _fsdp2_receipt_inspection_failure_job(rank, size, direct, inject):
+def _fsdp2_receipt_inspection_failure_job(rank, size, direct, inject, stage):
     # Accelerate is optional; the parent integration test skips when it is unavailable.
     from accelerate import cpu_offload
 
@@ -685,9 +684,15 @@ def _fsdp2_receipt_inspection_failure_job(rank, size, direct, inject):
     inspect = offload_plugin._rollback_scope
     redistribute = DTensor.redistribute
     gathers = 0
+    body_done = False
 
     def inspect_scope(owner, materialized):
-        if inject and rank == 0 and owner is layer:
+        at_stage = (
+            stage in ("preflight", "read_entry")
+            or (stage == "read_exit" and body_done)
+            or (stage == "publication" and body_done and owner.weight is parameters["weight"])
+        )
+        if inject and rank == 0 and owner is layer and at_stage:
             raise failure
         return inspect(owner, materialized)
 
@@ -705,12 +710,21 @@ def _fsdp2_receipt_inspection_failure_job(rank, size, direct, inject):
         with (
             mock.patch.object(offload_plugin, "_rollback_scope", inspect_scope),
             mock.patch.object(DTensor, "redistribute", count_gathers),
-            access(layer, layer),
+            access(layer, layer, writeback=not stage.startswith("read_")),
         ):
             entered = True
+            if stage in ("read_exit", "publication"):
+                with offload_plugin.weight_access_and_writeback_context(
+                    alias, rollback=True
+                ) as undo:
+                    pass
+            if stage == "publication":
+                with torch.no_grad():
+                    layer.weight.add_(1)
+            body_done = True
     except RuntimeError as exc:
         error = exc
-    if inject:
+    if inject and stage == "preflight":
         assert error is not None and not entered
         assert gathers == 0, "Receipt inspection must fail every rank before gathering"
         if rank == 0:
@@ -721,17 +735,20 @@ def _fsdp2_receipt_inspection_failure_job(rank, size, direct, inject):
         undo()
     for name, parameter in parameters.items():
         assert layer.get_parameter(name) is parameter
-        torch.testing.assert_close(parameter.to_local(), before[name], rtol=0, atol=0)
+        expected = before[name] + (stage == "publication" and name == "weight")
+        torch.testing.assert_close(parameter.to_local(), expected, rtol=0, atol=0)
+    torch.distributed.barrier()
 
 
 @pytest.mark.parametrize("direct", [False, True])
-def test_fsdp2_receipt_inspection_failure_is_coordinated(cpu_dist_workers, direct):
+@pytest.mark.parametrize("stage", ["preflight", "read_entry", "read_exit", "publication"])
+def test_fsdp2_receipt_inspection_failure_is_coordinated(cpu_dist_workers, direct, stage):
     pytest.importorskip("accelerate")
-    cpu_dist_workers.run(_fsdp2_receipt_inspection_failure_job, direct, False)
+    cpu_dist_workers.run(_fsdp2_receipt_inspection_failure_job, direct, False, stage)
     timeout, grace = cpu_dist_workers.job_timeout, cpu_dist_workers.failure_grace
     try:
         cpu_dist_workers.job_timeout, cpu_dist_workers.failure_grace = 15, 2
-        cpu_dist_workers.run(_fsdp2_receipt_inspection_failure_job, direct, True)
+        cpu_dist_workers.run(_fsdp2_receipt_inspection_failure_job, direct, True, stage)
     finally:
         cpu_dist_workers.job_timeout, cpu_dist_workers.failure_grace = timeout, grace
 

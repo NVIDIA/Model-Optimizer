@@ -41,6 +41,8 @@ Changelog
 
 **Backward Breaking Changes**
 
+- Weight-access windows and Accelerate undo callbacks now require caller serialization across threads, including HF TP and ordinary/no-op dispatcher routes; concurrent calls raise ``RuntimeError`` even for unrelated modules. The guard remains held for the full context, including multi-batch persistent materialization.
+- Default Accelerate weight access now materializes hookless composite modules with offloaded descendants and skips writeback after a body failure. Callers that catch exceptions must restore in-place CPU aliases themselves or opt into ``rollback=True``; custom offload mapping subclasses are now refused before onload.
 - Writable FSDP2 weight-access windows now skip writeback when any participating rank's body fails, and ranks whose bodies succeeded also raise ``RuntimeError``. Callers that catch a body exception must no longer rely on gathered edits being published; restore any aliased or previously published values from caller-owned backups. Temporary gathered parameters now preserve the original parameter's ``requires_grad`` flag instead of always enabling gradients.
 
 **Deprecations**
