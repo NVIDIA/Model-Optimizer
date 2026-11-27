@@ -769,6 +769,17 @@ def test_expert_parallel_calibration_needs_the_experts_expert_parallel_group(
     cpu_dist_workers.run(_expert_parallel_calibration_job, layout=layout)
 
 
+def test_unseeded_experts_are_refused_before_quantizing_without_an_algorithm_key():
+    """A config without "algorithm" calibrates with max, so it is refused as max is: before any
+    module is converted."""
+    model = nn.Sequential(OrderedDict(experts=nn.Linear(16, 16)))
+    set_distribution_plan(model, DistributionPlan(world_size=2, ep_size=2))
+    config = {k: v for k, v in mtq.INT8_DEFAULT_CFG.items() if k != "algorithm"}
+    with pytest.raises(NotImplementedError, match="experts are sharded over 2 ranks"):
+        mtq.quantize(model, config, lambda m: m(torch.randn(2, 16)))
+    assert type(model.experts) is nn.Linear
+
+
 def _expert_parallel_auto_quantize_job(rank, size):
     model = nn.Sequential(OrderedDict(gate=nn.Linear(16, 16), experts=nn.Linear(16, 16)))
     dp, ep = _EXPERT_LAYOUTS["seeded"]["experts"]
