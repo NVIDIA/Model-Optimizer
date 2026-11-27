@@ -1,0 +1,304 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
+"""CPU lifecycle and ownership contracts for native IQ scale repair."""
+
+import builtins
+import copy
+from types import SimpleNamespace
+
+import numpy as np
+import pytest
+import torch
+from torch import nn
+
+import modelopt.torch.quantization as mtq
+from modelopt.torch.quantization.repair import plan_iq_repair
+from modelopt.torch.quantization.utils.core_utils import enable_weight_access_and_writeback
+
+
+def _config(entries):
+    return {"quant_cfg": [{"quantizer_name": "*", "enable": False}, *entries], "algorithm": "max"}
+
+
+def _iq(path, name):
+    return {"quantizer_name": path, "cfg": {"num_bits": name, "backend": "ggml"}}
+
+
+@pytest.mark.parametrize("alias", ["parameter", "storage", "frozen_bias"])
+def test_iq_plan_protects_frozen_owners_and_allows_shared_nonwrite_parameters(alias):
+    model = nn.ModuleList([nn.Linear(256, 2), nn.Linear(256, 2)])
+    entries = [_iq("0.weight_quantizer", "iq1_s")]
+    if alias == "frozen_bias":
+        entries.append(_iq("1.weight_quantizer", "iq1_s"))
+    mtq.quantize(model, {**_config(entries), "algorithm": None})
+    if alias == "parameter":
+        model[1].weight = model[0].weight
+    elif alias == "storage":
+        model[1].weight = nn.Parameter(model[0].weight.detach())
+    else:
+        model[1].bias = model[0].bias
+    before = {name: parameter.detach().clone() for name, parameter in model.named_parameters()}
+    flags = {name: parameter.requires_grad for name, parameter in model.named_parameters()}
+    if alias == "frozen_bias":
+        plan = plan_iq_repair([model])
+        assert len(plan.bindings[0]) == 2
+    else:
+        with pytest.raises(ValueError):
+            plan_iq_repair([model])
+    assert all(torch.equal(parameter, before[name]) for name, parameter in model.named_parameters())
+    assert {name: parameter.requires_grad for name, parameter in model.named_parameters()} == flags
+
+
+@pytest.mark.parametrize(
+    ("alias", "offload"),
+    [
+        ("parameter", False),
+        ("storage", False),
+        ("buffer", False),
+        ("quantizer", False),
+        ("parameter", True),
+        ("storage", True),
+        ("buffer", True),
+        ("quantizer", True),
+        ("resident_parameter", True),
+        ("sparse_buffer", False),
+        ("independent_sparse_buffer", False),
+        ("numpy_parameter", False),
+        ("numpy_buffer", False),
+        ("numpy_disjoint", False),
+    ],
+)
+def test_iq_plan_refuses_shared_weights_outside_selected_boundaries(alias, offload):
+    model = nn.ModuleList([nn.Linear(256, 2, bias=False) for _ in range(2)])
+    mtq.quantize(model, {**_config([_iq("0.weight_quantizer", "iq1_s")]), "algorithm": None})
+    if alias.startswith("numpy_"):
+        array = np.arange(1024, dtype=np.float32)
+        model[0].weight = nn.Parameter(torch.from_numpy(array[:512]).reshape(2, 256))
+        offset = 512 if alias == "numpy_disjoint" else 256
+        other = torch.from_numpy(array[offset : offset + 512]).reshape(2, 256)
+        assert other.untyped_storage().data_ptr() != model[0].weight.untyped_storage().data_ptr()
+        if alias == "numpy_buffer":
+            model[1].register_buffer("frozen_weight", other)
+        else:
+            model[1].weight = nn.Parameter(other)
+        if alias == "numpy_disjoint":
+            plan_iq_repair([model[0]], root_model=model)
+            return
+    elif alias in ("sparse_buffer", "independent_sparse_buffer"):
+        values = model[0].weight.detach().view(-1)
+        if alias == "independent_sparse_buffer":
+            values = values.clone()
+        model[1].register_buffer(
+            "frozen_weight", torch.sparse_coo_tensor(torch.arange(512).unsqueeze(0), values, (512,))
+        )
+        if alias == "independent_sparse_buffer":
+            plan_iq_repair([model[0]], root_model=model)
+            return
+    elif alias == "resident_parameter":
+        resident_weight = model[1].weight.detach()
+    elif alias == "quantizer":
+        model[1].weight_quantizer = model[0].weight_quantizer
+    elif alias == "buffer":
+        model[1].register_buffer("frozen_weight", model[0].weight.detach())
+    else:
+        model[1].weight = (
+            model[0].weight if alias == "parameter" else nn.Parameter(model[0].weight.detach())
+        )
+    before = copy.deepcopy(model.state_dict())
+    if offload:
+        pytest.importorskip("transformers")
+        pytest.importorskip("accelerate").cpu_offload(
+            model, execution_device="cpu", offload_buffers=True
+        )
+    if alias == "resident_parameter":
+        model[0].weight = nn.Parameter(resident_weight)
+        before["0.weight"] = before["1.weight"]
+    parameters = dict(model.named_parameters(remove_duplicate=False))
+    flags = {name: parameter.requires_grad for name, parameter in parameters.items()}
+    with pytest.raises(ValueError):
+        plan_iq_repair([model[0]], root_model=model)
+    assert all(
+        parameter is parameters[name]
+        for name, parameter in model.named_parameters(remove_duplicate=False)
+    )
+    assert {
+        name: parameter.requires_grad
+        for name, parameter in model.named_parameters(remove_duplicate=False)
+    } == flags
+    with enable_weight_access_and_writeback(model, model, writeback=False):
+        torch.testing.assert_close(model.state_dict(), before, rtol=0, atol=0)
+    assert not hasattr(model[0].weight_quantizer, "_local_repair_state")
+
+
+def test_planning_units_keeps_expert_weights_lazy(monkeypatch):
+    pytest.importorskip("transformers")
+    # Transformers is optional; use its actual quantized fused expert banks when available.
+    from _test_utils.torch.transformers_models import get_tiny_mixtral
+
+    from modelopt.torch.quantization.plugins.huggingface import _QuantFusedExperts
+
+    model = get_tiny_mixtral(
+        hidden_size=256,
+        intermediate_size=16,
+        num_hidden_layers=2,
+        num_local_experts=3,
+        num_experts_per_tok=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        vocab_size=32,
+    )
+    mtq.quantize(
+        model,
+        {
+            **_config([_iq("*experts.gate_up_proj_weight_quantizers*", "iq2_xxs")]),
+            "algorithm": None,
+        },
+    )
+    banks = [module for module in model.modules() if isinstance(module, _QuantFusedExperts)]
+    assert len(banks) == 2
+    materializations = [0, 0]
+    expected = [
+        sum(q.is_enabled for q in bank.iter_weight_quantizers_for_calibration()) for bank in banks
+    ]
+    for index, bank in enumerate(banks):
+        original = bank.iter_weights_for_calibration
+
+        def measured(iterate=original, owner=index):
+            for pair in iterate():
+                materializations[owner] += 1
+                yield pair
+
+        monkeypatch.setattr(bank, "iter_weights_for_calibration", measured)
+    plan = plan_iq_repair(banks)
+    assert materializations == [0, 0]
+    assert [len(bindings) for bindings in plan.bindings] == expected
+
+
+def test_iq_plan_refuses_uninspectable_storage():
+    class StorageLessTensor(torch.Tensor):
+        def untyped_storage(self):
+            raise NotImplementedError("No physical storage")
+
+    model = nn.Linear(256, 2, bias=False)
+    mtq.quantize(model, {**_config([_iq("*weight_quantizer", "iq1_s")]), "algorithm": None})
+    model.weight = nn.Parameter(model.weight.as_subclass(StorageLessTensor))
+    with pytest.raises(ValueError, match="cannot inspect physical storage"):
+        plan_iq_repair([model])
+
+
+def _iq_sharded_ownership_job(rank, size):
+    from torch.distributed.device_mesh import init_device_mesh
+    from torch.distributed.fsdp import fully_shard
+    from torch.distributed.tensor import DTensor
+
+    from modelopt.torch.quantization.utils.core_utils import _fsdp2_persistent_parameters
+
+    mesh = init_device_mesh("cpu", (size,))
+    for tied in (False, True):
+        model = nn.Sequential(*(nn.Linear(256, 4, bias=False) for _ in range(2)))
+        mtq.quantize(model, {**_config([_iq("*weight_quantizer", "iq1_s")]), "algorithm": None})
+        if tied:
+            model[1].weight = model[0].weight
+        model[0].weight.requires_grad_(False)
+        fully_shard(model, mesh=mesh)
+        persistent = _fsdp2_persistent_parameters(model)
+        assert all(isinstance(persistent[owner, "weight"], DTensor) for owner in model)
+        if tied:
+            assert persistent[model[0], "weight"] is persistent[model[1], "weight"]
+            with pytest.raises(ValueError, match=r"ownership|storage"):
+                plan_iq_repair([model[0]], root_model=model)
+        else:
+            plan = plan_iq_repair(list(model), root_model=model)
+            for index, owner in enumerate(model):
+                flags = [
+                    entry for entry in plan.parameter_flags[index] if entry[:2] == (owner, "weight")
+                ]
+                assert len(flags) == 1
+                assert flags[0][2] is persistent[owner, "weight"]
+                assert flags[0][3] is (index != 0)
+
+
+def test_iq_plan_inspects_persistent_shards_and_shared_registrations(cpu_dist_workers):
+    cpu_dist_workers.run(_iq_sharded_ownership_job)
+
+
+def test_iq_resident_nonoffload_hook_needs_no_optional_offload_plugin(monkeypatch):
+    model = nn.Linear(256, 2, bias=False)
+    mtq.quantize(model, {**_config([_iq("weight_quantizer", "iq1_s")]), "algorithm": None})
+    model._hf_hook = SimpleNamespace(offload=False)
+    original_import = builtins.__import__
+
+    def without_offload_plugin(name, *args, **kwargs):
+        if name.endswith("plugins.accelerate"):
+            raise ImportError("Optional offload dependencies are unavailable")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", without_offload_plugin)
+    original = model.weight
+    plan = plan_iq_repair([model])
+    assert len(plan.bindings[0]) == 1
+    assert model.weight is original and model.weight.requires_grad
+
+
+def test_legacy_first_projection_quantizer_is_detected_by_export():
+    from modelopt.torch.export.quant_utils import (
+        get_quantization_format,
+        get_weight_block_size,
+        uses_iq_quantization,
+    )
+    from modelopt.torch.quantization.config import QuantizerAttributeConfig
+    from modelopt.torch.quantization.nn import TensorQuantizer
+    from modelopt.torch.quantization.utils.core_utils import (
+        representative_weight_quantizer,
+        weight_attr_names,
+    )
+
+    module = nn.Module()
+    module._first_proj_attr = "up_proj"
+    module.up_proj = nn.Parameter(torch.randn(2, 256))
+    quantizer = TensorQuantizer(
+        QuantizerAttributeConfig(num_bits="iq1_s", backend="ggml", block_sizes={-1: 256})
+    )
+    module.gate_up_proj_weight_quantizers = nn.ModuleList([quantizer])
+    assert list(weight_attr_names(module)) == ["up_proj"]
+    assert representative_weight_quantizer(module, "up_proj") is quantizer
+    assert get_quantization_format(module) == "iq1_s"
+    assert get_weight_block_size(module, "up_proj") == 256
+    assert uses_iq_quantization(module)
+
+
+@pytest.mark.parametrize("native_iq", [False, True])
+def test_iq_plan_refuses_an_unsupported_grouped_iq_container(native_iq):
+    from modelopt.torch.quantization.nn import GroupedQuantizer
+
+    model = nn.Sequential(nn.Linear(256, 2, bias=False), nn.Linear(256, 2, bias=False))
+    entries = [_iq("1.weight_quantizer", "iq1_s")]
+    if native_iq:
+        entries.append(_iq("0.weight_quantizer", "iq1_s"))
+    else:
+        entries.append({"quantizer_name": "0.weight_quantizer", "cfg": {"num_bits": 8}})
+    mtq.quantize(model, {**_config(entries), "algorithm": None})
+    model[0].weight_quantizer = GroupedQuantizer(model[0].weight_quantizer)
+    original = model[0].weight
+    if native_iq:
+        with pytest.raises(ValueError, match="unambiguous native weight quantizer"):
+            plan_iq_repair([model])
+    else:
+        plan = plan_iq_repair([model])
+        assert len(plan.bindings[0]) == 1
+        assert plan.bindings[0][0].module is model[1]
+    assert model[0].weight is original and model[0].weight.requires_grad

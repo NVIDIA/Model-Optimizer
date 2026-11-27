@@ -696,3 +696,37 @@ def test_planned_batch_size_then_max_calibration(need_2_gpus, dist_workers):
     them, the smallest any rank's GPU allows, then calibrates each rank's shard with it: every rank
     runs the same steps, and max calibration gives every rank the same scales."""
     dist_workers.run(_test_planned_batch_size_then_max_calibration)
+
+
+@pytest.mark.parametrize("shared", [False, True])
+def test_iq_plan_checks_execution_device_offload_backing(shared):
+    from accelerate.hooks import AlignDevicesHook, add_hook_to_module
+
+    from modelopt.torch.quantization.repair import plan_iq_repair
+
+    model = nn.ModuleList([nn.Linear(256, 2, bias=False) for _ in range(2)])
+    mtq.quantize(
+        model,
+        {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {
+                    "quantizer_name": "0.weight_quantizer",
+                    "cfg": {"num_bits": "iq1_s", "backend": "ggml"},
+                },
+            ],
+            "algorithm": None,
+        },
+    )
+    backing = model[0].weight.detach().cuda()
+    model[1].register_buffer("retained", backing.view_as(backing) if shared else backing.clone())
+    add_hook_to_module(
+        model[0],
+        AlignDevicesHook(execution_device="cuda", offload=True, weights_map={"weight": backing}),
+    )
+    assert model[0].weight.is_meta
+    if shared:
+        with pytest.raises(ValueError, match="storage"):
+            plan_iq_repair([model[0]], root_model=model)
+    else:
+        plan_iq_repair([model[0]], root_model=model)

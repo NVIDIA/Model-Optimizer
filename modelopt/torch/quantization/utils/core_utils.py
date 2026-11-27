@@ -218,6 +218,24 @@ def reduce_sum(input, axis=None, keepdims=True):
     return output
 
 
+def _weight_quantizer_container(module, weight_name):
+    """Resolve singular, grouped, plural and legacy first-projection layouts once."""
+    from ..nn import GroupedQuantizer, SequentialQuantizer, TensorQuantizer
+
+    singular = quantizer_attr_names(weight_name).weight_quantizer
+    container = getattr(module, singular, None)
+    if isinstance(container, TensorQuantizer | SequentialQuantizer | GroupedQuantizer):
+        return container
+    container = getattr(module, singular + "s", None)
+    if isinstance(container, nn.ModuleList):
+        return container
+    if weight_name == getattr(module, "_first_proj_attr", None) and weight_name != "gate_up_proj":
+        container = getattr(module, "gate_up_proj_weight_quantizers", None)
+        if isinstance(container, nn.ModuleList):
+            return container
+    return None
+
+
 def representative_weight_quantizer(module: nn.Module, weight_name: str = "weight"):
     """Return the representative weight quantizer for ``weight_name`` on ``module``.
 
@@ -234,19 +252,42 @@ def representative_weight_quantizer(module: nn.Module, weight_name: str = "weigh
     """
     from ..nn import GroupedQuantizer, SequentialQuantizer, TensorQuantizer
 
-    singular = quantizer_attr_names(weight_name).weight_quantizer
-    q = getattr(module, singular, None)
-    if isinstance(q, TensorQuantizer | SequentialQuantizer):
-        return q
-    if isinstance(q, GroupedQuantizer) and len(q) > 0:
-        return q[0]
-
-    plural = getattr(module, singular + "s", None)
-    if isinstance(plural, nn.ModuleList) and len(plural) > 0:
-        first = plural[0]
+    container = _weight_quantizer_container(module, weight_name)
+    if isinstance(container, TensorQuantizer | SequentialQuantizer):
+        return container
+    if isinstance(container, GroupedQuantizer | nn.ModuleList) and len(container):
+        first = container[0]
         if isinstance(first, TensorQuantizer | SequentialQuantizer):
             return first
     return None
+
+
+def _weight_quantizer_owners(module, selected):
+    """Map selected quantizers to physical parameters using the layouts below."""
+    from ..nn import GroupedQuantizer  # ..nn imports this utils package at module scope
+
+    owners = {}
+    for name in weight_attr_names(module):
+        container = _weight_quantizer_container(module, name)
+        pairs = (
+            [(f"weight{i}", q) for i, q in enumerate(container)]
+            if isinstance(container, GroupedQuantizer)
+            else [(name, container)]
+        )
+        for parameter_name, quantizers in pairs:
+            if quantizers is None:
+                continue
+            matches = selected.intersection(id(q) for q in quantizers.modules())
+            if matches:
+                if module._parameters.get(parameter_name) is None:
+                    raise ValueError(
+                        f"Selected quantizer on {type(module).__name__}.{parameter_name} "
+                        "has no registered physical parameter"
+                    )
+                owners.update(dict.fromkeys(matches, parameter_name))
+    if owners.keys() != selected:
+        raise ValueError("Selected quantizers have unsupported physical weight ownership")
+    return owners
 
 
 def weight_attr_names(module: nn.Module) -> "Generator[str, None, None]":
@@ -279,14 +320,6 @@ def weight_attr_names(module: nn.Module) -> "Generator[str, None, None]":
         if not isinstance(weight, nn.Parameter):
             continue
         if representative_weight_quantizer(module, name) is not None:
-            yield name
-        elif (
-            name == getattr(module, "_first_proj_attr", None)
-            and name != "gate_up_proj"
-            and isinstance(getattr(module, "gate_up_proj_weight_quantizers", None), nn.ModuleList)
-        ):
-            # Backward compatibility for older non-gated fused-experts wrappers that
-            # kept first-projection quantizers under the gate_up_proj sentinel name.
             yield name
 
 
@@ -540,6 +573,18 @@ def _fsdp2_param_groups(module: nn.Module):
         if isinstance(unit, FSDPModule)
         and (group := fully_shard.state(unit)._fsdp_param_group) is not None
     }.values()
+
+
+def _fsdp2_persistent_parameters(module: nn.Module) -> dict[tuple[nn.Module, str], nn.Parameter]:
+    """Map logical registrations to persistent shards without retaining unsharded views."""
+    parameters = {}
+    for group in _fsdp2_param_groups(module):
+        for parameter in group.fsdp_params:
+            info = parameter._module_info
+            parameters[info.module, info.param_name] = parameter.sharded_param
+            for owner, name in zip(info.shared_modules, info.shared_param_names, strict=True):
+                parameters[owner, name] = parameter.sharded_param
+    return parameters
 
 
 # Per FSDP2 unit, the parameters _fsdp2_owned_params found: the weight-access window opens once per
