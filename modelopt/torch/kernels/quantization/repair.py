@@ -154,9 +154,10 @@ def decode_iq_levels(packed, format_name, shape):
         raise ValueError("Native IQ decode requires CUDA bytes matching complete native blocks.")
     packed = packed.contiguous()
     output = torch.empty(shape, device=packed.device, dtype=torch.int8)
-    _decode_iq[(triton.cdiv(output.numel(), 1024),)](
-        packed, grid, output, output.numel(), format_name, block_bytes, 1024
-    )
+    with torch.cuda.device(packed.device):
+        _decode_iq[(triton.cdiv(output.numel(), 1024),)](
+            packed, grid, output, output.numel(), format_name, block_bytes, 1024
+        )
     return output
 
 
@@ -170,15 +171,16 @@ class _BlockScales(torch.autograd.Function):
                 "Scale groups must evenly partition immutable levels in powers of two."
             )
         output = torch.empty(levels.shape, device=levels.device, dtype=dtype)
-        _apply[(triton.cdiv(levels.numel(), 1024),)](
-            levels,
-            scales,
-            output,
-            levels.numel(),
-            group,
-            1024,
-            enable_fp_fusion=False,
-        )
+        with torch.cuda.device(levels.device):
+            _apply[(triton.cdiv(levels.numel(), 1024),)](
+                levels,
+                scales,
+                output,
+                levels.numel(),
+                group,
+                1024,
+                enable_fp_fusion=False,
+            )
         ctx.save_for_backward(levels)
         ctx.scale_shape, ctx.scale_dtype, ctx.group = scales.shape, scales.dtype, group
         return output

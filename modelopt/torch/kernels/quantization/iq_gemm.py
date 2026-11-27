@@ -189,20 +189,21 @@ class _IQLinear(torch.autograd.Function):
         output = inputs.new_empty((x.shape[0], n))
         meta = {"GROUP": group, "KIND": name, "BYTES": block_bytes}
         if x.shape[0]:
-            _forward[(triton.cdiv(x.shape[0], _TILE_M), triton.cdiv(n, _TILE_N))](
-                x,
-                packed,
-                steps,
-                grid,
-                bias,
-                output,
-                x.shape[0],
-                n,
-                k,
-                HAS_BIAS=bias is not None,
-                enable_fp_fusion=False,
-                **meta,
-            )
+            with torch.cuda.device(inputs.device):
+                _forward[(triton.cdiv(x.shape[0], _TILE_M), triton.cdiv(n, _TILE_N))](
+                    x,
+                    packed,
+                    steps,
+                    grid,
+                    bias,
+                    output,
+                    x.shape[0],
+                    n,
+                    k,
+                    HAS_BIAS=bias is not None,
+                    enable_fp_fusion=False,
+                    **meta,
+                )
         ctx.save_for_backward(x if ctx.needs_input_grad[2] else None, packed, steps, grid)
         ctx.meta, ctx.shape, ctx.input_shape = meta, shape, inputs.shape
         ctx.has_bias = bias is not None
@@ -226,24 +227,26 @@ class _IQLinear(torch.autograd.Function):
         if ctx.needs_input_grad[0]:
             dx = gradient.new_empty((m, k))
             if m:
-                _input_backward[(triton.cdiv(m, _TILE_M), triton.cdiv(k, _TILE_K))](
-                    gradient,
-                    packed,
-                    steps,
-                    grid,
-                    dx,
-                    m,
-                    n,
-                    k,
-                    enable_fp_fusion=False,
-                    **ctx.meta,
-                )
+                with torch.cuda.device(gradient.device):
+                    _input_backward[(triton.cdiv(m, _TILE_M), triton.cdiv(k, _TILE_K))](
+                        gradient,
+                        packed,
+                        steps,
+                        grid,
+                        dx,
+                        m,
+                        n,
+                        k,
+                        enable_fp_fusion=False,
+                        **ctx.meta,
+                    )
         if ctx.needs_input_grad[2]:
             ds = torch.empty_like(steps) if m else torch.zeros_like(steps)
             if m:
-                _scale_backward[(triton.cdiv(n, _SCALE_TILE_N), triton.cdiv(k, _TILE_K))](
-                    x, gradient, packed, grid, ds, m, n, k, enable_fp_fusion=False, **ctx.meta
-                )
+                with torch.cuda.device(gradient.device):
+                    _scale_backward[(triton.cdiv(n, _SCALE_TILE_N), triton.cdiv(k, _TILE_K))](
+                        x, gradient, packed, grid, ds, m, n, k, enable_fp_fusion=False, **ctx.meta
+                    )
         return None if dx is None else dx.view(ctx.input_shape), None, ds, None, None, db
 
 
