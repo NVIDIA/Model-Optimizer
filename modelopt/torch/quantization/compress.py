@@ -96,10 +96,18 @@ def compress_convert(
         model, version=ModeloptStateManager(model).state_version, registry=RealQuantModuleRegistry
     )
 
+    # Only a module's own ``weight_quantizer`` has a weight pack_real_quantize_weight can pack; a
+    # fused experts module's per-expert ``*_weight_quantizers`` quantize slices of one 3-D weight
+    # and stay fake-quant, as its forward and export fold expect.
+    packable = {
+        f"{name}.weight_quantizer" if name else "weight_quantizer"
+        for name, module in model.named_modules()
+        if hasattr(module, "weight") and hasattr(module, "weight_quantizer")
+    }
     compress_cfg = config.compress
     if "default" in compress_cfg and isinstance(compress_cfg["default"], bool):
         set_quantizer_attributes_partial(
-            model, "*weight_quantizer*", {"fake_quant": not compress_cfg["default"]}
+            model, lambda name: name in packable, {"fake_quant": not compress_cfg["default"]}
         )
 
     for pattern, to_compress in compress_cfg.items():
@@ -108,7 +116,7 @@ def compress_convert(
         if isinstance(to_compress, bool):
 
             def filter_func(name):
-                return fnmatch.fnmatch(name, pattern) and "weight_quantizer" in name
+                return fnmatch.fnmatch(name, pattern) and name in packable
 
             set_quantizer_attributes_partial(model, filter_func, {"fake_quant": not to_compress})
         else:
