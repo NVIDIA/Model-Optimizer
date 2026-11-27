@@ -17,6 +17,8 @@
 
 import copy
 import ctypes
+import glob
+import importlib.util
 import os
 import platform
 import tempfile
@@ -44,17 +46,68 @@ except ImportError:
 MAX_IR_VERSION = 10
 
 
+_LD_CONF_GLOB = "/etc/ld.so.conf.d/*.conf"
+
+
+def _resolve_plugin_library_path(plugin_path: str) -> str:
+    """Resolve a bare shared-library SONAME (e.g. from ``ctypes.util.find_library``) to a file path."""
+    if (
+        os.path.isfile(plugin_path)
+        or os.sep in plugin_path
+        or (os.altsep and os.altsep in plugin_path)
+    ):
+        return plugin_path
+
+    search_dirs: list[str] = [
+        d for d in os.environ.get("LD_LIBRARY_PATH", "").split(os.pathsep) if d
+    ]
+    for pkg_name in ("tensorrt_libs", "tensorrt"):
+        spec = importlib.util.find_spec(pkg_name)
+        if spec and spec.submodule_search_locations:
+            search_dirs.extend(spec.submodule_search_locations)
+
+    for conf_file in ("/etc/ld.so.conf", *sorted(glob.glob(_LD_CONF_GLOB))):
+        if os.path.isfile(conf_file):
+            with open(conf_file, encoding="utf-8") as f:
+                search_dirs.extend(
+                    line
+                    for raw_line in f
+                    if (line := raw_line.split("#", 1)[0].strip())
+                    and not line.startswith("include ")
+                )
+
+    search_dirs.extend(
+        (
+            "/usr/lib/x86_64-linux-gnu",
+            "/lib/x86_64-linux-gnu",
+            "/usr/lib/aarch64-linux-gnu",
+            "/lib/aarch64-linux-gnu",
+            "/usr/local/tensorrt/lib",
+            "/usr/local/cuda/lib64",
+            "/usr/lib64",
+            "/usr/lib",
+        )
+    )
+    for directory in search_dirs:
+        candidate = os.path.join(directory, plugin_path)
+        if os.path.isfile(candidate):
+            return candidate
+    return plugin_path
+
+
 def _is_static_plugin(plugin_path: str) -> bool:
     """Check if a plugin is statically linked against 'libnvinfer'.
 
     Args:
-        plugin_path: Path to the plugin .so file.
+        plugin_path: Path or SONAME of the plugin .so file.
 
     Returns:
         True if plugin is statically linked, False otherwise.
     """
+    resolved_path = _resolve_plugin_library_path(plugin_path)
     try:
-        return any(dep.startswith("libnvinfer.so") for dep in lief.parse(plugin_path).libraries)
+        libraries = getattr(lief.parse(resolved_path), "libraries", ())
+        return any(dep.startswith("libnvinfer.so") for dep in libraries)
     except Exception as e:
         logger.debug(
             f"Could not find 'libnvinfer.so' link in {plugin_path}: {e}. Assuming it's dynamically linked."

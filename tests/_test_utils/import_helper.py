@@ -19,13 +19,18 @@ import shutil
 import pytest
 
 
-def skip_if_no_tensorrt():
+def skip_if_no_tensorrt_python():
+    """Skip only when the native `tensorrt` Python package itself is unavailable."""
     from modelopt.onnx.quantization.ort_utils import _check_for_tensorrt
 
     try:
         _check_for_tensorrt()
     except (AssertionError, ImportError) as e:
         pytest.skip(f"{e}", allow_module_level=True)
+
+
+def skip_if_no_tensorrt():
+    skip_if_no_tensorrt_python()
 
     # Also verify that ORT's TensorRT EP can actually load its native library.
     # The tensorrt Python package may be installed, but ORT's provider shared library
