@@ -678,6 +678,10 @@ class TransformersBypassAdapter(ModuleBypassAdapter):
                 not facts.spec.causal_context_parallel
                 or not model.supports_context_parallel
                 or config._attn_implementation != "sdpa"
+                or not getattr(config, "is_causal", True)
+                or any(
+                    not getattr(reference(), "is_causal", True) for reference in facts.attentions
+                )
                 or next(
                     parameter for module in owners for parameter in module.parameters(recurse=False)
                 ).dtype
