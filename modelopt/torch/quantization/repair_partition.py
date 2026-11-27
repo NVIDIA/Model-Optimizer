@@ -75,6 +75,8 @@ def _requires_full_context_activation(quantizer):
         return True
     if not quantizer.is_enabled:
         return False
+    if quantizer._if_calib:
+        return True
     blocks = quantizer.block_sizes or {}
     if quantizer.is_static_block_quant and any(
         isinstance(axis, int) and size is not None for axis, size in blocks.items()

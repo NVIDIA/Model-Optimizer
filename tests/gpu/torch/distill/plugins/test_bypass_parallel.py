@@ -2759,6 +2759,7 @@ def test_native_context_and_replicated_fallback_match_reference(native_workers, 
 def test_context_attention_and_policy_fallback_qualification(
     need_2_gpus, dist_workers, tmp_path, capsys, case
 ):
+    # The dedicated nox bypass GPU lane pins stable Transformers 5.23 for this integration.
     pytest.importorskip("transformers", minversion="5.23")
     native = pytest.importorskip(
         "torch.distributed.tensor.experimental._context_parallel._attention"

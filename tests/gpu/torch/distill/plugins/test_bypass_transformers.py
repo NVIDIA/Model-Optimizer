@@ -141,7 +141,9 @@ def test_native_cp_preserves_effective_loss_validity(native_cp_models, validity)
 
 
 @pytest.mark.parametrize("side", ["teacher", "student"])
-@pytest.mark.parametrize("state", ["active_p", "disabled_p", "calibration_p", "kv_only"])
+@pytest.mark.parametrize(
+    "state", ["active_p", "disabled_p", "calibration_p", "calibration_k", "kv_only"]
+)
 def test_native_cp_refuses_alternate_p_attention(native_cp_models, side, state):
     teacher, adapter = native_cp_models
     model = teacher if side == "teacher" else adapter.student
@@ -156,14 +158,15 @@ def test_native_cp_refuses_alternate_p_attention(native_cp_models, side, state):
     with torch.no_grad():
         torch.testing.assert_close(model(**batch).logits, expected, rtol=0, atol=0)
     assert original_attention_type in type(attention).__mro__
-    quantizer = attention.p_bmm_quantizer
+    quantizer = attention.k_bmm_quantizer if state == "calibration_k" else attention.p_bmm_quantizer
     quantizer.num_bits = (4, 3)
     quantizer.block_sizes = None
     quantizer.amax = torch.tensor(3.0)
     if state not in ("disabled_p", "kv_only"):
         quantizer.enable()
-        assert attention._p_qdq_mode() == "fp8"
-        if state == "calibration_p":
+        if state != "calibration_k":
+            assert attention._p_qdq_mode() == "fp8"
+        if state in ("calibration_p", "calibration_k"):
             quantizer.disable_quant()
             quantizer.enable_calib()
     elif state == "kv_only":
@@ -173,8 +176,8 @@ def test_native_cp_refuses_alternate_p_attention(native_cp_models, side, state):
             kv.block_sizes = None
             kv.amax = torch.tensor(3.0)
             kv.enable()
-    if state == "active_p":
-        assert quantizer.is_enabled and quantizer._if_quant
+    if state in ("active_p", "calibration_p", "calibration_k"):
+        assert quantizer.is_enabled
         with pytest.raises(ValueError):
             adapter._cp_inputs(teacher, batch)
     else:
@@ -192,6 +195,8 @@ def test_native_cp_refuses_alternate_p_attention(native_cp_models, side, state):
         ("llama", "longrope"),
         ("qwen3", "default"),
         ("qwen3", "sliding"),
+        ("qwen3", "bidirectional_config"),
+        ("qwen3", "bidirectional_attention"),
         ("qwen3_moe", "default"),
         ("qwen3_moe", "sliding"),
     ],
@@ -238,6 +243,11 @@ def test_native_cp_refuses_document_dependent_attention(family, attention, side)
     teacher = model_cls(teacher_config).to(torch.bfloat16).eval()
     adapter = TransformersBypassAdapter()
     adapter.student = model_cls(student_config).to(torch.bfloat16).eval()
+    target = teacher if side == "teacher" else adapter.student
+    if attention == "bidirectional_config":
+        target.config.is_causal = False
+    elif attention == "bidirectional_attention":
+        target.model.layers[0].self_attn.is_causal = False
     batch = {"input_ids": torch.tensor([[1, 2, 3, 4, 5, 6, 7, 8]])}
     if attention != "default":
         with pytest.raises(ValueError):
