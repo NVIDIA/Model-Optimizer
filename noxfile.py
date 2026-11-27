@@ -233,7 +233,12 @@ def gpu(session):
 @nox.session(venv_backend="none")
 def bypass(session):
     """Qualify Bypass on stable HF 5.23 without changing the shared HF environment."""
-    requirements = ["torch~=2.14.0", "torchvision~=0.29.0", "transformers~=5.23.0"]
+    requirements = [
+        "torch~=2.14.0",
+        "torchvision~=0.29.0",
+        "transformers~=5.23.0",
+        "accelerate>=1.6.0",
+    ]
     if os.path.exists("examples/bypass/requirements.txt"):
         requirements += ["-r", "examples/bypass/requirements.txt"]
     session.run("python", "-m", "pip", "install", "-e", ".[dev-test,dev-fla]", *requirements)
