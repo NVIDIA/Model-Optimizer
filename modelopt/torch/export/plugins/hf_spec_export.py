@@ -17,13 +17,19 @@
 
 import json
 import re
+import shutil
+import tempfile
 from abc import ABC, abstractmethod
+from contextlib import ExitStack
 from copy import deepcopy
 from pathlib import Path
 
 import torch
 import torch.nn as nn
+from safetensors import safe_open
 from safetensors.torch import save_file
+
+from modelopt.torch.utils.plugins.hf_checkpoint_utils import indexed_weight_map
 
 from ..quant_aware_conversion import revert_quant_config_names
 from .hf_spec_configs import kimik2_eagle_template_config, llama_eagle_template_config
@@ -125,6 +131,78 @@ class SpeculativeDecodingExporter(ABC):
     ):
         """Export the model to the deployment format."""
         raise NotImplementedError("Subclasses must implement this method.")
+
+
+class NativeMTPExporter(SpeculativeDecodingExporter):
+    """Stream a saved MTP checkpoint into its adapter's native deployment layout."""
+
+    def __init__(self, training_checkpoint: str | Path, base_model: str | Path, *, device="cpu"):
+        """Keep checkpoint paths so export never materializes the complete MTP model."""
+        self.training_checkpoint = Path(training_checkpoint)
+        self.base_model = Path(base_model).resolve()
+        self.device = device
+
+    def export(self, export_dir: Path | str, dtype: torch.dtype | None = None):
+        """Write only native MTP tensors and the original model configuration."""
+        # Speculative plugins import this module; the streaming writer imports unified export.
+        from modelopt.torch.speculative.mtp import NativeMTPCheckpointError, get_native_mtp_adapter
+
+        from ..unified_export_hf_streaming import _StreamingShardWriter
+
+        if dtype is not None:
+            raise ValueError("Native MTP export preserves native tensor dtypes; omit dtype.")
+        output = Path(export_dir).absolute()
+        if output.exists():
+            raise FileExistsError(f"Native MTP export destination already exists: {output}")
+        config = json.loads((self.training_checkpoint / "config.json").read_text())
+        if not isinstance(config.get("mtp_boost"), dict):
+            raise NativeMTPCheckpointError("Expected an MTP boosting training checkpoint")
+        adapter = get_native_mtp_adapter(
+            self.base_model, config["mtp_boost"].get("mtp_adapter", "auto")
+        )
+        mtp = adapter.load_mtp(self.base_model, dtype=torch.bfloat16, device="meta")
+        expected = mtp.state_dict()
+        trained_map = indexed_weight_map(self.training_checkpoint)
+        trained_keys = {
+            key.removeprefix("eagle_module.")
+            for key in trained_map
+            if key.startswith("eagle_module.")
+        }
+        if trained_keys != set(expected):
+            raise NativeMTPCheckpointError(
+                "Expected a complete HF MTP training checkpoint matching the native model"
+            )
+
+        with ExitStack() as stack, torch.no_grad():
+            handles = {
+                name: stack.enter_context(
+                    safe_open(str(self.training_checkpoint / name), framework="pt")
+                )
+                for name in {trained_map["eagle_module." + key] for key in expected}
+            }
+            state = {}
+            for key, parameter in expected.items():
+                saved_key = "eagle_module." + key
+                tensor = handles[trained_map[saved_key]].get_slice(saved_key)
+                if tensor.get_shape() != list(parameter.shape) or tensor.get_dtype() not in (
+                    "BF16",
+                    "F32",
+                ):
+                    raise NativeMTPCheckpointError(f"Incompatible trained MTP tensor: {saved_key}")
+                state[key] = tensor
+            output.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(prefix=".mtp-export-", dir=output.parent) as temporary:
+                staging = Path(temporary)
+                writer = _StreamingShardWriter(staging, max_shard_size=1_000_000_000)
+                for name, tensor in adapter.export_tensors(
+                    self.base_model, mtp, state, device=self.device
+                ):
+                    writer.add(name, tensor.detach().cpu().contiguous())
+                writer.finalize()
+                shutil.copy2(self.base_model / "config.json", staging / "config.json")
+                if output.exists():
+                    raise FileExistsError(output)
+                staging.rename(output)
 
 
 class EagleExporter(SpeculativeDecodingExporter):

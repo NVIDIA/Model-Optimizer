@@ -32,10 +32,12 @@
 import argparse
 import dataclasses
 import os
+from contextlib import nullcontext
 
 import fsdp2_buffer_patch
 import torch
 import transformers
+from accelerate.utils import set_module_tensor_to_device
 from eagle_utils import (
     DFlashFSDP2ShardedSDExportCallback,
     EagleTrainerWithAccLog,
@@ -55,6 +57,7 @@ from modelopt.recipe.config import (
     ModelOptEagleRecipe,
     ModelOptExternalDraftRecipe,
     ModelOptMedusaRecipe,
+    ModelOptMTPRecipe,
     ModelOptSpeculativeRecipeBase,
 )
 from modelopt.torch.opt.conversion import ModeloptStateManager, modelopt_state
@@ -106,7 +109,7 @@ def _parse_cli() -> tuple[str, bool, list[str]]:
         required=True,
         help=(
             "Path to a modelopt speculative-decoding recipe YAML "
-            "(speculative_eagle / speculative_dflash / speculative_medusa)."
+            "(speculative_eagle / speculative_dflash / speculative_medusa / speculative_mtp)."
         ),
     )
     p.add_argument(
@@ -181,8 +184,83 @@ def _is_hf_format_checkpoint(checkpoint: str | None) -> bool:
     return any(os.path.isfile(os.path.join(checkpoint, f)) for f in hf_files)
 
 
+def _load_model_and_tokenizer(recipe, training_args, *, checkpoint=None):
+    """Load the recipe's base model or restore a consolidated HF checkpoint."""
+    if checkpoint is not None:
+        with patch_transformers5_params_loading():
+            model = load_vlm_or_llm(
+                checkpoint,
+                dtype="auto",
+                trust_remote_code=recipe.model.trust_remote_code,
+                config_overrides=recipe.model.config_overrides,
+            )
+        tokenizer = transformers.AutoTokenizer.from_pretrained(
+            checkpoint, trust_remote_code=recipe.model.trust_remote_code
+        )
+        return model, tokenizer
+
+    model_name_or_path = recipe.model.model_name_or_path
+    if model_name_or_path is None:
+        raise ValueError(
+            "model.model_name_or_path must be set in the recipe YAML or via a dotlist override."
+        )
+    # External drafts always use cached base outputs, including dry runs without a data path.
+    use_offline_training = (
+        isinstance(recipe, ModelOptExternalDraftRecipe) or recipe.data.mode != "online"
+    )
+    # To avoid OOM for large models, we load and convert model on CPU first.
+    # Model will be moved to GPU during HF trainer.init().
+    model = load_vlm_or_llm(
+        model_name_or_path,
+        use_fake_base=recipe.model.use_fake_base_for_offline,
+        use_offline_training=use_offline_training,
+        dtype="auto",
+        device_map="cpu",
+        trust_remote_code=recipe.model.trust_remote_code,
+        config_overrides=recipe.model.config_overrides,
+    )
+    tokenizer = transformers.AutoTokenizer.from_pretrained(
+        model_name_or_path,
+        model_max_length=training_args.training_seq_len,
+        trust_remote_code=recipe.model.trust_remote_code,
+    )
+    return model, tokenizer
+
+
+def setup_converted_model(recipe, training_args, checkpoint, *, mode):
+    """Restore an HF draft or convert the base before a fresh/FSDP-resumed run."""
+    if _is_hf_format_checkpoint(checkpoint):
+        return _load_model_and_tokenizer(recipe, training_args, checkpoint=checkpoint)
+    if checkpoint:
+        print_rank_0(
+            f"Checkpoint {checkpoint} is not in HF format (FSDP distributed checkpoint). "
+            f"Loading base model and resuming via Trainer."
+        )
+    model, tokenizer = _load_model_and_tokenizer(recipe, training_args)
+    if mode == "dflash":
+        # Fall back to tokenizer.mask_token_id when not set in the recipe; require one of the two.
+        if recipe.dflash.dflash_mask_token_id is None:
+            recipe.dflash.dflash_mask_token_id = getattr(tokenizer, "mask_token_id", None)
+        if recipe.dflash.dflash_mask_token_id is None:
+            raise ValueError(
+                "dflash.dflash_mask_token_id is required: set it in the recipe YAML "
+                "or use a tokenizer that defines mask_token_id."
+            )
+    mtsp.convert(model, [(mode, getattr(recipe, mode).model_dump())])
+    if mode == "eagle":
+        mtsp.plugins.HFEagleModel.load_draft_vocab_cache(model, recipe.data.draft_vocab_cache)
+    return model, tokenizer
+
+
 def setup_external_draft(
-    recipe, training_args, base_model, draft=None, dry_run=False, base_tokenizer=None
+    recipe,
+    training_args,
+    base_model=None,
+    draft=None,
+    dry_run=False,
+    base_tokenizer=None,
+    *,
+    checkpoint=None,
 ):
     """Convert an external draft and wire it to the base model.
 
@@ -198,12 +276,12 @@ def setup_external_draft(
     already converted -- the validations and the head attachment below still run.
 
     Args:
-        base_model: the target, kept only for its lm_head and vocabulary.
+        base_model: the target, kept only for its lm_head and vocabulary; loaded here when None.
         draft: the already-loaded draft on the resume path; loaded here when None.
         dry_run: recipe validation only; skips the data-source requirement, as the
             ``data.data_path`` check in :func:`train` does.
-        base_tokenizer: the base's tokenizer when the caller already loaded it; the fresh
-            path has it, the resume path does not and leaves this None.
+        base_tokenizer: the base's tokenizer when the caller already loaded it.
+        checkpoint: HF draft checkpoint to restore; FSDP shards are restored by Trainer.
     """
     if recipe.draft_model_name_or_path is None:
         raise ValueError(
@@ -228,7 +306,11 @@ def setup_external_draft(
             "standalone model scored against cached base outputs, and nothing in this mode "
             f"shards the sequence. Got cp_size={training_args.cp_size}; set it to 1."
         )
+    if base_model is None:
+        base_model, base_tokenizer = _load_model_and_tokenizer(recipe, training_args)
     base_vocab_size = base_model.config.vocab_size
+    if draft is None and _is_hf_format_checkpoint(checkpoint):
+        draft, _ = _load_model_and_tokenizer(recipe, training_args, checkpoint=checkpoint)
     if draft is None:
         draft = transformers.AutoModelForCausalLM.from_pretrained(
             recipe.draft_model_name_or_path,
@@ -323,12 +405,66 @@ def setup_external_draft(
     return draft, tokenizer
 
 
+def setup_native_mtp(recipe, training_args, *, dry_run=False):
+    """Reconstruct native MTP; Trainer restores training weights and optimizer on resume."""
+    if not dry_run and recipe.data.mode != "offline":
+        raise ValueError("Native MTP training requires data.offline_data_path.")
+    if training_args.cp_size != 1:
+        raise ValueError("Native MTP does not support context parallelism; set cp_size=1.")
+    if training_args.remove_unused_columns:
+        raise ValueError("Native MTP requires training.remove_unused_columns=false.")
+    if training_args.ar_validate_steps > 0 or recipe.data.draft_vocab_cache:
+        raise ValueError(
+            "Native MTP does not support EAGLE AR validation or draft vocabulary mapping."
+        )
+    if recipe.model.config_overrides:
+        raise ValueError(
+            "Native MTP reads its architecture from the checkpoint; config_overrides is unsupported."
+        )
+    mapping = recipe.data.offline_feature_key_mapping
+    if not dry_run and (
+        mapping is None
+        or set(mapping.values()) != {"draft_hidden_states", "base_model_hidden_states"}
+        or len(mapping) != 2
+    ):
+        raise ValueError(
+            "Native MTP needs offline_feature_key_mapping for draft_hidden_states and base_model_hidden_states."
+        )
+    if recipe.model.model_name_or_path is None:
+        raise ValueError("model.model_name_or_path must name the original native checkpoint.")
+    fsdp_args = training_args.fsdp_plugin_args or {}
+    if fsdp_args and fsdp_args.get("fsdp_version") != 2:
+        raise ValueError("Native MTP distributed sharding requires FSDP2.")
+    empty_rank = (
+        fsdp_args.get("cpu_ram_efficient_loading", False) and training_args.process_index != 0
+    )
+    model = mtsp.create_native_mtp_boost_model(
+        recipe.model.model_name_or_path,
+        device="meta" if empty_rank else "cpu",
+        **recipe.mtp.model_dump(),
+    )
+    if empty_rank:
+        # Accelerate maps optimizer parameters by storage address before FSDP2 sharding.
+        # Meta parameters all have address zero; allocate distinct empty storage, retaining RoPE buffers.
+        for name, parameter in model.named_parameters():
+            set_module_tensor_to_device(
+                model, name, "cpu", value=torch.empty_like(parameter, device="cpu")
+            )
+        model.tie_weights()
+    tokenizer = transformers.AutoTokenizer.from_pretrained(
+        recipe.model.model_name_or_path,
+        model_max_length=training_args.training_seq_len,
+        trust_remote_code=recipe.model.trust_remote_code,
+    )
+    return model, tokenizer
+
+
 def train():
     config_path, dry_run, overrides = _parse_cli()
     recipe = load_recipe(config_path, overrides=overrides)
     if not isinstance(recipe, ModelOptSpeculativeRecipeBase):
         raise ValueError(
-            f"main.py expects a speculative-decoding recipe (eagle / dflash / medusa / external); "
+            f"main.py expects a speculative-decoding recipe (eagle / dflash / medusa / external / mtp); "
             f"got {type(recipe).__name__} from {config_path!r}."
         )
 
@@ -336,6 +472,9 @@ def train():
     # reconstructed as an HF dataclass so it can be handed to transformers.Trainer.
     training_args = HfTrainingArguments(**recipe.training.model_dump())
     init_distributed_env(training_args)
+
+    if isinstance(recipe, ModelOptMTPRecipe) and training_args.cp_size != 1:
+        raise ValueError("Native MTP does not support context parallelism; set cp_size=1.")
 
     if not dry_run and recipe.data.mode in ("online", "streaming") and not recipe.data.data_path:
         raise ValueError(f"data.mode={recipe.data.mode!r} requires data.data_path.")
@@ -361,115 +500,20 @@ def train():
 
     checkpoint = training_args.resume_from_checkpoint or last_checkpoint
 
-    use_offline_training = recipe.data.mode != "online"
-    if isinstance(recipe, ModelOptExternalDraftRecipe):
-        # This mode has no online path (see setup_external_draft), and the shipped recipe
-        # carries no data-source field, so mode resolves to "online" under --dry_run.
-        # Deriving the flag from it there would make load_vlm_or_llm ignore
-        # use_fake_base_for_offline and materialise every base decoder layer on every
-        # rank, and would route a VLM base to the real multimodal model, whose parent
-        # config has no vocab_size for validate_against_base to read.
-        use_offline_training = True
-
-    # Resume path depends on the existing checkpoint's on-disk format: consolidated HF
-    # weights load via from_pretrained; FSDP sharded checkpoints load the base model and
-    # resume through the Trainer.
-    checkpoint_is_hf = _is_hf_format_checkpoint(checkpoint)
-
-    if checkpoint_is_hf:
-        assert checkpoint is not None  # guaranteed by checkpoint_is_hf
-        with patch_transformers5_params_loading():
-            model = load_vlm_or_llm(
-                checkpoint,
-                dtype="auto",
-                trust_remote_code=recipe.model.trust_remote_code,
-                config_overrides=recipe.model.config_overrides,
-            )
-        tokenizer = transformers.AutoTokenizer.from_pretrained(
-            checkpoint, trust_remote_code=recipe.model.trust_remote_code
+    if isinstance(recipe, ModelOptMTPRecipe):
+        model, tokenizer = setup_native_mtp(recipe, training_args, dry_run=dry_run)
+    elif isinstance(recipe, ModelOptMedusaRecipe):
+        model, tokenizer = setup_converted_model(recipe, training_args, checkpoint, mode="medusa")
+    elif isinstance(recipe, ModelOptEagleRecipe):
+        model, tokenizer = setup_converted_model(recipe, training_args, checkpoint, mode="eagle")
+    elif isinstance(recipe, ModelOptDFlashRecipe):
+        model, tokenizer = setup_converted_model(recipe, training_args, checkpoint, mode="dflash")
+    elif isinstance(recipe, ModelOptExternalDraftRecipe):
+        model, tokenizer = setup_external_draft(
+            recipe, training_args, checkpoint=checkpoint, dry_run=dry_run
         )
-        if isinstance(recipe, ModelOptExternalDraftRecipe):
-            # The restored draft is already converted (the checkpoint carries
-            # modelopt_state.pth), but the base lm_head it is scored against is not part
-            # of its state, so it still has to be re-attached. The base is not on this
-            # path at all, so load it here; use_fake_base_for_offline keeps that cheap.
-            if recipe.model.model_name_or_path is None:
-                raise ValueError(
-                    "model.model_name_or_path must be set to resume an external-draft run: "
-                    "the base model supplies the lm_head the draft is scored against."
-                )
-            # Same arguments as the fresh path below; use_offline_training is pinned
-            # True for this recipe above.
-            base_model = load_vlm_or_llm(
-                recipe.model.model_name_or_path,
-                use_fake_base=recipe.model.use_fake_base_for_offline,
-                use_offline_training=use_offline_training,
-                dtype="auto",
-                device_map="cpu",
-                trust_remote_code=recipe.model.trust_remote_code,
-                config_overrides=recipe.model.config_overrides,
-            )
-            model, tokenizer = setup_external_draft(
-                recipe, training_args, base_model=base_model, draft=model, dry_run=dry_run
-            )
     else:
-        if checkpoint:
-            print_rank_0(
-                f"Checkpoint {checkpoint} is not in HF format (FSDP distributed checkpoint). "
-                f"Loading base model and resuming via Trainer."
-            )
-        model_name_or_path = recipe.model.model_name_or_path
-        if model_name_or_path is None:
-            raise ValueError(
-                "model.model_name_or_path must be set in the recipe YAML or via a dotlist override."
-            )
-        # To avoid OOM for large models, we load and convert model on CPU first.
-        # Model will be moved to GPU during HF trainer.init().
-        model = load_vlm_or_llm(
-            model_name_or_path,
-            use_fake_base=recipe.model.use_fake_base_for_offline,
-            use_offline_training=use_offline_training,
-            dtype="auto",
-            device_map="cpu",
-            trust_remote_code=recipe.model.trust_remote_code,
-            config_overrides=recipe.model.config_overrides,
-        )
-        tokenizer = transformers.AutoTokenizer.from_pretrained(
-            model_name_or_path,
-            model_max_length=training_args.training_seq_len,
-            trust_remote_code=recipe.model.trust_remote_code,
-        )
-        if isinstance(recipe, ModelOptMedusaRecipe):
-            medusa_cfg: dict = recipe.medusa.model_dump()
-            mtsp.convert(model, [("medusa", medusa_cfg)])
-        elif isinstance(recipe, ModelOptEagleRecipe):
-            eagle_cfg: dict = recipe.eagle.model_dump()
-            mtsp.convert(model, [("eagle", eagle_cfg)])
-            # Load draft vocab cache
-            mtsp.plugins.HFEagleModel.load_draft_vocab_cache(model, recipe.data.draft_vocab_cache)
-        elif isinstance(recipe, ModelOptDFlashRecipe):
-            # Fall back to tokenizer.mask_token_id when not set in the recipe; require one of the two.
-            if recipe.dflash.dflash_mask_token_id is None:
-                recipe.dflash.dflash_mask_token_id = getattr(tokenizer, "mask_token_id", None)
-            if recipe.dflash.dflash_mask_token_id is None:
-                raise ValueError(
-                    "dflash.dflash_mask_token_id is required: set it in the recipe YAML "
-                    "or use a tokenizer that defines mask_token_id."
-                )
-            dflash_cfg: dict = recipe.dflash.model_dump()
-            mtsp.convert(model, [("dflash", dflash_cfg)])
-        elif isinstance(recipe, ModelOptExternalDraftRecipe):
-            # This mode inverts the usual relationship: we train a pretrained draft, and
-            # `model` loaded above is the base, kept only for its lm_head and vocabulary.
-            model, tokenizer = setup_external_draft(
-                recipe,
-                training_args,
-                base_model=model,
-                dry_run=dry_run,
-                base_tokenizer=tokenizer,
-            )
-        else:
-            raise ValueError(f"Unsupported speculative recipe type: {type(recipe).__name__}")
+        raise ValueError(f"Unsupported speculative recipe type: {type(recipe).__name__}")
 
     # On the HF-format restore path above, DFlash's modify() ran with the base model still on
     # meta, so the draft has no device, dtype or rotary buffer yet. Re-apply them here, before
@@ -601,7 +645,12 @@ def train():
     fsdp2_buffer_patch.log_param_dtypes(trainer.model)
 
     print_rank_0("Start training...")
-    trainer.train(resume_from_checkpoint=checkpoint)
+    with (
+        model.eagle_module.fsdp2_context()
+        if isinstance(recipe, ModelOptMTPRecipe) and trainer.is_fsdp_enabled
+        else nullcontext()
+    ):
+        trainer.train(resume_from_checkpoint=checkpoint)
     trainer.save_state()
     trainer.save_model(training_args.output_dir)
 

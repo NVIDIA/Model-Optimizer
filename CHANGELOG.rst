@@ -32,6 +32,9 @@ Changelog
 
 *Speculative Decoding*
 
+- Native DeepSeek-V4 Pro MTP checkpoints can now initialize offline boosting through ``create_native_mtp_boost_model``, loading BF16 MTP weights and frozen target components without the backbone.
+- Add native MTP offline training recipes with FSDP2, Trainer checkpoint resume, and DSV4 Pro MTP-only FP8/MXFP4 export for serving alongside the original target checkpoint.
+
 *Megatron Framework (M-LM / M-Bridge)*
 
 *Misc*

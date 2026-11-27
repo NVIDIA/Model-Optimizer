@@ -59,6 +59,8 @@ class DataArguments(BaseModel):
     mode: Literal["online", "offline", "streaming", "sparse"] | None = None
     data_path: str | None = None
     offline_data_path: str | None = None
+    # Dump-key -> model feature-name mapping; defaults to the EAGLE schema.
+    offline_feature_key_mapping: dict[str, str] | None = None
     # Dumped top-k teacher deployment policy (external draft mode); see sparse_data.py.
     sparse_data_path: str | None = None
     # Oversample sources by their ``source`` field, e.g. {"cnn": 5.0}. Weight by tokens,

@@ -16,6 +16,7 @@
 """Native MTP modules trained through the shared Hugging Face EAGLE forward."""
 
 from abc import ABC, abstractmethod
+from contextlib import nullcontext
 from typing import NamedTuple
 
 import torch
@@ -53,6 +54,10 @@ class MTPModule(nn.Module, ABC):
         Native attention windows belong in the adapter's attention, not cache eviction.
         """
         return DynamicCache()
+
+    def fsdp2_context(self):
+        """Allow an adapter to preserve model-specific precision during FSDP2 preparation."""
+        return nullcontext()
 
     def _maybe_init_rope(self, device):
         """Adapters may initialize rotary buffers here, before the shared round loop."""
@@ -162,6 +167,7 @@ def create_mtp_model(
     model.config.mtp_boost = cfg.model_dump()
     model.mtp_config = cfg
     model.is_native_mtp_boost = True
+    model._no_split_modules = [type(mtp).__name__]
     # HF owns serialization; the adapter reconstructs the frozen target, including its norm.
     model._keys_to_ignore_on_save = frozen_keys
     return model

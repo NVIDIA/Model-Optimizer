@@ -38,3 +38,6 @@ with import_plugin("transformers"):
     from .hf_external import *
     from .hf_lilicorr import *
     from .hf_medusa import *
+
+with import_plugin("transformers.models.deepseek_v4"):
+    from .modeling_dsv4_mtp import *

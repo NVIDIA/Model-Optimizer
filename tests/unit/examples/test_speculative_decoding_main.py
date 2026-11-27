@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""``setup_external_draft`` wiring in the speculative-decoding entrypoint.
+"""Model setup and resume wiring in the speculative-decoding entrypoint.
 
 Lives under ``tests/unit`` rather than ``tests/examples/`` so CI runs it on every
 change: the example lanes cover a fixed allowlist.
@@ -26,11 +26,18 @@ from pathlib import Path
 
 import pytest
 import torch
+from _test_utils.torch.speculative.dflash import get_dflash_config
+from _test_utils.torch.transformers_models import get_tiny_tokenizer
 
 transformers = pytest.importorskip("transformers")
 
 import modelopt.torch.speculative as mtsp
-from modelopt.recipe.config import ModelOptExternalDraftRecipe
+from modelopt.recipe.config import (
+    ModelOptDFlashRecipe,
+    ModelOptEagleRecipe,
+    ModelOptExternalDraftRecipe,
+    ModelOptMedusaRecipe,
+)
 
 _EXAMPLE_DIR = Path(__file__).resolve().parents[3] / "examples" / "speculative_decoding"
 
@@ -104,31 +111,83 @@ def _training_args():
     return types.SimpleNamespace(training_seq_len=128, device=torch.device("cpu"), cp_size=1)
 
 
-def test_resume_of_a_converted_checkpoint_does_not_reconvert(main_mod, stub_tokenizers, tmp_path):
+@pytest.mark.parametrize(
+    ("mode", "recipe_cls", "config"),
+    [
+        ("medusa", ModelOptMedusaRecipe, {"medusa_num_heads": 2}),
+        ("eagle", ModelOptEagleRecipe, {"eagle_use_torch_compile": False}),
+        ("dflash", ModelOptDFlashRecipe, get_dflash_config()),
+    ],
+)
+def test_converted_model_setup_round_trip(main_mod, tmp_path, mode, recipe_cls, config):
+    """Fresh/FSDP setup converts the base; HF resume preserves the saved draft weights."""
+    tokenizer = get_tiny_tokenizer()
+    base = _tiny_causal_lm(vocab_size=len(tokenizer))
+    source = tmp_path / "base"
+    base.save_pretrained(source)
+    tokenizer.save_pretrained(source)
+    recipe = recipe_cls.model_validate(
+        {
+            "metadata": {"description": "setup round trip"},
+            "model": {"model_name_or_path": str(source)},
+            mode: config,
+        }
+    )
+    model, tokenizer = main_mod.setup_converted_model(recipe, _training_args(), None, mode=mode)
+    with torch.no_grad():
+        for parameter in model.parameters():
+            if parameter.requires_grad:
+                parameter.add_(0.25)
+    checkpoint = tmp_path / "checkpoint"
+    model.save_pretrained(checkpoint)
+    tokenizer.save_pretrained(checkpoint)
+    restored, restored_tokenizer = main_mod.setup_converted_model(
+        recipe, _training_args(), str(checkpoint), mode=mode
+    )
+    assert set(dict(main_mod.modelopt_state(restored)["modelopt_state_dict"])) == {mode}
+    torch.testing.assert_close(restored.state_dict(), model.state_dict(), rtol=0, atol=0)
+    assert restored_tokenizer.get_vocab() == tokenizer.get_vocab()
+
+    # A distributed checkpoint has no consolidated HF weights; Trainer will load its shards.
+    sharded_checkpoint = tmp_path / "sharded"
+    (sharded_checkpoint / "pytorch_model_fsdp_0").mkdir(parents=True)
+    rebuilt, _ = main_mod.setup_converted_model(
+        recipe, _training_args(), str(sharded_checkpoint), mode=mode
+    )
+    assert set(dict(main_mod.modelopt_state(rebuilt)["modelopt_state_dict"])) == {mode}
+    torch.testing.assert_close(
+        rebuilt.get_input_embeddings().weight, base.get_input_embeddings().weight, rtol=0, atol=0
+    )
+
+
+def test_resume_of_a_converted_checkpoint_does_not_reconvert(main_mod, tmp_path):
     """A checkpoint this mode writes carries modelopt_state, so it restores already converted.
 
     Converting it a second time raises ``TypeError: Cannot create a consistent method
     resolution order``, so any HF-format resume died at startup.
     """
-    draft = _tiny_causal_lm()
+    tokenizer = get_tiny_tokenizer()
+    draft = _tiny_causal_lm(vocab_size=len(tokenizer))
     mtsp.convert(draft, [("external", {})])
     draft.save_pretrained(tmp_path / "ckpt")
+    tokenizer.save_pretrained(tmp_path / "ckpt")
 
-    restored = transformers.AutoModelForCausalLM.from_pretrained(tmp_path / "ckpt")
-    assert main_mod.ModeloptStateManager.is_converted(restored), (
-        "checkpoint did not restore as converted; this test no longer covers the bug"
-    )
-
-    base = _tiny_causal_lm(hidden=2 * HIDDEN)
+    base = _tiny_causal_lm(vocab_size=len(tokenizer), hidden=2 * HIDDEN)
+    base.save_pretrained(tmp_path / "base")
+    tokenizer.save_pretrained(tmp_path / "base")
+    recipe = _recipe(offline_data_path="/tmp/hidden")
+    recipe.model.model_name_or_path = str(tmp_path / "base")
+    recipe.model.use_fake_base_for_offline = True
+    recipe.draft_model_name_or_path = str(tmp_path / "ckpt")
     out, _ = main_mod.setup_external_draft(
-        _recipe(offline_data_path="/tmp/hidden"),
-        _training_args(),
-        base_model=base,
-        draft=restored,
+        recipe, _training_args(), checkpoint=str(tmp_path / "ckpt")
     )
-    assert out is restored
+    assert main_mod.ModeloptStateManager.is_converted(out)
+    torch.testing.assert_close(out.state_dict(), draft.state_dict(), rtol=0, atol=0)
     # The head is not part of the draft's own state, so a resume must re-attach it.
-    assert out._base_lm_head is not None
+    torch.testing.assert_close(
+        out._base_lm_head.weight, base.get_output_embeddings().weight, rtol=0, atol=0
+    )
 
 
 def test_exported_architecture_survives_a_resume(main_mod, stub_tokenizers, tmp_path):

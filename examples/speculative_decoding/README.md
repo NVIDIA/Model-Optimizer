@@ -22,6 +22,8 @@ This example focuses on training with Hugging Face. To train with Megatron‑LM,
 | External Draft Training | Train a standalone pretrained LM as the draft, not a grafted head | \[[Link](#training-a-standalone-external-draft-model)\] |
 | After Training | Evaluation, export and deployment | \[[Link](#model-validation)\] |
 | Advanced Usage | Data synthesis, vocab compression, and configuration | \[[Link](#advanced-usage)\] |
+| Native MTP Boosting | Shared training flow and adding a model adapter | \[[Link](#native-mtp-boosting)\] |
+| DeepSeek-V4 Pro MTP Boosting | Example using a native model checkpoint | \[[Link](#example-deepseek-v4-pro-mtp-boosting)\] |
 | Support Matrix | Supported models for speculative decoding training | \[[Link](#support-matrix)\] |
 | Speculation Module Checkpoints | View pre-trained speculation modules ready to deploy! | \[[Link](#speculation-module-checkpoints)\] |
 | Resources | Extra links to relevant resources | \[[Link](#resources)\] |
@@ -430,14 +432,85 @@ See `main.py` for the full example including tokenizer setup, dataset loading, a
 
 ### Native MTP Boosting
 
-Native multi-token prediction (MTP) boosting fine-tunes a model's existing MTP
-module using target-model supervision. Only the MTP module is trained. LK lambda
-is the default loss; set `mtp_loss_type="soft_target_ce"` to use cross-entropy.
+Multi-token prediction (MTP) boosting fine-tunes a model's existing MTP module using
+cached hidden states from the target model. Only the MTP weights are updated; the
+full target backbone is not needed during offline training.
 
-The [Python API](../../modelopt/torch/speculative/mtp/adapter.py) currently requires
-a custom model adapter. When training from offline hidden-state data with Hugging
-Face Trainer, set `remove_unused_columns=False` in `TrainingArguments` so the
-collator receives the hidden-state features.
+The workflow is to prepare hidden states, train with an
+[MTP recipe](../../modelopt_recipes/general/speculative_decoding/mtp_boost.yaml),
+and export the boosted MTP weights for use with the original target model.
+Training reuses the EAGLE flow, with LK loss by default and optional hidden-state
+mixing across prediction rounds.
+
+To support another model, add:
+
+- An [`MTPModule`](../../modelopt/torch/speculative/plugins/modeling_mtp.py) that
+  connects the model's MTP forward pass to the shared training flow. Reuse existing
+  Transformers components where possible.
+- A [`NativeMTPAdapter`](../../modelopt/torch/speculative/mtp/adapter.py) that
+  recognizes the checkpoint, loads its MTP and frozen target components, and
+  exports trained weights in the model's native format. It handles any required
+  quantization and dequantization using ModelOpt.
+- Adapter registration and a recipe mapping the model's cached features to the
+  training inputs. The [DeepSeek-V4 implementation](../../modelopt/torch/speculative/plugins/modeling_dsv4_mtp.py)
+  provides an example.
+
+The shared pipeline handles training, checkpoint saving, and resume. Native MTP
+currently supports offline training with `cp_size=1`; distributed training uses FSDP2.
+
+### Example: DeepSeek-V4 Pro MTP Boosting
+
+Start with a local native DeepSeek-V4 Pro checkpoint and a Transformers build with
+DeepSeek-V4 support. Prepare a directory of `.pt` records containing `input_ids`,
+`loss_mask`, native MTP states (`target_mtp_hidden_states`), and teacher LM-head
+inputs (`target_lm_head_hidden_states`), without a batch dimension.
+
+The [DSV4 recipe](../../modelopt_recipes/models/deepseek-ai/DeepSeek-V4-Pro/speculative_decoding/mtp_boost.yaml)
+sets up the feature mapping, LK loss, hidden-state mixing, and FSDP2. The adapter
+converts the native quantized weights for training automatically.
+
+From the repository root, run:
+
+```bash
+bash examples/speculative_decoding/launch_train.sh \
+  --config models/deepseek-ai/DeepSeek-V4-Pro/speculative_decoding/mtp_boost \
+  model.model_name_or_path=/path/to/DeepSeek-V4-Pro \
+  data.offline_data_path=/path/to/hidden_states \
+  training.output_dir=/path/to/mtp-training
+```
+
+For multiple nodes, run the launcher on each node with `--num_nodes`,
+`--head_node_ip`, and `--machine_rank`.
+
+To resume, add `training.resume_from_checkpoint=/path/to/mtp-training/checkpoint-N`
+to the same command, keeping the original model path and training settings.
+
+For deployment, export the final output or an intermediate training checkpoint
+to a new directory:
+
+```bash
+python examples/speculative_decoding/scripts/export_hf_checkpoint.py \
+  --model_path /path/to/mtp-training \
+  --base_model /path/to/DeepSeek-V4-Pro \
+  --export_path /path/to/DeepSeek-V4-Pro-MTP-boosted \
+  --device cuda
+```
+
+Export restores the native quantized format and writes only the boosted MTP
+weights and configuration. Serve this alongside the original target checkpoint,
+which supplies the backbone and tokenizer. Keep the training checkpoint for
+resuming training.
+
+With a vLLM version that supports native DSV4 MTP, use the exported directory as
+the draft model in the speculative configuration:
+
+```json
+{
+  "method": "mtp",
+  "model": "/path/to/DeepSeek-V4-Pro-MTP-boosted",
+  "num_speculative_tokens": 7
+}
+```
 
 ## Support Matrix
 

@@ -29,6 +29,7 @@ from modelopt.torch.speculative.config import (
     EagleConfig,
     ExternalDraftConfig,
     MedusaConfig,
+    MTPConfig,
 )
 from modelopt.torch.speculative.plugins.hf_training_args import DataArguments as SpecDataArgs
 from modelopt.torch.speculative.plugins.hf_training_args import ModelArguments as SpecModelArgs
@@ -45,6 +46,7 @@ __all__ = [
     "ModelOptAutoQuantizeRecipe",
     "ModelOptDFlashRecipe",
     "ModelOptEagleRecipe",
+    "ModelOptMTPRecipe",
     "ModelOptMedusaRecipe",
     "ModelOptPTQRecipe",
     "ModelOptRecipeBase",
@@ -63,6 +65,7 @@ class RecipeType(StrEnum):
     SPECULATIVE_DFLASH = "speculative_dflash"
     SPECULATIVE_MEDUSA = "speculative_medusa"
     SPECULATIVE_EXTERNAL = "speculative_external"
+    SPECULATIVE_MTP = "speculative_mtp"
     # QAT = "qat" # Not implemented yet, will be added in the future.
 
 
@@ -542,6 +545,21 @@ class ModelOptEagleRecipe(ModelOptSpeculativeRecipeBase):
         return self
 
 
+class ModelOptMTPRecipe(ModelOptSpeculativeRecipeBase):
+    """Offline native MTP boosting through the shared speculative training entrypoint."""
+
+    RECIPE_TYPE: ClassVar[RecipeType] = RecipeType.SPECULATIVE_MTP
+
+    metadata: RecipeMetadataConfig = _metadata_field()
+
+    mtp: MTPConfig = ModeloptField(
+        default=MTPConfig(),
+        title="MTP config",
+        description="Native MTP adapter and training configuration.",
+        validate_default=True,
+    )
+
+
 class ModelOptDFlashRecipe(ModelOptSpeculativeRecipeBase):
     """Our config class for DFlash speculative decoding recipes."""
 
@@ -615,4 +633,5 @@ RECIPE_TYPE_TO_CLASS: dict[RecipeType, type[ModelOptRecipeBase]] = {
     RecipeType.SPECULATIVE_DFLASH: ModelOptDFlashRecipe,
     RecipeType.SPECULATIVE_MEDUSA: ModelOptMedusaRecipe,
     RecipeType.SPECULATIVE_EXTERNAL: ModelOptExternalDraftRecipe,
+    RecipeType.SPECULATIVE_MTP: ModelOptMTPRecipe,
 }
