@@ -311,3 +311,36 @@ def test_grouped_replay_refuses_unsupported_layout_before_cuda_dispatch(monkeypa
         assert repair_formats.repair_grouped_linear(quantizers, inputs, offsets, bias) is None
     finally:
         policy.close()
+
+
+def test_active_repair_export_retains_base_linear_path(monkeypatch):
+    from modelopt.torch.quantization.utils import export_torch_mode
+
+    model = nn.Linear(256, 2)
+    mtq.quantize(model, _config([_iq("weight_quantizer", "iq1_s")]))
+    policy = IQRepairPolicy()
+    try:
+        policy.prepare(model)
+        model.weight_quantizer.disable()
+        inputs = torch.randn(3, 256, requires_grad=True)
+        expected = F.linear(inputs, model._parameters["weight"], model.bias)
+        # Reach the otherwise hardware-specific override on CPU; keep export real.
+        monkeypatch.setattr(repair_formats, "_packed_projection_qualified", lambda *args: True)
+
+        def forbidden_context():
+            raise AssertionError("Export entered the weight-mutation context")
+
+        monkeypatch.setattr(model, "quantize_weight", forbidden_context)
+        with export_torch_mode():
+            actual = model(inputs)
+            exported = torch.export.export(model, (inputs,), strict=False)
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        torch.testing.assert_close(exported.module()(inputs), expected, rtol=0, atol=0)
+        torch.testing.assert_close(
+            torch.autograd.grad(actual.sum(), inputs)[0],
+            torch.autograd.grad(expected.sum(), inputs)[0],
+            rtol=0,
+            atol=0,
+        )
+    finally:
+        policy.close()
