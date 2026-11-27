@@ -18,6 +18,8 @@
 
 from ..specs import BypassSpec, ModelSpec, register
 
+__all__: list[str] = []
+
 register(
     ModelSpec(
         model_type="muse_spark",

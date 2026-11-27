@@ -14,6 +14,6 @@
 # limitations under the License.
 
 
-"""Native text-model metadata."""
+"""Per-model specs for HF model type ``muse_spark``."""
 
-from .specs import *
+from . import specs

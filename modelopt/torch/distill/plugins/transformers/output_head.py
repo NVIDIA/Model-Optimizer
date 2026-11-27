@@ -20,6 +20,7 @@ from contextlib import contextmanager
 
 import torch
 from torch import nn
+from torch.distributed.fsdp import fully_shard
 from torch.distributed.tensor import DTensor
 from torch.nn.modules import module as module_hooks
 
@@ -39,6 +40,7 @@ def bypass_head_context(model, units, head, *, head_paths=None):
         yield
         return
     if not units:
+        # Quantization imports are delayed to avoid the distill/quantization initialization cycle.
         from modelopt.torch.quantization.model_calib import _WeightInputHook
         from modelopt.torch.quantization.nn import TensorQuantizer
         from modelopt.torch.quantization.utils.calib_utils import GPTQHelper
@@ -105,6 +107,7 @@ def softcapped_logits(model, logits):
 
 def _resolve_logits_transform(model):
     """Resolve post-head mathematics through the same ModelSpec as Bypass replay."""
+    # bypass imports this module for head capture, so resolve its registry helper lazily.
     from .bypass import _model_spec
 
     spec = _model_spec(model)
@@ -162,6 +165,7 @@ class OutputHeadProjection:
 
     def __init__(self, model):
         """Resolve a real native head and reject context-dependent chunking."""
+        # Quantization plugin registration imports distill; defer these imports until initialization completes.
         from modelopt.torch.quantization.repair_partition import requires_full_context_activations
         from modelopt.torch.quantization.utils.core_utils import _get_enclosing_fsdp_module
 
@@ -189,8 +193,6 @@ class OutputHeadProjection:
     def weight_window(self):
         """Materialize only the head's actual FSDP owner during projection."""
         # Open only the head's own FSDP group, never all nested model groups.
-        from torch.distributed.fsdp import fully_shard
-
         owner = self.owner
         group = fully_shard.state(owner)._fsdp_param_group if owner is not None else None
         sharded = group is not None and group.is_sharded

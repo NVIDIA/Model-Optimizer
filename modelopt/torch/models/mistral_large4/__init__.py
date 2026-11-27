@@ -14,6 +14,6 @@
 # limitations under the License.
 
 
-"""Native text-model metadata."""
+"""Per-model specs for HF model type ``mistral_large4``."""
 
-from .specs import *
+from . import specs

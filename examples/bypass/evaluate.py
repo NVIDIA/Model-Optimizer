@@ -19,13 +19,14 @@
 import inspect
 import math
 import time
+from contextlib import ExitStack
 
 import torch
 import torch.distributed as dist
 from torch.distributed.tensor import DTensor
 
 from modelopt.torch.distill._bypass_capture import _valid_token_mask
-from modelopt.torch.distill._bypass_parallel import _all_rank_values
+from modelopt.torch.distill._bypass_parallel import _all_rank_max, _synchronize_error
 from modelopt.torch.distill.plugins.transformers import TransformersBypassAdapter
 from modelopt.torch.distill.plugins.transformers.output_head import (
     OutputHeadProjection,
@@ -176,43 +177,62 @@ def _perplexity(mean_cross_entropy):
 
 
 def _synchronize(adapter, error):
-    failures = [error for error in _all_rank_values(adapter.context, error) if error is not None]
-    if failures:
-        raise ValueError("Diagnostic input/placement error: " + "; ".join(failures))
+    _synchronize_error(adapter.context, error)
 
 
-def _model_output(model, batch, adapter, projection):
-    inputs = adapter.prepare_batch(model, batch)
-    target = getattr(model, "thinker", model)
-    parameters = inspect.signature(target.forward).parameters
-    inputs.update(
-        {
-            name: value
-            for name, value in (
-                ("use_cache", False),
-                ("logits_to_keep", 0),
-                ("num_logits_to_keep", 0),
+def _model_output(model, batch, adapter, projection, use_head):
+    with ExitStack() as stack:
+        inputs, captured, error = None, None, None
+        try:
+            inputs = adapter.prepare_batch(model, batch)
+            target = getattr(model, "thinker", model)
+            parameters = inspect.signature(target.forward).parameters
+            inputs.update(
+                {
+                    name: value
+                    for name, value in (
+                        ("use_cache", False),
+                        ("logits_to_keep", 0),
+                        ("num_logits_to_keep", 0),
+                    )
+                    if name in parameters
+                }
             )
-            if name in parameters
-        }
-    )
-    if not any(p.kind == inspect.Parameter.VAR_KEYWORD for p in parameters.values()):
-        inputs = {key: value for key, value in inputs.items() if key in parameters}
-    if projection.head is not None:
-        with capture_head_inputs(projection.head) as captured:
-            adapter.forward_teacher(model, (), inputs)
-        if len(captured) != 1:
-            raise ValueError("Chunked diagnostics require exactly one pointwise output-head call.")
-        return captured[0]
-    output = adapter.forward_teacher(model, (), inputs)
-    logits = (
-        output
-        if isinstance(output, torch.Tensor)
-        else output.logits
-        if hasattr(output, "logits")
-        else output[0]
-    )
-    return logits.full_tensor() if isinstance(logits, DTensor) else logits
+            if not any(p.kind == inspect.Parameter.VAR_KEYWORD for p in parameters.values()):
+                inputs = {key: value for key, value in inputs.items() if key in parameters}
+            if use_head:
+                captured = stack.enter_context(capture_head_inputs(projection.head))
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
+        _synchronize(adapter, error)
+        # Failures inside model collectives require backend/job recovery; preparation
+        # and local post-forward refusals agree before any peer enters the next model.
+        assert inputs is not None
+        output = adapter.forward_teacher(model, (), inputs)
+        result, error = None, None
+        try:
+            if use_head:
+                assert captured is not None
+                if len(captured) != 1:
+                    raise ValueError(
+                        "Chunked diagnostics require exactly one pointwise output-head call."
+                    )
+                result = captured[0]
+            else:
+                result = (
+                    output
+                    if isinstance(output, torch.Tensor)
+                    else output.logits
+                    if hasattr(output, "logits")
+                    else output[0]
+                )
+            if not isinstance(result, torch.Tensor):
+                raise ValueError("Diagnostic model output must be a tensor.")
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
+        _synchronize(adapter, error)
+        assert isinstance(result, torch.Tensor)
+        return result.full_tensor() if isinstance(result, DTensor) else result
 
 
 @torch.no_grad()
@@ -249,7 +269,7 @@ def evaluate_pair(
     _synchronize(
         adapter,
         None
-        if len(set(_all_rank_values(context, use_head))) == 1
+        if sum(_all_rank_max(context, [int(use_head), int(not use_head)])) == 1
         else "Output-head capabilities differ across owners",
     )
     modes = {
@@ -282,10 +302,10 @@ def evaluate_pair(
             except Exception as exc:
                 error = f"{type(exc).__name__}: {exc}"
             _synchronize(adapter, error)
-            present = _all_rank_values(context, batch is not exhausted)
+            present = _all_rank_max(context, [int(batch is not exhausted), int(batch is exhausted)])
             _synchronize(
                 adapter,
-                None if len(set(present)) == 1 else "Data lanes have different diagnostic lengths",
+                None if sum(present) == 1 else "Data lanes have different diagnostic lengths",
             )
             if batch is exhausted:
                 break
@@ -295,7 +315,7 @@ def evaluate_pair(
             except Exception as exc:
                 error = f"{type(exc).__name__}: {exc}"
             _synchronize(adapter, error)
-            for index in range(max(_all_rank_values(context, len(documents)))):
+            for index in range(_all_rank_max(context, len(documents))):
                 error = None
                 try:
                     document = (
@@ -322,8 +342,8 @@ def evaluate_pair(
                 except Exception as exc:
                     error = f"{type(exc).__name__}: {exc}"
                 _synchronize(adapter, error)
-                left = _model_output(teacher, document, adapter, projections[0])
-                right = _model_output(candidate, document, adapter, projections[1])
+                left = _model_output(teacher, document, adapter, projections[0], use_head)
+                right = _model_output(candidate, document, adapter, projections[1], use_head)
                 _synchronize(
                     adapter,
                     None
@@ -331,10 +351,10 @@ def evaluate_pair(
                     else "Outputs must cover every diagnostic token",
                 )
                 if use_head:
-                    slots = max(_all_rank_values(context, labels.numel()))
+                    slots = _all_rank_max(context, labels.numel())
                     with projections[0].weight_window(), projections[1].weight_window():
-                        sliceable = all(
-                            _all_rank_values(context, all(p.sliceable for p in projections))
+                        sliceable = not _all_rank_max(
+                            context, int(not all(p.sliceable for p in projections))
                         )
                         values, mode = _projected_statistics(
                             left,

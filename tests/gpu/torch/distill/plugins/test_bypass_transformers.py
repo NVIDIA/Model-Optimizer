@@ -26,6 +26,7 @@ from torch import nn
 
 pytest.importorskip("transformers", minversion="5.23")
 
+from _test_utils.transformers_families import build_model, cases, hf_torch_kernels
 from transformers import (
     LlamaConfig,
     LlamaForCausalLM,
@@ -397,7 +398,6 @@ def test_teacher_replay_caches_model_scans_without_changing_targets():
     [("deepseek_v4", "model.layers"), ("nemotron_h_omni", "language_model.model.layers")],
 )
 def test_declared_decoder_paths_resolve_native_models(family, path):
-    from _test_utils.transformers_families import build_model, cases
 
     model = build_model(cases([family])[0], "meta")
     decoder = TransformersBypassAdapter()._decoder_layers(model)
@@ -482,7 +482,6 @@ def _moe():
 
 @pytest.mark.parametrize("mrope", [False, True])
 def test_transformers_teacher_replay_accepts_embeddings_without_token_ids(mrope):
-    from _test_utils.transformers_families import build_model, cases, hf_torch_kernels
 
     teacher = build_model(cases(["qwen3_vl_moe"])[0], "cpu") if mrope else _moe()
     adapter = TransformersBypassAdapter()
@@ -594,9 +593,6 @@ def test_transformers_bypass_selection_and_prefix(bits, tmp_path):
     ],
 )
 def test_transformers_packed_replay_matches_independent_documents(family, loss_key):
-    from _test_utils.transformers_families import build_model, cases, hf_torch_kernels
-
-    from modelopt.torch.distill.plugins.transformers import TransformersBypassAdapter
 
     torch.manual_seed(43)
     teacher = build_model(cases([family])[0], "cpu")
@@ -672,9 +668,6 @@ def test_transformers_packed_replay_matches_independent_documents(family, loss_k
 
 
 def test_modelspec_drives_nemotron_ptq_and_bypass():
-    from _test_utils.transformers_families import build_model, cases, hf_torch_kernels
-
-    from modelopt.torch.distill.plugins.transformers import TransformersBypassAdapter
 
     torch.manual_seed(47)
     teacher = build_model(cases(["nemotron_h"])[0], "cpu")
@@ -720,7 +713,6 @@ def test_modelspec_drives_nemotron_ptq_and_bypass():
 
 @pytest.mark.parametrize("frozen_format", ["fp8", "nvfp4"])
 def test_shared_iq2_routed_iq1_and_frozen_down_through_public_bypass(frozen_format, monkeypatch):
-    from _test_utils.transformers_families import build_model, cases, hf_torch_kernels
 
     from modelopt.torch.distill._bypass_optimizer import Lion
 
@@ -862,9 +854,6 @@ def test_weight_patterns_keep_nested_router_frozen():
     ],
 )
 def test_packed_document_batching_preserves_attention_context(family, device):
-    from _test_utils.transformers_families import build_model, cases, hf_torch_kernels
-
-    from modelopt.torch.distill.plugins.transformers import TransformersBypassAdapter
 
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA document batching requires an allocated GPU")
@@ -972,7 +961,7 @@ def test_packed_document_batching_preserves_attention_context(family, device):
                     policy.close()
         if family.startswith("qwen3_5"):
             changed = ids.clone()
-            changed[0, :4] = (changed[0, :4] - 2) % 97 + 3
+            changed[0, 0] = (changed[0, 0] - 2) % 97 + 3
             perturbed = []
             adapter.teacher_microbatch(
                 teacher,

@@ -126,6 +126,7 @@ def test_local_diagnostics_full_vocabulary_and_document_targets():
         "llama_hooked",
         "llama_quantized",
         "llama_biased",
+        "llama_one_head",
         "gemma2",
         "gemma2_no_softcap",
         "gemma2_centered",
@@ -237,6 +238,8 @@ def test_transformers_head_chunks_match_full_logits_and_restore(family_name, mon
     with torch.no_grad():
         target, prediction = teacher(input_ids=tokens).logits, candidate(input_ids=tokens).logits
         expected = diagnostic_statistics(target, prediction, labels, valid)
+    if family_name == "llama_one_head":
+        monkeypatch.setattr(candidate, "get_output_embeddings", lambda: None)
     original = head.forward
     report = evaluate_pair(
         teacher,
@@ -253,7 +256,9 @@ def test_transformers_head_chunks_match_full_logits_and_restore(family_name, mon
         report["mean_cross_entropy"], (expected[0] / expected[1]).item(), rtol=2e-6, atol=1e-7
     )
     assert report["projection_modes"] == [
-        "chunked_head"
+        "full_logits"
+        if family_name == "llama_one_head"
+        else "chunked_head"
         if family_name in ("llama_hooked", "llama_quantized", "gemma2_centered")
         else "chunked_linear"
     ]
