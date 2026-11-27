@@ -267,9 +267,10 @@ class DFlashConfig(ModeloptBaseConfig):
         default=0.1,
         ge=0.0,
         description=(
-            "DSpark only: weight of the cross-entropy term in the three-term loss "
-            "(ce_alpha*CE + l1_alpha*TVD + conf_alpha*BCE). "
-            "Ignored unless dflash_architecture_config.projector_type == 'dspark'."
+            "DSpark and DSpine: weight of the cross-entropy term. DSpark's loss is "
+            "ce_alpha*CE + l1_alpha*TVD + conf_alpha*BCE; DSpine weighs its backbone and "
+            "refinement terms as ce_alpha*CE + l1_alpha*L1. "
+            "Ignored unless dflash_architecture_config.projector_type is 'dspark' or 'dspine'."
         ),
     )
 
@@ -277,9 +278,9 @@ class DFlashConfig(ModeloptBaseConfig):
         default=0.9,
         ge=0.0,
         description=(
-            "DSpark only: weight of the L1/total-variation distribution-matching term "
-            "between the corrected draft and the target distribution. "
-            "Ignored unless dflash_architecture_config.projector_type == 'dspark'."
+            "DSpark and DSpine: weight of the L1/total-variation distribution-matching term "
+            "between the draft and the target distribution. "
+            "Ignored unless dflash_architecture_config.projector_type is 'dspark' or 'dspine'."
         ),
     )
 
@@ -451,6 +452,54 @@ class DFlashConfig(ModeloptBaseConfig):
         ),
     )
 
+    dflash_dspine_alignment_weight: float = ModeloptField(
+        default=0.5,
+        ge=0.0,
+        description=(
+            "DSpine only: final weight beta of the code-alignment term, which pulls every "
+            "draft layer's code toward the codebook code of the token its position predicts. "
+            "The term is scaled by beta_t * stopgrad(backbone CE), with beta_t warming up "
+            "linearly over dflash_dspine_alignment_warmup_steps. "
+            "Ignored unless dflash_architecture_config.projector_type == 'dspine'."
+        ),
+    )
+
+    dflash_dspine_alignment_warmup_steps: int | None = ModeloptField(
+        default=None,
+        ge=0,
+        description=(
+            "DSpine only: optimizer steps over which the alignment weight ramps from 0 to "
+            "dflash_dspine_alignment_weight. None (default) follows the learning-rate warmup."
+        ),
+    )
+
+    dflash_dspine_teacher_forcing_probability: float = ModeloptField(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "DSpine only: initial per-block probability that the first "
+            "dflash_architecture_config.teacher_forcing_layers draft layers take the true "
+            "previous tokens' codes as predecessors instead of their own. Held for "
+            "dflash_dspine_teacher_forcing_hold_fraction of training, then decayed linearly "
+            "to 0 at dflash_dspine_teacher_forcing_zero_fraction."
+        ),
+    )
+
+    dflash_dspine_teacher_forcing_hold_fraction: float = ModeloptField(
+        default=1 / 6,
+        ge=0.0,
+        le=1.0,
+        description="DSpine only: training fraction over which the teacher forcing is held.",
+    )
+
+    dflash_dspine_teacher_forcing_zero_fraction: float = ModeloptField(
+        default=1 / 3,
+        ge=0.0,
+        le=1.0,
+        description="DSpine only: training fraction by which the teacher forcing reaches 0.",
+    )
+
     @model_validator(mode="after")
     def _check_dpace_alpha(self) -> Self:
         # Validate at construction regardless of the active objective, so a bad alpha
@@ -465,6 +514,14 @@ class DFlashConfig(ModeloptBaseConfig):
                     f"dflash_swa_window_size ({self.dflash_swa_window_size}) must be >= "
                     f"dflash_block_size ({self.dflash_block_size})."
                 )
+        if (
+            self.dflash_dspine_teacher_forcing_hold_fraction
+            >= self.dflash_dspine_teacher_forcing_zero_fraction
+        ):
+            raise ValueError(
+                "dflash_dspine_teacher_forcing_hold_fraction must be below "
+                "dflash_dspine_teacher_forcing_zero_fraction."
+            )
         return self
 
 

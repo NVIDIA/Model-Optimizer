@@ -777,7 +777,11 @@ class HFDFlashModel(DFlashModel):
         return base_token, model_output.hidden_states
 
     def _draft_block(self, base_token, hidden_states):
-        """Draft hidden states [B, block_size, H] for the block that ``base_token`` anchors.
+        """Draft hidden states [B, block_size, H] for the block that ``base_token`` anchors."""
+        return self.dflash_module(**self._draft_block_inputs(base_token, hidden_states))
+
+    def _draft_block_inputs(self, base_token, hidden_states):
+        """The draft module's inputs for one block anchored by ``base_token`` after the context.
 
         Re-runs no base layer: the context is ``hidden_states`` from :meth:`_generation_base`.
         """
@@ -806,12 +810,12 @@ class HFDFlashModel(DFlashModel):
 
         attn_mask = self._build_generate_swa_mask(ctx_len, bsz, target_hidden.dtype, device)
 
-        return self.dflash_module(
-            noise_embedding=noise_embedding,
-            target_hidden=target_hidden,
-            position_ids=pos_ids,
-            attention_mask=attn_mask,
-        )
+        return {
+            "noise_embedding": noise_embedding,
+            "target_hidden": target_hidden,
+            "position_ids": pos_ids,
+            "attention_mask": attn_mask,
+        }
 
     def _draft_zero_loss(self, device, through=()):
         """A zero loss with a backward path to the draft, for a step with nothing to train.
@@ -961,6 +965,34 @@ class HFDFlashModel(DFlashModel):
             tvd_chunk=self._tvd_chunk_fn,
         )
 
+    def _draft_loss(
+        self,
+        input_ids,
+        loss_mask,
+        anchor_positions,
+        block_keep_mask,
+        base_outputs,
+        *,
+        noise_embedding,
+        position_ids,
+        attention_mask,
+    ) -> LossOutput:
+        """Run the draft over the sampled blocks and compute the step's loss.
+
+        A variant whose draft reads more than these inputs, or whose loss reads the draft's
+        internals, overrides this rather than the whole training forward.
+        """
+        hidden = self.dflash_module(
+            noise_embedding=noise_embedding,
+            target_hidden=base_outputs.target_hidden,
+            position_ids=position_ids,
+            attention_mask=attention_mask,
+        )
+        batch = DraftBatch(
+            input_ids, loss_mask, anchor_positions, block_keep_mask, base_outputs, hidden
+        )
+        return self._compute_loss(self._loss_context(batch))
+
     def _compute_loss(self, ctx: LossContext) -> LossOutput:
         """The objective on the served logits and its accuracy.
 
@@ -1010,7 +1042,8 @@ class HFDFlashModel(DFlashModel):
         - Position weighting by D-PACE or exponential decay
 
         A variant changes the step only through its hooks: ``_online_base_outputs``,
-        ``_draft_logits`` (its head), ``_position_weighting`` and ``_compute_loss``.
+        ``_draft_logits`` (its head), ``_position_weighting`` and ``_compute_loss``, or
+        ``_draft_loss`` when its draft takes other inputs.
         """
         if not self.training:
             if self.dflash_offline:
@@ -1105,19 +1138,17 @@ class HFDFlashModel(DFlashModel):
             window=self.dflash_swa_window_size,
         )
 
-        # 5. Draft forward
-        hidden = self.dflash_module(
+        # 5. Draft forward, loss and accuracy
+        out = self._draft_loss(
+            input_ids,
+            loss_mask,
+            anchor_positions,
+            block_keep_mask,
+            base_outputs,
             noise_embedding=noise_embedding,
-            target_hidden=target_hidden,
             position_ids=full_pos,
             attention_mask=attn_mask,
         )
-
-        # 6. Compute loss and accuracy
-        batch = DraftBatch(
-            input_ids, loss_mask, anchor_positions, block_keep_mask, base_outputs, hidden
-        )
-        out = self._compute_loss(self._loss_context(batch))
         return ModelOutput(
             loss=out.loss,
             logits=base_outputs.logits,

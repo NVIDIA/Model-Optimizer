@@ -62,6 +62,7 @@ from modelopt.torch.speculative.config import ExternalDraftConfig
 from modelopt.torch.speculative.external.vocab_swap import swap_draft_vocabulary
 from modelopt.torch.speculative.plugins.hf_dflash import HFDFlashModel
 from modelopt.torch.speculative.plugins.hf_domino import DominoLambdaCallback
+from modelopt.torch.speculative.plugins.hf_dspine import DSpineScheduleCallback
 from modelopt.torch.speculative.plugins.hf_external import SPARSE_CAPABLE_LOSSES
 from modelopt.torch.speculative.plugins.hf_training_args import (
     TrainingArguments as SpecTrainingArgs,
@@ -548,6 +549,12 @@ def train():
         and recipe.dflash.dflash_architecture_config.get("projector_type") == "domino"
     ):
         callbacks.append(DominoLambdaCallback())
+    # DSpine's alignment warmup and teacher-forcing curriculum read the global step too.
+    if (
+        isinstance(recipe, ModelOptDFlashRecipe)
+        and recipe.dflash.dflash_architecture_config.get("projector_type") == "dspine"
+    ):
+        callbacks.append(DSpineScheduleCallback())
     # fp32 master weights are the optimizer's job, and wiring the optimizer is the training
     # loop's. This fails the run if that wiring is ever missed, rather than letting the flag
     # be silently inert for a whole job.
