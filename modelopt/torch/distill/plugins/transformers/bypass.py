@@ -519,7 +519,11 @@ class TransformersBypassAdapter(ModuleBypassAdapter):
         facts = self._facts(teacher)
         spec = facts.spec
         documents = document_batches(batch) if spec.isolated_documents else [batch]
-        if spec.isolated_documents and self._batch_documents(teacher, spec, facts.modules):
+        if (
+            "input_ids" in batch
+            and spec.isolated_documents
+            and self._batch_documents(teacher, spec, facts.modules)
+        ):
             student_facts = self._facts(self.student)
             if self._batch_documents(self.student, student_facts.spec, student_facts.modules):
                 documents = batch_documents(documents, batch["input_ids"].numel())

@@ -194,6 +194,24 @@ def _moe():
     return Qwen3MoeForCausalLM(config).eval()
 
 
+def test_transformers_teacher_replay_accepts_embeddings_without_token_ids():
+    teacher = _moe()
+    adapter = TransformersBypassAdapter()
+    adapter.student = copy.deepcopy(teacher)
+    units = [BypassUnit("mlp", "model.layers.0.mlp", "model.layers.0.mlp")]
+    ids = torch.randint(3, 32, (2, 8))
+    inputs = teacher.get_input_embeddings()(ids).detach()
+    targets = []
+    for batch in ({"input_ids": ids}, {"inputs_embeds": inputs}):
+        adapter.validate_batch(batch, mtd.BypassConfig(sequence_length=8))
+        current = []
+        adapter.teacher_microbatch(
+            teacher, units, batch, lambda unit, record: current.append(record.target)
+        )
+        targets.append(torch.cat(current))
+    torch.testing.assert_close(targets[1], targets[0], rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("bits", ["iq1_m", "iq2_s"])
 def test_transformers_bypass_selection_and_prefix(bits, tmp_path):
     torch.manual_seed(41)
