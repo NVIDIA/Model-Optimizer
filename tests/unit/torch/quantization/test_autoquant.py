@@ -1152,6 +1152,46 @@ def test_data_parallel_auto_quantize(cpu_dist_workers):
     cpu_dist_workers.run(_test_data_parallel_auto_quantize)
 
 
+def _test_resume_from_another_point_on_one_rank(rank, size, directory, rank1_file):
+    torch.manual_seed(rank)
+    data_loader = [SimpleLinear().get_input() for _ in range(2)]
+
+    def search():
+        mtq.auto_quantize(
+            SimpleLinear(),
+            constraints={"effective_bits": 11.0},
+            quantization_formats=[mtq.INT8_SMOOTHQUANT_CFG],
+            data_loader=data_loader,
+            forward_step=lambda model, batch: model(batch),
+            loss_func=lambda output, data: output.sum(),
+            num_calib_steps=2,
+            num_score_steps=2,
+            checkpoint=str(directory),
+        )
+
+    search()
+    if rank == 1:
+        path = directory / "rank1.pth"
+        if rank1_file == "missing":
+            path.unlink()
+        else:  # saved after calibrating, before scoring
+            state = safe_load(path)
+            state["candidate_stats"] = {}
+            safe_save(state, path)
+    # Rank 1 would calibrate or score again while rank 0 restores both: every rank refuses instead.
+    with bounded_collectives(), pytest.raises(ValueError, match="checkpoint at the same progress"):
+        search()
+
+
+@pytest.mark.parametrize("rank1_file", ["missing", "older"])
+def test_resume_from_another_point_on_one_rank_raises_on_every_rank(
+    cpu_dist_workers, tmp_path, rank1_file
+):
+    cpu_dist_workers.run(
+        _test_resume_from_another_point_on_one_rank, directory=tmp_path, rank1_file=rank1_file
+    )
+
+
 def _test_data_parallel_moe_score_module(rank, size):
     torch.manual_seed(1234)
     model = _ScoredMoeModel()

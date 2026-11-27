@@ -39,7 +39,13 @@ from modelopt.torch.opt.hparam import CustomHPType, Hparam, HPType
 from modelopt.torch.opt.searcher import LPS, BaseSearcher, SearchConfig, SearchStateDict
 from modelopt.torch.opt.utils import get_hparam, named_hparams
 from modelopt.torch.utils import create_param_grad_clear_hook, print_rank_0, report_memory
-from modelopt.torch.utils.distributed import DistributedProcessGroup, ParallelState, is_master
+from modelopt.torch.utils.distributed import (
+    DistributedProcessGroup,
+    ParallelState,
+    all_reduce,
+    is_distributed_run,
+    is_master,
+)
 
 from . import config as mtq_config
 from . import model_calib
@@ -856,6 +862,15 @@ def _quantization_formats_signature(quant_recipes) -> tuple[str, ...]:
     return tuple(sorted(recipe.checkpoint_signature for recipe in quant_recipes))
 
 
+def _resume_together(progresses: list) -> None:
+    if any(progress != progresses[0] for progress in progresses):
+        raise ValueError(
+            "Distributed AutoQuantize requires every rank's checkpoint at the same progress. "
+            "Restore all rank files from the same search, or use a new checkpoint path on every "
+            "rank."
+        )
+
+
 class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
     """Base searcher for AutoQuantize algorithm."""
 
@@ -993,6 +1008,16 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         self.reset_search()
         loaded = self.load_search_checkpoint()
         state = self.state_dict()
+        if is_distributed_run():
+            # Each rank resumes from its own file, and the search branches on what it holds: ranks
+            # resuming from different points, e.g. after a run stopped between two ranks' saves,
+            # would enter different collectives.
+            progress = (
+                state.get("method"),
+                sorted(map(str, state["quantizer_states"])),
+                bool(state["candidate_stats"]),
+            )
+            all_reduce("AutoQuantize checkpoint progress", lambda: progress, _resume_together)
         self._preloaded_state = state if loaded else {}
         if not state["candidate_stats"]:
             return
