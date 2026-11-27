@@ -17,6 +17,7 @@ Changelog
 - Add ``context_quant_level`` to KL-divergence AutoQuantize (``method={"method": "kl_div", "context_quant_level": "lowest"}``, or ``method_options: {context_quant_level: lowest}`` in a recipe): each candidate is scored with every other searched layer at its lowest-bit format (an int picks the format by its 0-based index from the lowest), so low-bit budgets go to the layers whose error compounds most once the whole model is quantized. ``"lowest"`` is a good default; a context nearer the target budget measured the same in our tests.
 - GPTQ calibration is 25-35% faster in our MoE-expert and dense-MLP tests, with the GGML IQ formats and with NVFP4 under ``fused: true``. Results change only at round-off.
 - GPTQ now defaults to ``fused=True``, running the fused Triton update for static NVFP4 weights on SM89+ (4/6 scaling and other formats keep the unfused loop). Set ``fused: false`` to restore the previous behavior.
+- Add opt-in ``rollback=True`` to ``enable_weight_access_and_writeback`` for Accelerate-offloaded weights, yielding an undo callback that can be invoked after exit. Restore already-resident execution values from caller-owned backups and invoke undo before any overlapping owner access.
 
 *Quantization - QAT / QAD*
 
@@ -40,6 +41,8 @@ Changelog
 
 **Backward Breaking Changes**
 
+- Weight-access windows and Accelerate undo callbacks now require caller serialization across threads, including HF TP and ordinary/no-op dispatcher routes; concurrent calls raise ``RuntimeError`` even for unrelated modules. The guard remains held for the full context, including multi-batch persistent materialization.
+- Default Accelerate weight access now materializes hookless composite modules with offloaded descendants and skips writeback after a body failure. Callers that catch exceptions must restore in-place CPU aliases themselves or opt into ``rollback=True``; custom offload mapping subclasses are now refused before onload.
 - Writable FSDP2 weight-access windows now skip writeback when any participating rank's body fails, and ranks whose bodies succeeded also raise ``RuntimeError``. Callers that catch a body exception must no longer rely on gathered edits being published; restore any aliased or previously published values from caller-owned backups. Temporary gathered parameters now preserve the original parameter's ``requires_grad`` flag instead of always enabling gradients.
 
 **Deprecations**

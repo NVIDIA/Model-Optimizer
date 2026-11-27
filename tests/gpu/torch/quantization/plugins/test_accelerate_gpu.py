@@ -158,6 +158,30 @@ def test_offloaded_quantizer_keeps_what_its_setter_wrote(tmp_path):
     assert torch.equal(quantizer._amax, amax)
 
 
+def test_offloaded_quantizer_rollback_restores_carried_cpu_alias():
+    # A descendant CPU quantizer master can alias an offload map even when buffers
+    # are not managed by Accelerate. Carrying it to CUDA must not hide that alias.
+    owner = nn.Linear(4, 4, bias=False)
+    mtq.replace_quant_module(owner)
+    owner.input_quantizer.pre_quant_scale = torch.ones(4)
+    weights = dict(owner.state_dict())
+    backing = weights["input_quantizer._pre_quant_scale"]
+    original = backing.clone()
+    add_hook_to_module(
+        owner, AlignDevicesHook(execution_device="cuda:0", offload=True, weights_map=weights)
+    )
+    with (
+        pytest.raises(RuntimeError, match="body failed"),
+        enable_weight_access_and_writeback(owner, owner, rollback=True),
+    ):
+        assert owner.input_quantizer.pre_quant_scale.is_cuda
+        owner.input_quantizer.pre_quant_scale.add_(1)
+        raise RuntimeError("body failed after editing carried quantizer")
+    assert owner.input_quantizer.pre_quant_scale.device.type == "cpu"
+    torch.testing.assert_close(backing, original, rtol=0, atol=0)
+    torch.testing.assert_close(owner.input_quantizer.pre_quant_scale, original, rtol=0, atol=0)
+
+
 def test_offloaded_layer_keeps_bias_calibration_off_the_gpu(tmp_path):
     """A static-bias quantizer's bias calibrator leaves the GPU with the offloaded layer's weights."""
     model, _, _, inputs = make_cpu_offloaded_model(tmp_path)

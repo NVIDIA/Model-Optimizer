@@ -37,6 +37,7 @@ from modelopt.torch.quantization.utils.core_utils import (
     _fsdp2_owns,
     _fsdp2_param_groups,
     enable_fake_quant,
+    enable_weight_access_and_writeback,
     fsdp2_weight_access_and_writeback_context,
     persistent_materialization,
 )
@@ -415,7 +416,8 @@ def test_disable_fsdp_unshard_reshard_shared_group_and_nesting(cpu_dist_workers)
     cpu_dist_workers.run(_shared_group_override_restores_prior_attributes)
 
 
-def _fsdp2_owns_its_params_in_every_state_job(rank, size, asymmetric, native_tp=False):
+def _fsdp2_owns_its_params_in_every_state_job(rank, size, asymmetric, receipt_stage="dispatcher"):
+    native_tp = receipt_stage == "native_tp"
     world_mesh = (
         init_device_mesh("cpu", (size, 1), mesh_dim_names=("dp", "tp")) if native_tp else None
     )
@@ -460,7 +462,7 @@ def _fsdp2_owns_its_params_in_every_state_job(rank, size, asymmetric, native_tp=
                 with pytest.warns(
                     RuntimeWarning, match="native-full.*weight.*caller.*publish.*reshard"
                 ) as notices:
-                    window.enter_context(fsdp2_weight_access_and_writeback_context(layer, model))
+                    window.enter_context(enable_weight_access_and_writeback(layer, model))
                 assert len(notices) == 1
                 with torch.no_grad():
                     assert layer.weight is unsharded
@@ -469,7 +471,7 @@ def _fsdp2_owns_its_params_in_every_state_job(rank, size, asymmetric, native_tp=
             torch.testing.assert_close(layer.weight, full_before + 1, rtol=0, atol=0)
             with (
                 pytest.raises(ValueError, match="reshard"),
-                fsdp2_weight_access_and_writeback_context(layer, model, rollback=True),
+                enable_weight_access_and_writeback(layer, model, rollback=True),
             ):
                 pytest.fail("Rollback exposed a native-full TP registration")
         finally:
@@ -499,7 +501,7 @@ def _fsdp2_owns_its_params_in_every_state_job(rank, size, asymmetric, native_tp=
                 ) as collectives,
             ):
                 for _ in range(2):
-                    with fsdp2_weight_access_and_writeback_context(layer, model):
+                    with enable_weight_access_and_writeback(layer, model):
                         assert layer.weight is unsharded
             assert scans.call_count == 1
             assert collectives.call_count == 6
@@ -510,20 +512,20 @@ def _fsdp2_owns_its_params_in_every_state_job(rank, size, asymmetric, native_tp=
         reached = False
         with (
             pytest.raises((ValueError, RuntimeError)),
-            fsdp2_weight_access_and_writeback_context(layer, model, rollback=True),
+            enable_weight_access_and_writeback(layer, model, rollback=True),
         ):
             reached = True
         assert not reached
         assert all(layer.get_parameter(name) is parameter for name, parameter in registered.items())
         torch.testing.assert_close(sharded.to_local(), shard_before, rtol=0, atol=0)
         if not asymmetric:
-            with fsdp2_weight_access_and_writeback_context(layer, model, writeback=False):
+            with enable_weight_access_and_writeback(layer, model, writeback=False):
                 assert layer.weight is unsharded
     finally:
         layer.reshard()
     assert layer.weight is sharded
     torch.testing.assert_close(sharded.to_local(), shard_before, rtol=0, atol=0)
-    with fsdp2_weight_access_and_writeback_context(layer, model, rollback=True), torch.no_grad():
+    with enable_weight_access_and_writeback(layer, model, rollback=True), torch.no_grad():
         layer.weight.add_(1)
     layer.unshard()
     try:
@@ -545,21 +547,106 @@ def _fsdp2_owns_its_params_in_every_state_job(rank, size, asymmetric, native_tp=
     model.unshard()
     try:
         ignored = model.ignored.weight
-        with fsdp2_weight_access_and_writeback_context(model.ignored, model, rollback=True):
+        with enable_weight_access_and_writeback(model.ignored, model, rollback=True):
             assert model.ignored.weight is ignored
     finally:
         model.reshard()
 
+    if asymmetric:
+        return
+    try:
+        from accelerate import cpu_offload
+
+        from modelopt.torch.quantization.plugins import accelerate as offload_plugin
+        from modelopt.torch.quantization.plugins.accelerate import (
+            weight_access_and_writeback_context as offload_weight_access,
+        )
+    except ImportError:
+        return
+
+    # Direct and dispatched windows expire overlapping receipts while preserving disjoint undo.
+    alias = torch.nn.Module()
+    alias.weight = torch.nn.Parameter(sharded.to_local().detach())
+    weights = {"weight": alias.weight.detach()}
+    cpu_offload(alias, execution_device="cpu", state_dict=weights)
+    independent = torch.nn.Linear(4, 4, bias=False)
+    independent_weights = {"weight": independent.weight.detach()}
+    independent_before = independent.weight.detach().clone()
+    cpu_offload(independent, execution_device="cpu", state_dict=independent_weights)
+    with offload_weight_access(independent, rollback=True) as independent_undo, torch.no_grad():
+        independent.weight.add_(1)
+    if receipt_stage == "direct_entry":
+        with offload_weight_access(alias, rollback=True) as undo:
+            pass
+    access = (
+        enable_weight_access_and_writeback
+        if receipt_stage == "dispatcher"
+        else fsdp2_weight_access_and_writeback_context
+    )
+    before_publication = sharded.to_local().detach().clone()
+    scope_failure = receipt_stage == "direct_scope_failure"
+    scope_ready = False
+    inspect_scope = offload_plugin._rollback_scope
+
+    def post_publication_scope(owner, materialized):
+        if scope_ready and owner is layer and owner.weight is sharded:
+            raise RuntimeError("post-publication scope inspection failed")
+        return inspect_scope(owner, materialized)
+
+    with (
+        mock.patch.object(offload_plugin, "_rollback_scope", post_publication_scope)
+        if scope_failure
+        else nullcontext(),
+        access(layer, model),
+        torch.no_grad(),
+    ):
+        if receipt_stage == "direct_entry":
+            with pytest.raises(RuntimeError):
+                undo()
+        else:
+            # The materialized view hides the persistent shard that this receipt can mutate.
+            with offload_weight_access(alias, rollback=True) as undo:
+                pass
+        layer.weight.add_(1)
+        scope_ready = scope_failure
+    published = sharded.to_local().detach().clone()
+    torch.testing.assert_close(published, before_publication + 1, rtol=0, atol=0)
+    try:
+        with pytest.raises(RuntimeError):
+            undo()
+    finally:
+        assert layer.weight is sharded
+        torch.testing.assert_close(sharded.to_local(), published, rtol=0, atol=0)
+    torch.testing.assert_close(
+        independent_weights["weight"], independent_before + 1, rtol=0, atol=0
+    )
+    if scope_failure:
+        with pytest.raises(RuntimeError):
+            independent_undo()
+        torch.testing.assert_close(
+            independent_weights["weight"], independent_before + 1, rtol=0, atol=0
+        )
+    else:
+        independent_undo()
+        torch.testing.assert_close(
+            independent_weights["weight"], independent_before, rtol=0, atol=0
+        )
+
 
 @pytest.mark.parametrize(
-    ("asymmetric", "native_tp"),
+    ("asymmetric", "receipt_stage"),
     [
-        (False, False),
-        (True, False),
-        (False, True),
+        (False, "dispatcher"),
+        (True, "dispatcher"),
+        (False, "direct_entry"),
+        (False, "direct_publication"),
+        (False, "native_tp"),
+        (False, "direct_scope_failure"),
     ],
 )
-def test_fsdp2_owns_its_parameters_in_every_shard_state(cpu_dist_workers, asymmetric, native_tp):
+def test_fsdp2_owns_its_parameters_in_every_shard_state(
+    cpu_dist_workers, asymmetric, receipt_stage
+):
     """FSDP2 registers another parameter object once a unit is unsharded (or resharded after the
     forward, under HSDP), and the weight-access window gathers by ownership: each counts as FSDP2's,
     or a weight it does own would be left sharded in the window. So do the parameters of a unit
@@ -572,7 +659,111 @@ def test_fsdp2_owns_its_parameters_in_every_shard_state(cpu_dist_workers, asymme
         if asymmetric:
             cpu_dist_workers.job_timeout = 15
             cpu_dist_workers.failure_grace = 2
-        cpu_dist_workers.run(_fsdp2_owns_its_params_in_every_state_job, asymmetric, native_tp)
+        cpu_dist_workers.run(_fsdp2_owns_its_params_in_every_state_job, asymmetric, receipt_stage)
+    finally:
+        cpu_dist_workers.job_timeout, cpu_dist_workers.failure_grace = timeout, grace
+
+
+def _fsdp2_receipt_inspection_failure_job(rank, size, direct, inject, stage):
+    # Accelerate is optional; the parent integration test skips when it is unavailable.
+    from accelerate import cpu_offload
+
+    from modelopt.torch.quantization.plugins import accelerate as offload_plugin
+
+    mesh = init_device_mesh("cpu", (size,))
+    layer = torch.nn.Linear(8, 8)
+    root = layer
+    if stage in ("ignored_entry", "ignored_exit"):
+        root = torch.nn.Sequential(layer, torch.nn.Linear(8, 8))
+        fully_shard(root, mesh=mesh, ignored_params=set(layer.parameters()))
+    else:
+        fully_shard(root, mesh=mesh)
+
+    def local(value):
+        return value.to_local() if isinstance(value, DTensor) else value
+
+    parameters = dict(layer.named_parameters())
+    before = {name: local(value).detach().clone() for name, value in parameters.items()}
+    alias = torch.nn.Linear(8, 4, bias=False)
+    alias.weight = torch.nn.Parameter(local(layer.weight).detach())
+    cpu_offload(alias, execution_device="cpu")
+    # A resident TP/FSDP shard may coexist with the independent offloaded owner.
+    mixed = torch.nn.ModuleDict({"offloaded": alias, "resident": torch.nn.Module()})
+    mixed["resident"].register_parameter("weight", layer.weight)
+    with offload_plugin.weight_access_and_writeback_context(mixed, rollback=True) as undo:
+        pass
+    failure = RuntimeError("rank-local receipt inspection failure")
+    inspect = offload_plugin._rollback_scope
+    redistribute = DTensor.redistribute
+    gathers = 0
+    body_done = False
+
+    def inspect_scope(owner, materialized):
+        at_stage = (
+            stage in ("preflight", "read_entry", "ignored_entry")
+            or (stage in ("read_exit", "ignored_exit") and body_done)
+            or (stage == "publication" and body_done and owner.weight is parameters["weight"])
+        )
+        if inject and rank == 0 and owner is layer and at_stage:
+            raise failure
+        return inspect(owner, materialized)
+
+    def count_gathers(tensor, *args, **kwargs):
+        nonlocal gathers
+        gathers += 1
+        return redistribute(tensor, *args, **kwargs)
+
+    access = (
+        fsdp2_weight_access_and_writeback_context if direct else enable_weight_access_and_writeback
+    )
+    error = None
+    entered = False
+    try:
+        with (
+            mock.patch.object(offload_plugin, "_rollback_scope", inspect_scope),
+            mock.patch.object(DTensor, "redistribute", count_gathers),
+            access(layer, root, writeback=not stage.startswith("read_")),
+        ):
+            entered = True
+            if stage in ("read_exit", "publication", "ignored_exit"):
+                with offload_plugin.weight_access_and_writeback_context(
+                    alias, rollback=True
+                ) as undo:
+                    pass
+            if stage == "publication":
+                with torch.no_grad():
+                    layer.weight.add_(1)
+            body_done = True
+    except RuntimeError as exc:
+        error = exc
+    if inject and stage == "preflight":
+        assert error is not None and not entered
+        assert gathers == 0, "Receipt inspection must fail every rank before gathering"
+        if rank == 0:
+            assert error is failure
+    else:
+        assert error is None and entered, repr(error)
+    with pytest.raises(RuntimeError):
+        undo()
+    for name, parameter in parameters.items():
+        assert layer.get_parameter(name) is parameter
+        expected = before[name] + (stage == "publication" and name == "weight")
+        torch.testing.assert_close(local(parameter), expected, rtol=0, atol=0)
+    torch.distributed.barrier()
+
+
+@pytest.mark.parametrize("direct", [False, True])
+@pytest.mark.parametrize(
+    "stage",
+    ["preflight", "read_entry", "read_exit", "publication", "ignored_entry", "ignored_exit"],
+)
+def test_fsdp2_receipt_inspection_failure_is_coordinated(cpu_dist_workers, direct, stage):
+    pytest.importorskip("accelerate")
+    cpu_dist_workers.run(_fsdp2_receipt_inspection_failure_job, direct, False, stage)
+    timeout, grace = cpu_dist_workers.job_timeout, cpu_dist_workers.failure_grace
+    try:
+        cpu_dist_workers.job_timeout, cpu_dist_workers.failure_grace = 15, 2
+        cpu_dist_workers.run(_fsdp2_receipt_inspection_failure_job, direct, True, stage)
     finally:
         cpu_dist_workers.job_timeout, cpu_dist_workers.failure_grace = timeout, grace
 
@@ -657,7 +848,7 @@ def _window_leaves_what_fsdp2_does_not_own_job(rank, size, failure_stage, _cuda_
             mock.patch.object(
                 torch.distributed, "all_reduce", wraps=torch.distributed.all_reduce
             ) as collectives,
-            fsdp2_weight_access_and_writeback_context(layer.experts, layer),
+            enable_weight_access_and_writeback(layer.experts, layer),
         ):
             assert all(
                 layer.experts.get_parameter(name) is value for name, value in originals.items()
@@ -758,7 +949,7 @@ def _window_leaves_what_fsdp2_does_not_own_job(rank, size, failure_stage, _cuda_
                 mock.patch.object(core_utils, "_fsdp2_owned_params", discover_once),
                 mock.patch.object(torch.Tensor, "copy_", copy_once),
                 mock.patch.object(core_utils, "_set_parameter", restore_once),
-                fsdp2_weight_access_and_writeback_context(
+                enable_weight_access_and_writeback(
                     layer, layer, rollback=failure_stage == "rank0_final_copy"
                 ),
                 torch.no_grad(),
@@ -795,7 +986,7 @@ def _window_leaves_what_fsdp2_does_not_own_job(rank, size, failure_stage, _cuda_
         if failure_stage == "rank0_last_prepare_default":
             torch.distributed.barrier()
         if failure_stage != "rank0_discovery":
-            with fsdp2_weight_access_and_writeback_context(layer, layer):
+            with enable_weight_access_and_writeback(layer, layer):
                 assert not isinstance(layer.dense.weight, DTensor)
         return
     failure = RuntimeError("FSDP weight access " + failure_stage)
@@ -834,7 +1025,7 @@ def _window_leaves_what_fsdp2_does_not_own_job(rank, size, failure_stage, _cuda_
     try:
         with (
             mock.patch.object(DTensor, "redistribute", fail_once),
-            fsdp2_weight_access_and_writeback_context(
+            enable_weight_access_and_writeback(
                 layer, layer, rollback=failure_stage != "rank0_body_default"
             ),
             torch.no_grad(),
@@ -952,7 +1143,7 @@ def _nested_fsdp_mesh_mismatch_job(rank, size, rollback, hsdp_prefix):
             DTensor, "redistribute", autospec=True, side_effect=DTensor.redistribute
         ) as redistributes,
         pytest.raises(ValueError, match="same sharding mesh"),
-        fsdp2_weight_access_and_writeback_context(model, model, rollback=rollback),
+        enable_weight_access_and_writeback(model, model, rollback=rollback),
     ):
         pytest.fail(f"A writable window exposed nested weight shape {tuple(model[0].weight.shape)}")
     assert redistributes.call_count == 0
@@ -961,7 +1152,7 @@ def _nested_fsdp_mesh_mismatch_job(rank, size, rollback, hsdp_prefix):
         torch.testing.assert_close(value.to_local(), before[name], rtol=0, atol=0)
     # Accessing each unit on its actual mesh remains supported.
     for owner in (model[0], model[1]):
-        with fsdp2_weight_access_and_writeback_context(owner, model, rollback=rollback):
+        with enable_weight_access_and_writeback(owner, model, rollback=rollback):
             assert not isinstance(owner.weight, DTensor)
 
 

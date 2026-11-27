@@ -35,7 +35,6 @@ from modelopt.torch.opt.dynamic import _pytorch_managed
 from modelopt.torch.quantization.nn import StaticBlockScaleQuantizer, TensorQuantizer
 from modelopt.torch.quantization.utils import (
     enable_weight_access_and_writeback,
-    fsdp2_weight_access_and_writeback_context,
     persistent_materialization,
 )
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
@@ -380,7 +379,7 @@ def _test_writeback_root_unwrapped(rank, size, reshard_after_forward):
             persistent = layer[0].weight
             before = persistent.to_local().detach().clone()
             with (
-                fsdp2_weight_access_and_writeback_context(layer[0], model, rollback=rollback),
+                enable_weight_access_and_writeback(layer[0], model, rollback=rollback),
                 torch.no_grad(),
             ):
                 layer[0].weight.add_(1)
@@ -393,13 +392,13 @@ def _test_writeback_root_unwrapped(rank, size, reshard_after_forward):
             temporary_before = temporary.to_local().detach().clone()
             with (
                 pytest.raises(ValueError),
-                fsdp2_weight_access_and_writeback_context(layer[0], model, rollback=rollback),
+                enable_weight_access_and_writeback(layer[0], model, rollback=rollback),
             ):
                 pytest.fail("A writable window exposed a temporary post-forward shard")
             assert layer[0].weight is temporary
             torch.testing.assert_close(temporary.to_local(), temporary_before, rtol=0, atol=0)
             expected = persistent.detach().full_tensor()
-            with fsdp2_weight_access_and_writeback_context(
+            with enable_weight_access_and_writeback(
                 layer[0], model, writeback=False, rollback=rollback
             ):
                 assert isinstance(layer[0].weight, nn.Parameter)
@@ -410,7 +409,7 @@ def _test_writeback_root_unwrapped(rank, size, reshard_after_forward):
             torch.testing.assert_close(persistent.to_local(), before + 1, rtol=0, atol=0)
             retry_before = persistent.to_local().detach().clone()
             with (
-                fsdp2_weight_access_and_writeback_context(layer[0], model, rollback=rollback),
+                enable_weight_access_and_writeback(layer[0], model, rollback=rollback),
                 torch.no_grad(),
             ):
                 layer[0].weight.add_(1)
@@ -434,7 +433,7 @@ def _test_writeback_root_unwrapped(rank, size, reshard_after_forward):
             try:
                 with (
                     pytest.raises((ValueError, RuntimeError)),
-                    fsdp2_weight_access_and_writeback_context(layer[0], model, rollback=rollback),
+                    enable_weight_access_and_writeback(layer[0], model, rollback=rollback),
                 ):
                     pytest.fail("An asymmetric temporary FSDP view was exposed")
                 for name, value in originals.items():
@@ -452,11 +451,11 @@ def _test_writeback_root_unwrapped(rank, size, reshard_after_forward):
     try:
         with (
             pytest.raises(ValueError),
-            fsdp2_weight_access_and_writeback_context(layer[0], model, rollback=True),
+            enable_weight_access_and_writeback(layer[0], model, rollback=True),
         ):
             pytest.fail("A writable window exposed a temporary native FSDP parameter")
         assert layer[0].weight is native_weight
-        with fsdp2_weight_access_and_writeback_context(layer[0], model, writeback=False):
+        with enable_weight_access_and_writeback(layer[0], model, writeback=False):
             assert layer[0].weight is native_weight
     finally:
         layer.reshard()
@@ -491,14 +490,14 @@ def _test_writeback_root_unwrapped(rank, size, reshard_after_forward):
         full_before = native.to_local().detach().clone()
         bias_before = tp_layer.bias.to_local().detach().clone()
         try:
-            with fsdp2_weight_access_and_writeback_context(tp_layer, tp_layer), torch.no_grad():
+            with enable_weight_access_and_writeback(tp_layer, tp_layer), torch.no_grad():
                 assert tp_layer.weight is native and isinstance(native, DTensor)
                 tp_layer.weight.add_(1)
             assert tp_layer.weight is native
             torch.testing.assert_close(native.to_local(), full_before + 1, rtol=0, atol=0)
             with (
                 pytest.raises(ValueError, match="reshard"),
-                fsdp2_weight_access_and_writeback_context(tp_layer, tp_layer, rollback=True),
+                enable_weight_access_and_writeback(tp_layer, tp_layer, rollback=True),
             ):
                 pytest.fail("Rollback exposed a native-full TP registration")
         finally:
@@ -525,11 +524,11 @@ def _test_writeback_root_unwrapped(rank, size, reshard_after_forward):
         for rollback in (False, True):
             with (
                 pytest.raises(ValueError, match="same sharding mesh"),
-                fsdp2_weight_access_and_writeback_context(nested, nested, rollback=rollback),
+                enable_weight_access_and_writeback(nested, nested, rollback=rollback),
             ):
                 pytest.fail("A parent window exposed a nested HSDP partial shard")
             for owner in (nested[0], nested[1]):
-                with fsdp2_weight_access_and_writeback_context(owner, nested, rollback=rollback):
+                with enable_weight_access_and_writeback(owner, nested, rollback=rollback):
                     assert owner.weight.shape == (dim, dim)
         for name, parameter in originals.items():
             assert nested.get_parameter(name) is parameter
