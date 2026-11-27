@@ -129,6 +129,10 @@ def init_distributed_env(training_args: transformers.TrainingArguments) -> None:
     """
     if training_args.cp_size < 1:
         raise ValueError(f"cp_size must be >= 1, got {training_args.cp_size}.")
+    if training_args.cp_size > 1 or training_args.full_determinism:
+        # Every rank of a CP group loads the same batches, so all must take them in sampler
+        # order; a fully deterministic run must not depend on which worker finishes first.
+        training_args.dataloader_in_order = True
     world_size = int(os.environ.get("WORLD_SIZE", torch.cuda.device_count() or 1))
     if training_args.dp_shard_size is None:
         training_args.dp_shard_size = world_size // training_args.cp_size
@@ -509,6 +513,9 @@ def train():
         # written with --no-aux-hidden-states. Every other mode must still fail
         # loudly on a dump that omits them.
         aux_hidden_states_optional=isinstance(recipe, ModelOptExternalDraftRecipe),
+        seed=(
+            training_args.data_seed if training_args.data_seed is not None else training_args.seed
+        ),
     )
     if recipe.data.mode == "sparse" and recipe.external.external_loss == "tvd_deploy":
         # tvd_deploy filters the draft side by external_top_k, while the teacher side is
@@ -549,7 +556,8 @@ def train():
     # Leave training_args.ignore_data_skip at its default (False). The dataset is
     # map-style, so HF Trainer's resume skips consumed indices at the batch-sampler
     # level (accelerate.skip_first_batches) without re-fetching them, landing at the
-    # exact data position. Setting it True would restart the data order from the top.
+    # saved data position (to within the batches in flight when dataloader_in_order is
+    # off). Setting it True would restart the data order from the top.
 
     # Tell the draft model the CP degree so it skips the dense eagle mask under CP.
     model.eagle_cp_size = training_args.cp_size

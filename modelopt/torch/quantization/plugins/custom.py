@@ -24,7 +24,7 @@ import torch
 
 from modelopt.torch.utils.distributed import ParallelState
 
-from ..ggml.common import PINNED_PAYLOAD_PREFIX
+from ..ggml.common import PINNED_IMPORTANCE_PREFIX, PINNED_PAYLOAD_PREFIX
 from ..nn import (
     GroupedQuantizer,
     NVFP4StaticQuantizer,
@@ -133,9 +133,10 @@ class _ParallelLinear(_QuantFunctionalMixin, QuantModule):
 
         def _check_unsupported_states(quantizer: TensorQuantizer):
             for k in quantizer.state_dict():
-                # GGML payloads pinned by GPTQ are loaded with the weights from the sharded checkpoint.
+                # GGML payloads pinned by GPTQ, and their importance, are loaded with the weights from
+                # the sharded checkpoint.
                 if k not in ["_amax", "_pre_quant_scale", "_global_amax"] and not k.startswith(
-                    PINNED_PAYLOAD_PREFIX
+                    (PINNED_PAYLOAD_PREFIX, PINNED_IMPORTANCE_PREFIX)
                 ):
                     warnings.warn(
                         f"Restore of {k} for {prefix} is not supported. The restore of this layer might be "
@@ -187,7 +188,13 @@ class _ParallelLinear(_QuantFunctionalMixin, QuantModule):
             and not _has_complete_static_nvfp4_weight_state(self.weight_quantizer, self.weight)
         ):
             self.weight_quantizer.reset_amax()
-            max_calibrate(self.weight_quantizer, lambda wq: wq(self.weight), distributed_sync=False)
+            # Weights may not be loaded yet (Megatron-Bridge restores this state into an uninitialized
+            # model), so NaNs in that memory must not fail calibration; the checkpoint's amax replaces it.
+            max_calibrate(
+                self.weight_quantizer,
+                lambda wq: wq(torch.nan_to_num(self.weight)),
+                distributed_sync=False,
+            )
         if _has_state(self.input_quantizer, "_pre_quant_scale"):
             if hasattr(self.input_quantizer, "_pre_quant_scale"):
                 delattr(self.input_quantizer, "_pre_quant_scale")

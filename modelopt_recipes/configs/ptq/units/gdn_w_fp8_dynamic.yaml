@@ -18,7 +18,7 @@
 # (``w`` is ``[B, T, H, K]``; ``axis: [0, 1, 2]`` reduces over K). Pairs with
 # ``gdn_state_fp8_dynamic`` to emulate an FP8 x FP8 state matmul. Unlike the state quantizer this
 # one runs on the tensor itself. The initial integration supports dynamic E4M3 with identity
-# STE only. Needs fla-core==0.5.1 and Triton.
+# STE only. Needs fla-core 0.5.x and Triton.
 
 # modelopt-schema: modelopt.torch.quantization.config.QuantizerCfgListConfig
   - quantizer_name: '*gdn_w_quantizer'

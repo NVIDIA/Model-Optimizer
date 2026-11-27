@@ -15,7 +15,7 @@
 """Megatron-Bridge plugins for using with Model-Optimizer."""
 
 import re
-from functools import cache
+from functools import cache, partial
 from typing import Any
 
 import torch
@@ -34,19 +34,25 @@ from megatron.bridge.training.post_training.checkpointing import (
 )
 from megatron.bridge.utils.instantiate_utils import register_allowed_target_prefix
 from megatron.core.models.gpt import GPTModel
+from megatron.core.models.hybrid.hybrid_layer_specs import hybrid_stack_spec
 from megatron.core.models.hybrid.hybrid_model import HybridModel
 from megatron.core.transformer.module import MegatronModule
+from megatron.core.transformer.spec_utils import ModuleSpec
 from megatron.core.utils import unwrap_model
 from torch.distributed.checkpoint import FileSystemReader
 from transformers import AutoConfig, AutoTokenizer
 
 from modelopt.torch.export.plugins.mcore_common import all_mcore_hf_export_mapping
 from modelopt.torch.utils import print_rank_0, warn_rank_0
-from modelopt.torch.utils.plugins.megatron_layer_specs import te_hybrid_stack_spec_sequential_mlp
+from modelopt.torch.utils.plugins.megatron_layer_specs import (
+    hybrid_stack_spec_grouped_mlp,
+    hybrid_stack_spec_sequential_mlp,
+    te_hybrid_stack_spec_sequential_mlp,
+)
 
-# ``set_moe_expert_layout`` records ``te_hybrid_stack_spec_sequential_mlp`` in a SequentialMLP
-# checkpoint's ``run_config.yaml``, and rebuilding that config resolves the target against this
-# allowlist. Only a process that imports this module registers it, so such a checkpoint must be
+# ``set_moe_expert_layout`` records ModelOpt factories in hybrid checkpoints' ``run_config.yaml``,
+# and rebuilding that config resolves these targets against this allowlist. Only a process that
+# imports this module registers it, so such a checkpoint must be
 # converted through a ModelOpt entrypoint, not stock ``scripts/conversion/convert.sh``. The prefix
 # covers all of ``modelopt`` rather than one module, which assumes a ``run_config.yaml`` is trusted
 # input -- it comes from a checkpoint the caller is already choosing to load.
@@ -126,8 +132,10 @@ def set_moe_expert_layout(provider, moe_grouped_gemm: bool) -> None:
     Set ``moe_grouped_gemm`` on the provider (the bridge's native, possibly custom/hybrid spec
     reads it at build time) rather than replacing the whole layer spec -- overwriting it would
     drop custom layers (e.g. Qwen3.5's GatedDeltaNet or Gemma3's custom spec). A hybrid provider
-    additionally has its stack spec set, since the native one pins ``TEGroupedMLP``: the bridge's
-    own factory for grouped GEMM, a ModelOpt one that swaps in SequentialMLP otherwise.
+    additionally needs its stack spec updated, since the native one pins ``TEGroupedMLP``.
+    Generic stacks use named factories for each layout. Custom factories, accepting either no
+    arguments or the provider, are wrapped to validate grouped experts or replace only the
+    experts with SequentialMLP. A custom factory fixed to SequentialMLP cannot select grouped GEMM.
 
     Assign a *factory function*, never a built ``ModuleSpec``: the provider is serialized into
     every checkpoint's ``run_config.yaml``, and Megatron-LM's YAML writer drops the fields of a
@@ -136,6 +144,28 @@ def set_moe_expert_layout(provider, moe_grouped_gemm: bool) -> None:
     provider calls the factory at build time, so behavior is unchanged.
     """
     if isinstance(provider, HybridModelProvider):
+        factory = provider.hybrid_stack_spec
+        if isinstance(factory, partial) and factory.func in (
+            hybrid_stack_spec_grouped_mlp,
+            hybrid_stack_spec_sequential_mlp,
+        ):
+            factory = factory.args[0] if factory.args else factory.keywords["stack_spec_factory"]
+        if factory is hybrid_stack_spec:
+            factory = None
+        if factory is not None and factory not in (
+            transformer_engine_hybrid_stack_spec,
+            te_hybrid_stack_spec_sequential_mlp,
+        ):
+            if isinstance(factory, ModuleSpec) or not callable(factory):
+                raise ValueError("A custom hybrid stack must be a serializable factory function")
+            provider.hybrid_stack_spec = partial(
+                hybrid_stack_spec_grouped_mlp
+                if moe_grouped_gemm
+                else hybrid_stack_spec_sequential_mlp,
+                factory,
+            )
+            provider.moe_grouped_gemm = moe_grouped_gemm
+            return
         # The grouped-GEMM factory is Megatron-Bridge's, and returns Megatron-Core's
         # ``hybrid_stack_spec`` unchanged -- the layer composition is identical either way. It is
         # named from the bridge so stock tooling resolves the target without importing ModelOpt.

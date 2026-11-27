@@ -29,11 +29,13 @@ import io
 import os
 import sys
 import tempfile
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from dataclasses import dataclass
 
 import numpy as np
 import onnx
+import onnxruntime as ort
+from polygraphy.common import TensorMetadata
 
 from modelopt.onnx import utils as onnx_utils
 from modelopt.onnx.autocast.logging_config import configure_logging, logger
@@ -67,6 +69,32 @@ class TensorStats:
         for dim in self.shape:
             result *= dim
         return result
+
+
+class _FeedDictRecorder:
+    """Wraps a data loader, remembering the feed dict of the batch currently in flight.
+
+    Comparator's streaming mode yields outputs only, so the graph inputs for each batch
+    have to be captured as the loader is consumed.
+    """
+
+    def __init__(self, data_loader):
+        self._data_loader = data_loader
+        self.last_feed_dict = {}
+
+    @property
+    def input_metadata(self):
+        return self._data_loader.input_metadata
+
+    @input_metadata.setter
+    def input_metadata(self, value):
+        # Plain lists have no such attribute; Comparator tolerates the AttributeError.
+        self._data_loader.input_metadata = value
+
+    def __iter__(self):
+        for feed_dict in self._data_loader:
+            self.last_feed_dict = feed_dict
+            yield feed_dict
 
 
 class ReferenceRunner:
@@ -186,7 +214,7 @@ class ReferenceRunner:
 
         return data_loader
 
-    def _get_ort_runner(self, model):
+    def _get_ort_runner(self, model, disable_cpu_mem_arena: bool = False):
         from polygraphy.backend.onnx import BytesFromOnnx
         from polygraphy.backend.onnxrt import OnnxrtRunner, SessionFromOnnx
 
@@ -204,12 +232,36 @@ class ReferenceRunner:
                 tmp_file_path = os.path.join(model_temp_dir.name, "model.onnx")
                 onnx_utils.save_onnx(modified_model, tmp_file_path, save_as_external_data=True)
                 logger.debug(f"Model with all outputs saved to {tmp_file_path}")
-                build_onnxrt_session = SessionFromOnnx(tmp_file_path, providers=self.providers)
+                model_bytes_or_path = tmp_file_path
             else:
                 # For models without external data, use the original BytesFromOnnx approach (no tmp files)
                 logger.debug("Model has no external data, using BytesFromOnnx approach")
-                serialize_onnx = BytesFromOnnx(modified_model)
-                build_onnxrt_session = SessionFromOnnx(serialize_onnx, providers=self.providers)
+                model_bytes_or_path = BytesFromOnnx(modified_model)
+
+            if disable_cpu_mem_arena:
+
+                def build_onnxrt_session():
+                    model = (
+                        model_bytes_or_path()
+                        if callable(model_bytes_or_path)
+                        else model_bytes_or_path
+                    )
+                    options = ort.SessionOptions()
+                    options.enable_cpu_mem_arena = False
+                    try:
+                        process_cpu_count = len(os.sched_getaffinity(0))
+                    except AttributeError:
+                        process_cpu_count = 1
+                    options.intra_op_num_threads = process_cpu_count
+                    options.inter_op_num_threads = process_cpu_count
+                    return ort.InferenceSession(
+                        model, providers=self.providers, sess_options=options
+                    )
+
+            else:
+                build_onnxrt_session = SessionFromOnnx(
+                    model_bytes_or_path, providers=self.providers
+                )
             runners = [OnnxrtRunner(build_onnxrt_session)]
         except Exception:
             if model_temp_dir is not None:
@@ -217,56 +269,255 @@ class ReferenceRunner:
             raise
         return runners, model_temp_dir
 
-    def _aggregate_tensor_stats(self, all_batch_data: list[OrderedDict]) -> OrderedDict:
-        """Aggregate tensor statistics across multiple batches.
+    @staticmethod
+    def _batch_stats(data: np.ndarray) -> tuple[float, float, float]:
+        """Returns (absmax, min, max) of one tensor, treating an empty tensor as zeros."""
+        if data.size == 0:
+            return 0, 0, 0
+        return np.max(np.abs(data)), np.min(data), np.max(data)
 
-        Args:
-            all_batch_data: List of dictionaries containing tensor data for each batch.
+    def _init_tensor_stats(self, batch_data: OrderedDict) -> OrderedDict:
+        """Creates per-tensor statistics seeded from +/-inf sentinels.
 
-        Returns:
-            OrderedDict mapping tensor names to TensorStats objects.
+        Seeding from the sentinels and always folding the first batch through
+        _fold_tensor_stats (rather than taking its values directly) keeps a NaN in
+        the first batch from poisoning the running stat: max(-inf, nan) stays -inf,
+        the same way max(running_value, nan) already ignores NaN in every later
+        batch.
         """
-        if len(all_batch_data) == 1:
-            # Single batch - return raw data for backward compatibility
-            return all_batch_data[0]
+        stats = OrderedDict()
+        for name, data in batch_data.items():
+            stats[name] = TensorStats(
+                absmax=-np.inf, min_val=np.inf, max_val=-np.inf, shape=data.shape
+            )
+        return stats
 
-        logger.info(f"Aggregating statistics across {len(all_batch_data)} batches...")
+    def _fold_tensor_stats(self, stats: OrderedDict, batch_data: OrderedDict) -> None:
+        """Folds one batch into the running statistics in place.
 
-        aggregated = OrderedDict()
-        tensor_names = all_batch_data[0].keys()
+        A tensor that is NaN in every element of a single batch reports
+        absmax=-inf, min_val=inf, max_val=-inf rather than NaN: max(-inf, nan) and
+        min(inf, nan) both keep the sentinel, since Python's max/min never replace
+        their first argument with a comparand that loses a NaN comparison. This is
+        intended, the same sentinel behavior that lets a later finite batch clear a
+        NaN-poisoned first batch (see test_multi_batch_nan_first_batch_does_not_poison_stats),
+        it is just visible on its own when there is only one batch and it is all NaN.
+        """
+        for name, tensor_stats in stats.items():
+            if name not in batch_data:
+                continue
+            absmax, min_val, max_val = self._batch_stats(batch_data[name])
+            tensor_stats.absmax = max(tensor_stats.absmax, absmax)
+            tensor_stats.min_val = min(tensor_stats.min_val, min_val)
+            tensor_stats.max_val = max(tensor_stats.max_val, max_val)
 
-        for name in tensor_names:
-            absmax = -np.inf
-            min_val = np.inf
-            max_val = -np.inf
-            shape = None
-
-            for batch_data in all_batch_data:
-                if name not in batch_data:
-                    continue
-                data = batch_data[name]
-                if shape is None:
-                    shape = data.shape
-
-                batch_absmax = np.max(np.abs(data)) if data.size > 0 else 0
-                batch_min = np.min(data) if data.size > 0 else 0
-                batch_max = np.max(data) if data.size > 0 else 0
-
-                absmax = max(absmax, batch_absmax)
-                min_val = min(min_val, batch_min)
-                max_val = max(max_val, batch_max)
-
-            if shape is not None:
-                aggregated[name] = TensorStats(
-                    absmax=absmax,
-                    min_val=min_val,
-                    max_val=max_val,
-                    shape=shape,
+    def _make_single_node_model(
+        self,
+        node: onnx.NodeProto,
+        dependency_names: list[str],
+        value_info_map: dict[str, onnx.ValueInfoProto],
+        initializer_map: dict[str, onnx.TensorProto],
+        runtime_values: dict[str, np.ndarray],
+    ) -> onnx.ModelProto:
+        """Build a runnable model containing one node from the reference graph."""
+        model_inputs = []
+        model_initializers = []
+        for input_name in dependency_names:
+            if input_name in initializer_map:
+                model_initializers.append(initializer_map[input_name])
+            elif input_name in value_info_map:
+                runtime_input = copy.deepcopy(value_info_map[input_name])
+                runtime_input.type.tensor_type.elem_type = onnx.helper.np_dtype_to_tensor_dtype(
+                    runtime_values[input_name].dtype
+                )
+                runtime_shape = runtime_input.type.tensor_type.shape
+                runtime_shape.ClearField("dim")
+                for dimension in runtime_values[input_name].shape:
+                    runtime_shape.dim.add().dim_value = dimension
+                model_inputs.append(runtime_input)
+            else:
+                raise ValueError(
+                    f"Tensor {input_name!r} required by node {node.name!r} has no type metadata."
                 )
 
-        return aggregated
+        model_outputs = []
+        for output_name in node.output:
+            if not output_name:
+                continue
+            if output_name not in value_info_map:
+                raise ValueError(
+                    f"Tensor {output_name!r} produced by node {node.name!r} has no type metadata."
+                )
+            output = copy.deepcopy(value_info_map[output_name])
+            if node.domain in ("", "ai.onnx"):
+                output.type.tensor_type.elem_type = onnx.TensorProto.UNDEFINED
+                output.type.tensor_type.ClearField("shape")
+            model_outputs.append(output)
 
-    def run(self, inputs=None):
+        graph = onnx.helper.make_graph(
+            [node],
+            f"{self.model.graph.name}_{node.name}",
+            model_inputs,
+            model_outputs,
+        )
+        for initializer in model_initializers:
+            graph.initializer.add().CopyFrom(initializer)
+        model = onnx.helper.make_model(
+            graph,
+            opset_imports=self.model.opset_import,
+            functions=self.model.functions,
+            ir_version=self.model.ir_version,
+        )
+        if node.domain in ("", "ai.onnx"):
+            model = onnx_utils.infer_shapes(model)
+        return model
+
+    @classmethod
+    def _get_graph_captured_inputs(cls, graph: onnx.GraphProto) -> list[str]:
+        """Return tensors referenced by a subgraph but defined in an outer scope."""
+        defined_names = {
+            *(value.name for value in graph.input),
+            *(initializer.name for initializer in graph.initializer),
+            *(output for node in graph.node for output in node.output if output),
+        }
+        referenced_names = []
+        for node in graph.node:
+            referenced_names.extend(name for name in node.input if name)
+            referenced_names.extend(cls._get_node_captured_inputs(node))
+        return list(dict.fromkeys(name for name in referenced_names if name not in defined_names))
+
+    @classmethod
+    def _get_node_captured_inputs(cls, node: onnx.NodeProto) -> list[str]:
+        """Return outer-scope tensors captured by graph attributes on a node."""
+        captured_inputs = []
+        for attribute in node.attribute:
+            if attribute.type == onnx.AttributeProto.GRAPH:
+                captured_inputs.extend(cls._get_graph_captured_inputs(attribute.g))
+            elif attribute.type == onnx.AttributeProto.GRAPHS:
+                for graph in attribute.graphs:
+                    captured_inputs.extend(cls._get_graph_captured_inputs(graph))
+        return list(dict.fromkeys(captured_inputs))
+
+    @classmethod
+    def _get_node_dependencies(cls, node: onnx.NodeProto) -> list[str]:
+        """Return explicit and control-flow-captured inputs required by a node."""
+        return list(
+            dict.fromkeys(
+                [
+                    *(name for name in node.input if name),
+                    *cls._get_node_captured_inputs(node),
+                ]
+            )
+        )
+
+    @staticmethod
+    def _update_tensor_stats(
+        stats: OrderedDict[str, TensorStats], name: str, value: np.ndarray
+    ) -> None:
+        """Update compact tensor statistics with one calibration batch."""
+        batch_absmax = np.max(np.abs(value)) if value.size else 0
+        batch_min = np.min(value) if value.size else 0
+        batch_max = np.max(value) if value.size else 0
+        previous = stats.get(name)
+        stats[name] = TensorStats(
+            absmax=max(previous.absmax if previous else -np.inf, batch_absmax),
+            min_val=min(previous.min_val if previous else np.inf, batch_min),
+            max_val=max(previous.max_val if previous else -np.inf, batch_max),
+            shape=previous.shape if previous else value.shape,
+        )
+
+    def _run_per_node(self, inputs=None) -> OrderedDict[str, TensorStats]:
+        """Run each graph node separately and retain only live activation tensors."""
+        value_info_map = {
+            value_info.name: value_info
+            for value_info in [
+                *self.model.graph.input,
+                *self.model.graph.output,
+                *self.model.graph.value_info,
+            ]
+        }
+        initializer_map = {
+            initializer.name: initializer for initializer in self.model.graph.initializer
+        }
+        node_dependencies = [
+            (node, self._get_node_dependencies(node)) for node in self.model.graph.node
+        ]
+        consumer_counts = Counter(
+            input_name
+            for _, dependency_names in node_dependencies
+            for input_name in dependency_names
+            if input_name not in initializer_map
+        )
+        stats = OrderedDict()
+        data_loader = self._load_inputs(inputs)
+        if inputs is None:
+            input_metadata = TensorMetadata()
+            for model_input in self.model.graph.input:
+                tensor_type = model_input.type.tensor_type
+                shape = tuple(
+                    dimension.dim_value if dimension.HasField("dim_value") else None
+                    for dimension in tensor_type.shape.dim
+                )
+                input_metadata.add(
+                    model_input.name,
+                    np.dtype(onnx.helper.tensor_dtype_to_np_dtype(tensor_type.elem_type)),
+                    shape,
+                )
+            data_loader.input_metadata = input_metadata
+
+        for input_data in data_loader:
+            live_values = {}
+            for name, value in input_data.items():
+                if name not in value_info_map:
+                    raise ValueError(f"Tensor {name!r} has no type metadata.")
+                elem_type = value_info_map[name].type.tensor_type.elem_type
+                dtype = onnx.helper.tensor_dtype_to_np_dtype(elem_type)
+                live_values[name] = value.astype(dtype, copy=False)
+            remaining_consumers = consumer_counts.copy()
+            for name in live_values:
+                self._update_tensor_stats(stats, name, live_values[name])
+
+            for node, dependency_names in node_dependencies:
+                runtime_input_names = [
+                    name for name in dependency_names if name not in initializer_map
+                ]
+                missing_inputs = [name for name in runtime_input_names if name not in live_values]
+                if missing_inputs:
+                    raise ValueError(
+                        f"Node {node.name!r} is missing runtime inputs {missing_inputs!r}."
+                    )
+                feed_dict = {name: live_values[name] for name in runtime_input_names}
+                single_node_model = self._make_single_node_model(
+                    node, dependency_names, value_info_map, initializer_map, live_values
+                )
+                runners, model_temp_dir = self._get_ort_runner(
+                    lambda: single_node_model, disable_cpu_mem_arena=True
+                )
+                try:
+                    with runners[0] as runner:
+                        output_dict = runner.infer(feed_dict)
+                finally:
+                    if model_temp_dir is not None:
+                        model_temp_dir.cleanup()
+                    runners.clear()
+
+                for input_name in runtime_input_names:
+                    remaining_consumers[input_name] -= 1
+                    if remaining_consumers[input_name] == 0:
+                        live_values.pop(input_name)
+                feed_dict.clear()
+
+                output_value = None
+                for output_name in tuple(output_dict):
+                    output_value = output_dict.pop(output_name)
+                    self._update_tensor_stats(stats, output_name, output_value)
+                    if remaining_consumers[output_name] > 0:
+                        live_values[output_name] = output_value
+                output_value = None
+
+        return stats
+
+    def run(self, inputs=None, calibrate_per_node: bool = False):
         """Run FP32 inference with provided or random inputs.
 
         When multiple batches of input data are provided, inference is run for each batch
@@ -277,12 +528,13 @@ class ReferenceRunner:
                 - None: Random inputs will be generated
                 - str: Path to JSON file, NPZ file, or directory containing NPZ files
                 - dict/OrderedDict: Single batch of input data
+            calibrate_per_node: Run each node separately and return compact statistics to reduce
+                peak calibration memory.
 
         Returns:
-            OrderedDict: Combined input and output data. For single batch, returns raw arrays.
-                For multiple batches, returns TensorStats objects with aggregated statistics.
+            OrderedDict: Combined input and output data. Per-node mode and multi-batch normal mode
+                return TensorStats objects; single-batch normal mode returns raw arrays.
         """
-        import onnxruntime as ort
         from polygraphy import constants
         from polygraphy.backend.onnx import ModifyOutputs as ModifyOnnxOutputs
         from polygraphy.comparator import Comparator
@@ -290,6 +542,8 @@ class ReferenceRunner:
         logger.info("Running ONNX Runtime to obtain reference outputs (this may take a while)...")
         # Set ONNX Runtime log level to ERROR to suppress warnings
         ort.set_default_logger_severity(3)
+        if calibrate_per_node:
+            return self._run_per_node(inputs)
 
         model_copy = copy.deepcopy(self.model)
         # Clear stale type metadata to prevent type check failures in ORT
@@ -298,17 +552,50 @@ class ReferenceRunner:
 
         # Load the modified model and create an inference session
         runners, model_temp_dir = self._get_ort_runner(modify_outputs)
+        num_batches = 0
+        first_batch = None
+        stats = None
         try:
             # Comparator is used despite the fact that we are using ONNXRuntime
             # because it provides the ability to generate random inputs using DataLoader
-            data_loader = self._load_inputs(inputs)
+            data_loader = _FeedDictRecorder(self._load_inputs(inputs))
 
             # Temporarily redirect stdout to suppress Comparator.run() output
             stdout = sys.stdout
             string_buffer = io.StringIO()
             sys.stdout = string_buffer
             try:
-                results = Comparator.run(runners, data_loader=data_loader)
+                # Stream one batch at a time and fold it into the running statistics
+                # immediately. Under MARK_ALL every intermediate tensor is a graph output,
+                # so materializing every batch would make peak memory scale with the
+                # number of calibration samples.
+                for result in Comparator.run(runners, data_loader=data_loader, streaming=True):
+                    batch_data = OrderedDict()
+                    batch_data.update(data_loader.last_feed_dict)
+                    batch_data.update(result[0][1][0])
+
+                    num_batches += 1
+                    if num_batches == 1:
+                        stats = self._init_tensor_stats(batch_data)
+                        first_batch = batch_data
+                    else:
+                        # Runner output buffers may be reused across iterations, so the
+                        # first batch's raw arrays are only safe to return while it is
+                        # the only batch.
+                        first_batch = None
+                    try:
+                        # Fold every batch, including the first, through the same sentinel
+                        # comparison so a NaN batch can never poison the running statistic.
+                        # stats is always set above on the first iteration before this runs.
+                        assert stats is not None
+                        self._fold_tensor_stats(stats, batch_data)
+                    except TypeError:
+                        if num_batches > 1:
+                            raise
+                        # A single batch of non-numeric data (e.g. a valid string input
+                        # feeding a Cast) is returned unchanged below without ever
+                        # needing numeric reduction; defer the error in case a second
+                        # batch arrives and genuinely requires it.
             finally:
                 # Capture the output before restoring stdout
                 captured_output = string_buffer.getvalue()
@@ -317,34 +604,13 @@ class ReferenceRunner:
             if model_temp_dir is not None:
                 model_temp_dir.cleanup()
 
-        if not results:
+        if num_batches == 0:
             logger.error(f"ONNXRuntime execution failed with output:\n{captured_output}")
             raise Exception("ONNXRuntime failed to run, see logs for details")
 
-        # Collect all batch data (inputs + outputs)
-        all_batch_data = []
-        runner_results = results[0][1]  # Get all iteration results for the first runner
-        data_loader_iter = iter(data_loader)
+        if num_batches == 1:
+            # Single batch - return raw data for backward compatibility
+            return first_batch
 
-        for iter_idx, iter_result in enumerate(runner_results):
-            output_dict = OrderedDict(iter_result)
-
-            # Get corresponding input data
-            try:
-                input_data = next(data_loader_iter)
-            except StopIteration:
-                # If data_loader is exhausted, it might be a DataLoader that generates random data
-                input_data = {}
-
-            # Combine inputs and outputs for this batch
-            batch_dict = OrderedDict()
-            batch_dict.update(input_data)
-            batch_dict.update(output_dict)
-            all_batch_data.append(batch_dict)
-
-        num_batches = len(all_batch_data)
-        if num_batches > 1:
-            logger.info(f"Processed {num_batches} batches of calibration data")
-
-        # Aggregate statistics across all batches
-        return self._aggregate_tensor_stats(all_batch_data)
+        logger.info(f"Aggregated statistics across {num_batches} batches of calibration data")
+        return stats

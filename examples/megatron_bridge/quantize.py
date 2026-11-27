@@ -209,6 +209,11 @@ def get_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--output_qdq_weight",
+        action="store_true",
+        help="Save floating QDQ weights with ModelOpt state for QAD, instead of latent weights.",
+    )
+    parser.add_argument(
         "--compress",
         action="store_true",
         help="Compress weights to a real low-bit representation (instead of fake quantization).",
@@ -271,12 +276,13 @@ def get_args() -> argparse.Namespace:
     args = parser.parse_args()
     resolve_mlflow_args(args, parser, QUANTIZE)
 
+    if args.output_qdq_weight and (args.compress or args.lora_rank):
+        parser.error("--output_qdq_weight requires uncompressed, adapter-free weights.")
+
     if args.lora_rank < 0:
         parser.error("--lora_rank must be non-negative")
     if args.lora_rank and args.compress:
         parser.error("--lora_rank requires fake quantization; cannot be combined with --compress")
-
-    print_args(masked_args(args))
 
     # Flipped by main() once the Megatron checkpoint is on disk. The MLflow provenance
     # pointer is gated on it rather than on --export_megatron_path existing, which proves
@@ -471,6 +477,9 @@ def main(args: argparse.Namespace):
     else:
         mtq.quantize(unwrapped_model, mtq_config, forward_loop)
 
+    if args.output_qdq_weight:
+        mtq.initialize_qdq_weights(unwrapped_model)
+
     if args.lora_rank:
         mtq.enable_quant_lora(
             unwrapped_model,
@@ -538,9 +547,10 @@ def main(args: argparse.Namespace):
 
 
 if __name__ == "__main__":
-    dist.setup()
     args = get_args()
+    dist.setup()
     try:
+        print_args(masked_args(args))
         # Entered inside the try: opening the run is fatal by design, and the peers of a rank
         # that exits without dist.abort() stay blocked on the first collective.
         with mlflow_run(args, QUANTIZE):

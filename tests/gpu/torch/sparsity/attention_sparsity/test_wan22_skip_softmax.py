@@ -17,7 +17,7 @@
 
 Uses ``create_tiny_wan22_pipeline_dir`` (matches diffusers' own tiny Wan 2.2
 test config): dual 2-layer transformer, tiny VAE, tiny T5 text encoder.
-The full ``WanPipeline`` is loaded, sparsified with ``mtsa.sparsify``, and
+The full ``WanPipeline`` is loaded, sparsified with ``mts.sparsify``, and
 run end-to-end with a 2-step denoising loop — asserting no NaN/Inf in the
 pipeline output.
 """
@@ -39,7 +39,7 @@ import modelopt.torch.opt as mto
 from modelopt.torch.kernels.common.attention import IS_AVAILABLE as TRITON_KERNEL_AVAILABLE
 
 if TRITON_KERNEL_AVAILABLE:
-    import modelopt.torch.sparsity.attention_sparsity as mtsa
+    import modelopt.torch.sparsity as mts
     from modelopt.torch.sparsity.attention_sparsity.methods.triton_skip_softmax import (
         TritonSkipSoftmaxMethod,
     )
@@ -92,8 +92,8 @@ def _skip_softmax_cfg(threshold=0.03125):
 
 def _sparsify_both_transformers(pipe, cfg):
     """Apply sparsify to both transformer and transformer_2 (14B-style dual)."""
-    mtsa.sparsify(pipe.transformer, cfg)
-    mtsa.sparsify(pipe.transformer_2, cfg)
+    mts.sparsify(pipe.transformer, cfg)
+    mts.sparsify(pipe.transformer_2, cfg)
 
 
 def _run_pipe(pipe, seed=0):

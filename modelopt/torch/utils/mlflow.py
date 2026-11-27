@@ -266,9 +266,11 @@ def command_text(argv: list[str] | None = None) -> str:
     if world_size > 1:
         lines += [
             "",
-            f"# Launched under torchrun with WORLD_SIZE={world_size}, "
-            f"LOCAL_WORLD_SIZE={os.environ.get('LOCAL_WORLD_SIZE', '?')}. The torchrun "
-            "wrapper is not part of sys.argv and is therefore not shown above.",
+            (
+                f"# Launched under torchrun with WORLD_SIZE={world_size}, "
+                f"LOCAL_WORLD_SIZE={os.environ.get('LOCAL_WORLD_SIZE', '?')}. The torchrun "
+                "wrapper is not part of sys.argv and is therefore not shown above."
+            ),
         ]
     return "\n".join(lines) + "\n"
 

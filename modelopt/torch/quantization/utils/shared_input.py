@@ -18,8 +18,8 @@
 Weight ``global_amax`` must be unified across modules that get **fused** at export
 (q/k/v -> qkv, gate/up -> gate_up, MLA q_down/kv_down -> fused_qkv_a_proj) so they quantize
 with one per-tensor scale. :func:`find_shared_input_groups` discovers these groups by regex over
-module FQNs; ``SHARED_PATTERNS`` covers the standard q/k/v, gate/up, per-expert w1/w3 and MCore
-MLA down-projection names.
+module FQNs; ``SHARED_PATTERNS`` covers the standard q/k/v, gate/up, per-expert w1/w3 and MLA
+down-projection names.
 
 Discovery is name/pattern-based (not input-hook-based) on purpose: "shares an input
 tensor" is broader than "gets fused" — e.g. a ``shared_expert_gate`` reads the same
@@ -53,15 +53,20 @@ __all__ = [
     "iter_shared_quant_states",
 ]
 
-# Megatron-Core MLA's q_down / kv_down projections, which deployment fuses into fused_qkv_a_proj.
-MLA_DOWN_PROJ_PATTERN = r"(?:(.*)\.)?(?:linear_q_down_proj|linear_kv_down_proj)"
+# Megatron-Core MLA's q_down / kv_down projections, which deployment fuses into fused_qkv_a_proj,
+# and DeepSeek-V4's q_down / kv projections (fused_wqa_wkv).
+MLA_DOWN_PROJ_PATTERN = r"(?:(.*)\.)?(?:linear_q_down_proj|linear_kv_down_proj|linear_kv_proj)"
+# The same MLA projections under their HF names.
+HF_MLA_DOWN_PROJ_PATTERN = r"(?:(.*)\.)?(?:q_a_proj|kv_a_proj_with_mqa)"
+# Down-projection patterns checkpoints saved before the patterns were recorded did not group.
+DOWN_PROJ_PATTERNS = (MLA_DOWN_PROJ_PATTERN, HF_MLA_DOWN_PROJ_PATTERN)
 
 # Groups export fuses: q/k/v -> qkv, MLA q_down/kv_down, gate/up (incl. Mixtral w1/w3) -> gate_up.
 # Regexes are ``re.fullmatch``-ed against module FQNs; ``(?:(.*)\.)?`` captures the
 # immediate parent so MoE ``w1``/``w3`` groups are per-expert.
 SHARED_PATTERNS = (
     r"(?:(.*)\.)?(?:q_proj|k_proj|v_proj)",
-    MLA_DOWN_PROJ_PATTERN,
+    *DOWN_PROJ_PATTERNS,
     r"(?:(.*)\.)?(?:gate_proj|up_proj)",
     r"(?:(.*)\.)?(?:w1|w3)",
 )
@@ -70,7 +75,7 @@ SHARED_PATTERNS = (
 # same ``experts``/``local_experts`` container. Kept unused until a state opts into it.
 SHARED_PATTERNS_ACROSS_EXPERTS = (
     r"(?:(.*)\.)?(?:q_proj|k_proj|v_proj)",
-    MLA_DOWN_PROJ_PATTERN,
+    *DOWN_PROJ_PATTERNS,
     r"(?:(.*)\.)?(?:gate_proj|up_proj)",
     r"(?:(.*)\.)?(?:experts|local_experts)\.\d+\.(?:w1|w3)",
 )

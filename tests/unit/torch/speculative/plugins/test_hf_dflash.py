@@ -22,10 +22,11 @@ import json
 import logging
 import os
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+import torch.nn.functional as F
 from _test_utils.torch.speculative.dflash import get_dflash_config
 from _test_utils.torch.transformers_models import (
     get_tiny_llama,
@@ -39,14 +40,25 @@ import modelopt.torch.opt as mto
 import modelopt.torch.speculative as mtsp
 import modelopt.torch.speculative.plugins.dflash_flex_attention as dflash_flex_attention
 import modelopt.torch.speculative.plugins.hf_dflash as hf_dflash
+from modelopt.torch.speculative.plugins.dflash_losses import (
+    DraftLogits,
+    _block_position_weights,
+    _block_targets,
+    _tvd_per_token,
+    objective_term,
+)
 from modelopt.torch.speculative.plugins.hf_dflash import (
     DFlashAttention,
     DFlashBaseModelOutput,
     DFlashModule,
+    DraftBatch,
     HFDFlashModel,
-    _dpace_position_weights,
     build_target_layer_ids,
 )
+from modelopt.torch.speculative.plugins.hf_dflash2 import HFDFlash2Model
+from modelopt.torch.speculative.plugins.hf_domino import HFDominoModel
+from modelopt.torch.speculative.plugins.hf_dspark import HFDSparkModel
+from modelopt.torch.speculative.plugins.hf_lilicorr import HFLiLiCorrModel
 from modelopt.torch.speculative.plugins.master_weight_adamw import (
     MasterWeightAdamW,
     VerifyMasterWeightsCallback,
@@ -57,6 +69,15 @@ from modelopt.torch.utils.plugins.transformers_dataset import LanguageDataCollat
 BLOCK_SIZE = 4
 NUM_DRAFT_LAYERS = 2
 SEQ_LEN = 16  # must be multiple of BLOCK_SIZE
+
+
+def _compute_loss(model, logits, input_ids, anchors, keep, loss_mask, base_outputs=None):
+    """``model._compute_loss`` on given draft logits [B, N * bs, V]: (loss, accuracy)."""
+    batch = DraftBatch(input_ids, loss_mask, anchors, keep, base_outputs, hidden=None)
+    block_logits = logits.view(*anchors.shape, BLOCK_SIZE, -1)
+    with patch.object(model, "_draft_logits", return_value=DraftLogits(block_logits, block_logits)):
+        out = model._compute_loss(model._loss_context(batch))
+    return out.loss, out.accuracy
 
 
 class TestDFlashConvert:
@@ -149,61 +170,8 @@ def test_multimodal_forward_kwargs_exclude_non_model_inputs():
     assert forwarded["mm_token_type_ids"] is mm_token_type_ids
 
 
-class TestDPaceWeights:
-    """Test the D-PACE position-weighting objective (arXiv:2605.18810)."""
-
-    @staticmethod
-    def _reference_weights(conf, alpha):
-        """Paper closed form computed by explicit summation (Eq.7-8).
-
-        q~_i = (1-a)q_i + a; C_m = prod_{i<=m} q~_i; w_j = sum_{m>=j} C_m.
-        Deliberately a plain double loop so it is an independent oracle for the
-        vectorized implementation under test.
-        """
-        smoothed = alpha + (1.0 - alpha) * conf
-        length = smoothed.shape[-1]
-        cum = torch.ones_like(smoothed)
-        running = torch.ones(smoothed.shape[:-1])
-        for m in range(length):
-            running = running * smoothed[..., m]
-            cum[..., m] = running
-        expected = torch.zeros_like(smoothed)
-        for j in range(length):
-            expected[..., j] = cum[..., j:].sum(dim=-1)
-        return expected
-
-    def test_weights_match_paper_formula(self):
-        """Eq.7-8, pinned both to a hand-worked value and an independent loop oracle.
-
-        conf=[0.8, 0.5], alpha=0.5 -> q~=[0.9, 0.75] -> prefix=[0.9, 0.675]
-        -> w=[0.9+0.675, 0.675]=[1.575, 0.675].
-        """
-        hand = _dpace_position_weights(torch.tensor([[0.8, 0.5]]), alpha=0.5)
-        assert torch.allclose(hand, torch.tensor([[1.575, 0.675]]), atol=1e-6)
-        conf = torch.tensor([[0.9, 0.6, 0.3, 0.8]])
-        assert torch.allclose(
-            _dpace_position_weights(conf, 0.5), self._reference_weights(conf, 0.5), atol=1e-6
-        )
-
-    def test_mask_makes_invalid_positions_noops(self):
-        """Invalid positions neither shrink the prefix product nor add to the sum."""
-        alpha = 0.5
-        conf = torch.tensor([[0.9, 0.2, 0.3, 0.8]])
-        mask = torch.tensor([[1.0, 0.0, 1.0, 1.0]])
-        masked = _dpace_position_weights(conf, alpha, valid_mask=mask)
-        # Dropping the invalid slot entirely must give the same weights at the kept slots.
-        kept = _dpace_position_weights(conf[:, [0, 2, 3]], alpha)
-        assert torch.allclose(masked[:, [0, 2, 3]], kept, atol=1e-6)
-
-    def test_weights_are_detached(self):
-        """Weights must carry no gradient (paper Eq.9 detaches them)."""
-        conf = torch.rand(2, 3, 5, requires_grad=True)
-        weights = _dpace_position_weights(conf, 0.5)
-        assert not weights.requires_grad
-
-    def test_invalid_alpha_raises(self):
-        with pytest.raises(ValueError, match="dflash_dpace_alpha"):
-            _dpace_position_weights(torch.rand(1, 4), alpha=1.5)
+class TestDPaceConvert:
+    """D-PACE's config keys, as convert validates and wires them."""
 
     def test_default_objective_is_dpace(self):
         """D-PACE is the default (alpha=0.5); an explicit alpha override is wired through."""
@@ -244,6 +212,22 @@ class TestDPaceWeights:
         assert any("dflash_loss_decay_factor" in r.message for r in caplog.records)
 
 
+def _legacy_term_loss(name, flat_logits, flat_targets, flat_teacher, flat_weights):
+    """Verbatim copy of the divergences' pre-refactor reductions, kept as the semantic reference."""
+    valid_count = flat_weights.sum() + 1e-6
+    if name == "kd":
+        target_soft = torch.softmax(flat_teacher, dim=-1)
+        draft_logsoft = torch.log_softmax(flat_logits, dim=-1)
+        per_token = -(target_soft * draft_logsoft).sum(dim=-1)
+    elif name == "tvd":
+        per_token = _tvd_per_token(flat_logits, flat_teacher)
+    else:
+        per_token = F.cross_entropy(flat_logits, flat_targets, reduction="none")
+        if name == "tv":
+            per_token = 1.0 - torch.exp(-per_token)
+    return (per_token * flat_weights).sum() / valid_count
+
+
 class TestDPaceLossIntegration:
     """Exercise the _compute_loss block-weighting branches on CPU."""
 
@@ -269,7 +253,7 @@ class TestDPaceLossIntegration:
     def test_compute_loss_dpace_branch(self):
         """Default dpace objective produces a finite loss and valid accuracy."""
         model = self._converted_model("dpace", dflash_self_logit_distillation=False)
-        loss, acc = model._compute_loss(*self._make_inputs())
+        loss, acc = _compute_loss(model, *self._make_inputs())
         assert torch.isfinite(loss).item() and loss.item() > 0
         assert 0.0 <= acc <= 1.0
 
@@ -278,7 +262,7 @@ class TestDPaceLossIntegration:
         model = self._converted_model(
             "decay", dflash_loss_decay_factor=4.0, dflash_self_logit_distillation=False
         )
-        loss, acc = model._compute_loss(*self._make_inputs())
+        loss, acc = _compute_loss(model, *self._make_inputs())
         assert torch.isfinite(loss).item() and loss.item() > 0
         assert 0.0 <= acc <= 1.0
 
@@ -288,15 +272,39 @@ class TestDPaceLossIntegration:
         model = self._converted_model("dpace")
         inputs = self._make_inputs(vocab=vocab)
         teacher = DFlashBaseModelOutput(None, logits=torch.randn(1, SEQ_LEN, vocab))
-        loss, acc = model._compute_loss(*inputs, base_outputs=teacher)
+        loss, acc = _compute_loss(model, *inputs, base_outputs=teacher)
         assert torch.isfinite(loss).item()
         assert 0.0 <= acc <= 1.0
 
-    def test_kd_without_base_outputs_raises(self):
+    def test_kd_without_a_teacher_raises(self):
         """KD is decided by the config, so a missing teacher cannot fall back to CE."""
         model = self._converted_model("dpace")
-        with pytest.raises(ValueError, match="base_outputs"):
-            model._compute_loss(*self._make_inputs())
+        with pytest.raises(ValueError, match="base model's distribution"):
+            _compute_loss(model, *self._make_inputs(), base_outputs=DFlashBaseModelOutput(None))
+
+    @pytest.mark.parametrize("name", ["ce", "kd", "tvd", "tv"])
+    def test_each_term_reduces_as_before(self, name):
+        """Under non-uniform position weights, each divergence is bitwise its legacy reduction."""
+        vocab = 32
+        model = self._converted_model("decay", dflash_loss_decay_factor=4.0)
+        model._objective = [objective_term(name, 1.0)]
+        logits, input_ids, anchors, keep, loss_mask = self._make_inputs(vocab=vocab)
+        base_outputs = DFlashBaseModelOutput(None, logits=torch.randn(1, SEQ_LEN, vocab))
+        loss, _ = _compute_loss(model, logits, input_ids, anchors, keep, loss_mask, base_outputs)
+
+        targets = _block_targets(input_ids, anchors, keep, loss_mask, BLOCK_SIZE, 0)
+        weights = _block_position_weights(
+            targets.mask, "decay", 1, decay_factor=4.0, dpace_alpha=model.dflash_dpace_alpha
+        )
+        teacher = model._teacher_logits(base_outputs, label_positions=targets.positions)
+        legacy = _legacy_term_loss(
+            name,
+            logits.view(-1, vocab),
+            targets.token_ids.view(-1),
+            teacher.reshape(-1, vocab),
+            weights.view(-1),
+        )
+        assert torch.equal(loss, legacy)
 
 
 class TestDFlashSaveRestore:
@@ -422,6 +430,29 @@ class TestDFlashLazyRotaryEmb:
         dflash_mod._maybe_init_rotary_emb(device="cpu")
         assert dflash_mod.rotary_emb is first
         assert not any(b.is_meta for b in dflash_mod.rotary_emb.buffers())
+
+    def test_restore_draft_precision_keeps_fp32_rope_after_convert(self):
+        """On a fresh convert the draft is already placed; re-casting would round RoPE to bf16."""
+        model = get_tiny_llama(num_hidden_layers=4)
+        mtsp.convert(model, [("dflash", get_dflash_config())])
+        inv_freq = model.dflash_module.rotary_emb.inv_freq.clone()
+        assert inv_freq.dtype == torch.float32
+
+        model.restore_draft_precision()
+
+        assert model.dflash_module.rotary_emb.inv_freq.dtype == torch.float32
+        assert torch.equal(model.dflash_module.rotary_emb.inv_freq, inv_freq)
+
+    def test_restore_draft_precision_places_draft_converted_on_meta(self):
+        """After a meta-device convert (the from_pretrained path) it still places the draft."""
+        model = get_tiny_llama(num_hidden_layers=4).to("meta")
+        mtsp.convert(model, [("dflash", get_dflash_config())])
+        model.to_empty(device="cpu")  # stands in for from_pretrained loading the weights
+
+        model.restore_draft_precision()
+
+        assert model.dflash_module.rotary_emb.inv_freq.dtype == torch.float32
+        assert all(p.dtype == torch.bfloat16 for p in model.dflash_module.parameters())
 
 
 class TestBuildTargetLayerIds:
@@ -560,6 +591,49 @@ class TestDraftMaskRule:
         kv = torch.arange(self.SEQ_LEN + q_len).view(1, -1)
         visible = mask_mod(torch.tensor(0), None, padded_q, kv)
         assert visible.shape == (padded_q.numel(), kv.numel())
+
+
+def _legacy_generate_swa_mask(model, ctx_len, bsz, dtype, device):
+    """Verbatim copy of the hand-written generation mask, kept as the semantic reference."""
+    window = model.dflash_swa_window_size
+    causal = model.dflash_draft_attention == "causal"
+    if window is None and not causal:
+        return None
+    block_size = model.dflash_block_size
+    kv_len = ctx_len + block_size
+    kv_idx = torch.arange(kv_len, device=device).view(1, 1, 1, -1)
+    q_pos_in_block = torch.arange(block_size, device=device).view(1, 1, -1, 1)
+    q_real_pos = ctx_len + q_pos_in_block
+    is_ctx = kv_idx < ctx_len
+    keep_ctx = is_ctx if window is None else (is_ctx & (kv_idx > q_real_pos - window))
+    keep_block = ~is_ctx
+    if causal:
+        keep_block = keep_block & ((kv_idx - ctx_len) <= q_pos_in_block)
+    keep = keep_ctx | keep_block
+    attn_mask = torch.zeros(bsz, 1, block_size, kv_len, device=device, dtype=dtype)
+    attn_mask.masked_fill_(~keep, torch.finfo(dtype).min)
+    return attn_mask
+
+
+class TestGenerateMaskRule:
+    """Generation evaluates the training rule for its one block, anchored at ``ctx_len``."""
+
+    @pytest.mark.parametrize("window", [None, BLOCK_SIZE, 2 * BLOCK_SIZE])
+    @pytest.mark.parametrize("attention", ["bidirectional", "causal"])
+    def test_matches_the_hand_written_mask(self, window, attention):
+        model = get_tiny_llama(num_hidden_layers=4)
+        config = get_dflash_config(block_size=BLOCK_SIZE)
+        config["dflash_swa_window_size"] = window
+        config["dflash_draft_attention"] = attention
+        mtsp.convert(model, [("dflash", config)])
+        for ctx_len in (1, 5, 16):
+            args = (ctx_len, 2, torch.float32, torch.device("cpu"))
+            got = model._build_generate_swa_mask(*args)
+            want = _legacy_generate_swa_mask(model, *args)
+            if want is None:
+                assert got is None, f"ctx_len={ctx_len}"
+            else:
+                assert torch.equal(got, want), f"ctx_len={ctx_len}"
 
 
 class TestDFlashSwaMask:
@@ -1433,8 +1507,9 @@ class TestAnchorSamplingStaticShape:
         anchors = torch.tensor([[0, BLOCK_SIZE]])[:, :n_blocks]
         keep = torch.ones(bsz, n_blocks)
 
-        base_loss, base_acc = model._compute_loss(logits, input_ids, anchors, keep, loss_mask)
-        padded_loss, padded_acc = model._compute_loss(
+        base_loss, base_acc = _compute_loss(model, logits, input_ids, anchors, keep, loss_mask)
+        padded_loss, padded_acc = _compute_loss(
+            model,
             torch.cat([logits, torch.randn(bsz, pad * BLOCK_SIZE, vocab)], dim=1),
             input_ids,
             torch.cat([anchors, torch.zeros(bsz, pad, dtype=anchors.dtype)], dim=1),
@@ -1445,8 +1520,135 @@ class TestAnchorSamplingStaticShape:
         assert padded_acc == pytest.approx(base_acc)
 
 
+# Anchors 1 and 4 of an 8-token sequence whose loss_mask is 0 only at position 3:
+# (label positions, supervision mask) per block position.
+_LABELS_AT_ANCHOR = ([[1, 2, 3, 4], [4, 5, 6, 7]], [[0, 1, 0, 1], [0, 1, 1, 1]])
+_LABELS_AFTER_ANCHOR = ([[2, 3, 4, 5], [5, 6, 7, 7]], [[1, 0, 1, 1], [1, 1, 1, 0]])
+
+
+@pytest.mark.parametrize(
+    ("model_cls", "expected"),
+    [
+        (HFDFlashModel, _LABELS_AT_ANCHOR),
+        (HFDFlash2Model, _LABELS_AT_ANCHOR),
+        (HFLiLiCorrModel, _LABELS_AT_ANCHOR),
+        (HFDSparkModel, _LABELS_AFTER_ANCHOR),
+        (HFDominoModel, _LABELS_AFTER_ANCHOR),
+    ],
+    ids=["dflash", "dflash2", "lilicorr", "dspark", "domino"],
+)
+def test_block_targets_follow_the_label_shift(model_cls, expected):
+    """Each block position's label and supervision; a wrong shift trains silently worse."""
+    positions, mask = expected
+    input_ids = 100 + torch.arange(8).unsqueeze(0)  # token id = 100 + its position
+    loss_mask = torch.ones(1, 8)
+    loss_mask[0, 3] = 0.0
+    targets = _block_targets(
+        input_ids,
+        torch.tensor([[1, 4]]),
+        torch.tensor([[True, True]]),
+        loss_mask,
+        4,
+        model_cls._label_shift,
+    )
+    assert torch.equal(targets.positions, torch.tensor([positions]))
+    assert torch.equal(targets.token_ids, 100 + torch.tensor([positions]))
+    assert torch.equal(targets.mask, torch.tensor([mask], dtype=torch.float32))
+
+
+# DSpark's zero losses, whose confidence head adds a second output, are tested in
+# test_hf_dspark.py::TestDdpGradientCoverage.
+_ZERO_LOSS_HEADS = {
+    "dflash": {},
+    "domino": {"projector_type": "domino", "gru_hidden_dim": 32, "emb_dim": 16},
+}
+
+
+@pytest.mark.parametrize("draft_runs", [False, True], ids=["no_block", "zero_weight"])
+@pytest.mark.parametrize("head", list(_ZERO_LOSS_HEADS))
+def test_a_step_with_nothing_to_train_reaches_every_draft_parameter(head, draft_runs):
+    """DDP needs each trainable draft parameter's gradient on every rank, even at zero loss.
+
+    Once the draft has run, the loss must reach it through its output, which an FSDP2 unit
+    around the draft needs.
+    """
+    model = get_tiny_llama(num_hidden_layers=4)
+    config = get_dflash_config()
+    config["dflash_architecture_config"].update(_ZERO_LOSS_HEADS[head])
+    mtsp.convert(model, [("dflash", config)])
+    model.train()
+    outputs = []
+
+    def keep_output(module, args, output):
+        output.retain_grad()
+        outputs.append(output)
+
+    model.dflash_module.register_forward_hook(keep_output)
+    input_ids = torch.randint(1, model.config.vocab_size, (2, SEQ_LEN))
+    loss_mask = torch.zeros(2, SEQ_LEN)
+    if draft_runs:
+        # Anchors are drawn from the loss mask, so each row keeps one block, anchored at 2
+        # or 9, and none of its labels is in the mask.
+        loss_mask[:, [2, 9]] = 1.0
+    out = model(input_ids=input_ids, attention_mask=torch.ones_like(input_ids), loss_mask=loss_mask)
+    assert out.loss.item() == 0.0
+    out.loss.backward()
+    ungraded = [
+        n for n, p in model.dflash_module.named_parameters() if p.requires_grad and p.grad is None
+    ]
+    assert not ungraded, f"no gradient for {ungraded}"
+    assert len(outputs) == int(draft_runs)
+    assert all(output.grad is not None for output in outputs)
+
+
+@pytest.mark.parametrize("shift_label", [True, False])
+@pytest.mark.parametrize(
+    "head_fields",
+    [
+        {},
+        {"projector_type": "dspark", "markov_rank": 4},
+        {"projector_type": "domino", "emb_dim": 8, "gru_hidden_dim": 8},
+    ],
+    ids=["dflash", "dspark", "domino"],
+)
+def test_deprecated_shift_label(head_fields, shift_label):
+    """projector_type fixes the label alignment, so convert drops a shift_label matching it with
+    a warning and refuses any other, which never took effect.
+
+    Restore drops either unchecked: DSpark used to accept the field and ignore it in training,
+    and the Domino recipe set it, so checkpoints carry it in their modelopt_state.
+    """
+    config = get_dflash_config()
+    config["dflash_architecture_config"].update(head_fields)
+    model = get_tiny_llama(num_hidden_layers=4)
+    mtsp.convert(model, [("dflash", config)])
+
+    state = mto.modelopt_state(model)
+    saved_config = state["modelopt_state_dict"][0][1]["config"]
+    saved_config["dflash_architecture_config"]["shift_label"] = shift_label
+    restored = mto.restore_from_modelopt_state(get_tiny_llama(num_hidden_layers=4), state)
+    assert restored._label_shift == model._label_shift
+
+    config["dflash_architecture_config"]["shift_label"] = shift_label
+    legacy = get_tiny_llama(num_hidden_layers=4)
+    if shift_label != bool(model._label_shift):
+        base_cls = type(legacy)
+        with pytest.raises(ValueError, match="shift_label"):
+            mtsp.convert(legacy, [("dflash", config)])
+        assert type(legacy) is base_cls  # refused before converting
+        return
+    with pytest.warns(FutureWarning, match="shift_label"):
+        mtsp.convert(legacy, [("dflash", config)])
+    assert legacy._label_shift == model._label_shift
+    legacy_config = mto.modelopt_state(legacy)["modelopt_state_dict"][0][1]["config"]
+    assert "shift_label" not in legacy_config["dflash_architecture_config"]
+
+
 class TestTeacherLogits:
-    """The base distribution is projected only at the rows, and vocab entries, asked for."""
+    """The base distribution is projected only at the rows, and vocab entries, asked for.
+
+    It is the next-token distribution, so label ``i`` reads row ``i - 1``.
+    """
 
     @staticmethod
     def _model():
@@ -1455,9 +1657,9 @@ class TestTeacherLogits:
         return model
 
     @staticmethod
-    def _positions(bsz=2):
+    def _labels(bsz=2):
         torch.manual_seed(0)
-        return torch.randint(0, SEQ_LEN, (bsz, 3, BLOCK_SIZE))
+        return torch.randint(1, SEQ_LEN, (bsz, 3, BLOCK_SIZE))
 
     @staticmethod
     def _rows(full, positions):
@@ -1471,45 +1673,56 @@ class TestTeacherLogits:
     def test_matches_the_full_sequence_projection(self):
         model = self._model()
         hidden = self._hidden(model)
-        positions = self._positions()
-        got = model._teacher_logits(DFlashBaseModelOutput(None, base_hidden=hidden), positions)
-        want = self._rows(model._base_model_lm_head(hidden), positions)
+        labels = self._labels()
+        got = model._teacher_logits(
+            DFlashBaseModelOutput(None, base_hidden=hidden), label_positions=labels
+        )
+        want = self._rows(model._base_model_lm_head(hidden), labels - 1)
         torch.testing.assert_close(got, want)
 
     def test_prenorm_hidden_gets_the_base_final_norm(self):
         model = self._model()
         hidden = self._hidden(model)
-        positions = self._positions()
+        labels = self._labels()
         outputs = DFlashBaseModelOutput(None, base_hidden=hidden, base_hidden_prenorm=True)
-        want = self._rows(model._base_model_lm_head(model._base_model_norm(hidden)), positions)
-        torch.testing.assert_close(model._teacher_logits(outputs, positions), want)
+        want = self._rows(model._base_model_lm_head(model._base_model_norm(hidden)), labels - 1)
+        torch.testing.assert_close(model._teacher_logits(outputs, label_positions=labels), want)
 
     def test_token_ids_pick_entries_of_the_full_rows(self):
         model = self._model()
         outputs = DFlashBaseModelOutput(None, base_hidden=self._hidden(model))
-        positions = self._positions()
-        token_ids = torch.randint(0, model.config.vocab_size, (*positions.shape, 5))
-        rows = model._teacher_logits(outputs, positions)
+        labels = self._labels()
+        token_ids = torch.randint(0, model.config.vocab_size, (*labels.shape, 5))
+        rows = model._teacher_logits(outputs, label_positions=labels)
         torch.testing.assert_close(
-            model._teacher_logits(outputs, positions, token_ids), rows.gather(-1, token_ids)
+            model._teacher_logits(outputs, label_positions=labels, token_ids=token_ids),
+            rows.gather(-1, token_ids),
         )
 
     def test_handed_over_logits_are_gathered_not_recomputed(self):
         model = self._model()
         logits = torch.randn(2, SEQ_LEN, model.config.vocab_size)
         outputs = DFlashBaseModelOutput(None, logits=logits)
-        positions = self._positions()
-        token_ids = torch.randint(0, model.config.vocab_size, (*positions.shape, 5))
-        want = self._rows(logits, positions)
-        assert torch.equal(model._teacher_logits(outputs, positions), want)
+        labels = self._labels()
+        token_ids = torch.randint(0, model.config.vocab_size, (*labels.shape, 5))
+        want = self._rows(logits, labels - 1)
+        assert torch.equal(model._teacher_logits(outputs, label_positions=labels), want)
         assert torch.equal(
-            model._teacher_logits(outputs, positions, token_ids), want.gather(-1, token_ids)
+            model._teacher_logits(outputs, label_positions=labels, token_ids=token_ids),
+            want.gather(-1, token_ids),
         )
+
+    def test_label_zero_does_not_wrap_to_the_last_row(self):
+        model = self._model()
+        logits = torch.randn(1, SEQ_LEN, model.config.vocab_size)
+        outputs = DFlashBaseModelOutput(None, logits=logits)
+        got = model._teacher_logits(outputs, label_positions=torch.tensor([[0]]))
+        assert torch.equal(got[0, 0], logits[0, 0])
 
     def test_missing_base_distribution_raises(self):
         model = self._model()
         with pytest.raises(ValueError, match="base_model_hidden_states"):
-            model._teacher_logits(DFlashBaseModelOutput(None), self._positions())
+            model._teacher_logits(DFlashBaseModelOutput(None), label_positions=self._labels())
 
     def test_offline_dict_keeps_the_hidden_unprojected(self):
         d = {
@@ -1528,9 +1741,9 @@ class TestTeacherLogits:
         hidden = self._hidden(model, bsz=1)
         inputs = TestDPaceLossIntegration._make_inputs(vocab=model.config.vocab_size)
         full = DFlashBaseModelOutput(None, logits=model._base_model_lm_head(hidden))
-        loss_full, _ = model._compute_loss(*inputs, base_outputs=full)
-        loss, _ = model._compute_loss(
-            *inputs, base_outputs=DFlashBaseModelOutput(None, base_hidden=hidden)
+        loss_full, _ = _compute_loss(model, *inputs, base_outputs=full)
+        loss, _ = _compute_loss(
+            model, *inputs, base_outputs=DFlashBaseModelOutput(None, base_hidden=hidden)
         )
         torch.testing.assert_close(loss, loss_full)
 

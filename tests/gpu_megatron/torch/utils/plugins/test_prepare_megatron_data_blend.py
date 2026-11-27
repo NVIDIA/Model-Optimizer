@@ -24,11 +24,13 @@ from unittest.mock import Mock
 import huggingface_hub
 import pytest
 import yaml
+from datasets import Dataset, load_dataset
 
 from modelopt.torch.utils.plugins.prepare_megatron_data_blend import main
 
 # The plugins package re-exports the function under the module's name, so import the module itself.
 blend_module = importlib.import_module("modelopt.torch.utils.plugins.prepare_megatron_data_blend")
+chat_blend_module = importlib.import_module("modelopt.torch.utils.plugins._chat_blend")
 
 
 def _setup_test(
@@ -293,6 +295,19 @@ def test_chat_blend_reuses_and_rebuilds_cached_parts(tmp_path: Path, chat_blend)
     assert (tmp_path / "blend" / "train.jsonl").read_text(encoding="utf-8") == first
 
 
+def test_chat_blend_reuses_legacy_part_cache(tmp_path: Path, chat_blend):
+    write_config, calls = chat_blend
+    config_path = write_config(sources=[_source("a")])
+    parts = tmp_path / "blend" / "parts"
+    parts.mkdir(parents=True)
+    # Filename produced before revision and shuffle_buffer_size became optional cache inputs.
+    part = parts / "org--a_train_9b3cb5db67345cd3.jsonl"
+    blend_module._write_jsonl(part, [_chat(i) for i in range(100)])
+    assert blend_module.prepare_chat_data_blend(config_path) == {"train": 95, "validation": 5}
+    assert not calls
+    assert len(list(parts.glob("*.jsonl"))) == 1
+
+
 @pytest.mark.parametrize(
     ("first", "second"),
     [
@@ -305,8 +320,25 @@ def test_chat_blend_reuses_and_rebuilds_cached_parts(tmp_path: Path, chat_blend)
         ({"shuffle": True, "seed": 0}, {"shuffle": True, "seed": 1}),
         ({}, {"reasoning_content": "inline"}),
         ({}, {"loss_mode": "full"}),
+        (
+            {"sources": [_source("a", revision="a" * 40)]},
+            {"sources": [_source("a", revision="b" * 40)]},
+        ),
+        (
+            {"sources": [_source("a", shuffle_buffer_size=64)]},
+            {"sources": [_source("a", shuffle_buffer_size=128)]},
+        ),
     ],
-    ids=["split", "files", "shuffle", "seed", "reasoning_content", "loss_mode"],
+    ids=[
+        "split",
+        "files",
+        "shuffle",
+        "seed",
+        "reasoning_content",
+        "loss_mode",
+        "revision",
+        "buffer",
+    ],
 )
 def test_chat_blend_reselects_after_a_selection_change(chat_blend, first, second):
     write_config, calls = chat_blend
@@ -335,13 +367,20 @@ def test_chat_blend_reselects_after_a_selection_change(chat_blend, first, second
         ({"reasoning_content": "drop"}, "reasoning_content must be one of"),
         # A row with both columns must not silently be read from ``text``.
         ({"sources": [_source("a", content_field="conversations")]}, "messages or text"),
+        ({"group_split": True}, "full dataset revision"),
+        ({"group_split": True, "shuffle": "yes"}, "must be a boolean"),
+        (
+            {"group_split": True, "sources": [_source("a", revision="a" * 40)] * 2},
+            "Duplicate source",
+        ),
     ],
 )
-def test_chat_blend_rejects_invalid_configs(chat_blend, overrides, match):
+def test_chat_blend_rejects_invalid_configs(tmp_path: Path, chat_blend, overrides, match):
     write_config, calls = chat_blend
     with pytest.raises(ValueError, match=match):
         blend_module.prepare_chat_data_blend(write_config(**overrides))
     assert not calls
+    assert not (tmp_path / "blend").exists()
 
 
 @pytest.mark.parametrize(
@@ -382,15 +421,19 @@ def test_write_jsonl_is_atomic(tmp_path: Path):
     assert not path.exists()
 
 
-def test_chat_blend_reads_files_sources(tmp_path: Path, monkeypatch):
+@pytest.mark.parametrize("grouped", [False, True])
+def test_chat_blend_reads_files_sources(tmp_path: Path, monkeypatch, grouped):
     plain, packed = tmp_path / "a.jsonl", tmp_path / "b.jsonl.gz"
-    lines = [json.dumps(_chat(i)) for i in range(20)]
+    lines = [
+        json.dumps({**_chat(i), "chat_template_kwargs": {"enable_thinking": i % 2 == 0}})
+        for i in range(40)
+    ]
     # Malformed records, unparseable or unconvertible, are skipped with a warning as in the
     # tokenizing reader.
     bad = ['{"messages": [', '{"messages": ["hello"]}']
-    plain.write_text("\n".join([*lines[:10], *bad, *lines[10:]]) + "\n", "utf-8")
+    plain.write_text("\n".join([*lines[:10], *bad, *lines[10:20]]) + "\n", "utf-8")
     with gzip.open(packed, "wt", encoding="utf-8") as f:
-        f.writelines(json.dumps(_chat(i)) + "\n" for i in range(20, 40))
+        f.writelines(line + "\n" for line in lines[20:])
     paths = {"data/a.jsonl": str(plain), "data/b.jsonl.gz": str(packed)}
     monkeypatch.setattr(
         huggingface_hub, "hf_hub_download", lambda repo_id, filename, **kwargs: paths[filename]
@@ -400,15 +443,37 @@ def test_chat_blend_reads_files_sources(tmp_path: Path, monkeypatch):
         "output_dir": str(tmp_path / "blend"),
         "output_format": "chat_jsonl",
         "target_samples": 40,
-        "sources": [_source("a", split=None, files=list(paths))],
+        "sources": [
+            _source("a", split=None, files=list(paths), revision="a" * 40 if grouped else None)
+        ],
     }
+    if grouped:
+        config.update(
+            group_split=True, shuffle_buffer_size=8, validation_samples=2, target_samples=20
+        )
     config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
-    assert blend_module.prepare_chat_data_blend(config_path) == {"validation": 2, "train": 38}
+    assert blend_module.prepare_chat_data_blend(config_path) == {
+        "validation": 2,
+        "train": 18 if grouped else 38,
+    }
     out = tmp_path / "blend"
     rows = _read_jsonl(out / "train.jsonl") + _read_jsonl(out / "validation.jsonl")
-    assert sorted(r["messages"][0]["content"] for r in rows) == sorted(f"q{i}" for i in range(40))
-    # The part is named after its first file.
-    assert len(list((out / "parts").glob("org--a_a_*.jsonl"))) == 1
+    if grouped:
+        assert not (out / "parts").exists()
+        assert all(
+            r["chat_template_kwargs"]
+            == {"enable_thinking": int(r["messages"][0]["content"][1:]) % 2 == 0}
+            for r in rows
+        )
+        assert len({r["messages"][0]["content"] for r in rows}) == 20
+        assert max(int(r["messages"][0]["content"][1:]) for r in rows) >= 20
+    else:
+        assert all("chat_template_kwargs" not in r for r in rows)
+        assert sorted(r["messages"][0]["content"] for r in rows) == sorted(
+            f"q{i}" for i in range(40)
+        )
+        # The part is named after its first file.
+        assert len(list((out / "parts").glob("org--a_a_*.jsonl"))) == 1
 
 
 def test_chat_blend_drops_untrainable_rows_and_pairs_the_rest(
@@ -453,3 +518,248 @@ def test_pair_rows_pairs_long_with_short_under_the_cap():
         frozenset("ab"),
         frozenset("df"),
     }
+
+
+def test_grouped_blend_refills_filters_and_isolates_questions(tmp_path: Path, monkeypatch):
+    """Different answers survive, exact duplicates refill, and whole questions stay held out."""
+    # Interrupted package installs can leave dist-info directories without Name metadata.
+    (tmp_path / "unnamed.dist-info").mkdir()
+    monkeypatch.syspath_prepend(str(tmp_path))
+    a = [_chat(i) for i in range(70)]
+    a[1]["messages"][-1]["reasoning_content"] = "Different reasoning"
+    a[2]["messages"][-1]["content"] = "<think>reason</think>answer"
+    a.insert(
+        2, {"messages": [a[1]["messages"][0], {"role": "assistant", "content": "another answer"}]}
+    )
+    a[:0] = [
+        a[0],
+        _image_chat(99),
+        {"messages": [{"role": "assistant", "content": '<img src="a.png">'}]},
+    ]
+    a[:0] = [
+        42,
+        {"messages": 1},
+        {**_chat(98), "images": b"image bytes"},
+        {"messages": [{"role": "assistant", "content": "<think>unfinished"}]},
+        {"messages": [{"role": "assistant", "content": "</think>answer<think>"}]},
+    ]
+    sources = [_source("a", revision="a" * 40), _source("b", revision="b" * 40)]
+    b = [_chat(0)] + [_chat(i) for i in range(200, 270)]
+    monkeypatch.setattr(
+        blend_module,
+        "_iter_rows",
+        lambda source, *args: iter(a if source["hf_dataset"] == "org/a" else b),
+    )
+    config = {
+        "output_dir": str(tmp_path / "out"),
+        "output_format": "chat_jsonl",
+        "target_samples": 80,
+        "validation_samples": 8,
+        "group_split": True,
+        "shuffle": True,
+        "seed": 4,
+        "filter_image_references": True,
+        "filter_invalid_reasoning": True,
+        "sources": sources,
+    }
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump(config))
+    assert blend_module.prepare_chat_data_blend(path) == {"train": 72, "validation": 8}
+    out = tmp_path / "out"
+    first = {
+        name: (out / name).read_bytes()
+        for name in ["train.jsonl", "validation.jsonl", "manifest.jsonl"]
+    }
+    manifest = _read_jsonl(out / "manifest.jsonl")
+    groups = {
+        name: {m["group_id"] for m in manifest if m["split"] == name}
+        for name in ["train", "validation"]
+    }
+    assert groups["train"].isdisjoint(groups["validation"])
+    all_rows = _read_jsonl(out / "train.jsonl") + _read_jsonl(out / "validation.jsonl")
+    assert len({json.dumps(r, sort_keys=True) for r in all_rows}) == 80
+    assert any(r["messages"][-1]["content"] == "<think>reason</think>answer" for r in all_rows)
+    assert (
+        sum(r["messages"][-1].get("reasoning_content") == "Different reasoning" for r in all_rows)
+        == 1
+    )
+    report = json.loads((out / "report.json").read_text())
+    assert all(s["train"] + s["validation"] == s["target"] for s in report["sources"])
+    assert sum(s["counts"].get("exact_duplicate", 0) for s in report["sources"]) >= 1
+    assert sum(s["counts"].get("invalid_chat", 0) for s in report["sources"]) == 2
+    assert sum(s["counts"].get("unbalanced_reasoning", 0) for s in report["sources"]) == 2
+    # A fresh output and a warm cache must produce the same record order and provenance.
+    blend_module.prepare_chat_data_blend(path)
+    (out / "train.jsonl").write_text("corrupt\n")
+    blend_module.prepare_chat_data_blend(path)
+    assert (out / "train.jsonl").read_bytes() == first["train.jsonl"]
+    config["output_dir"] = str(tmp_path / "again")
+    config["sources"].reverse()
+    path.write_text(yaml.safe_dump(config))
+    blend_module.prepare_chat_data_blend(path)
+    assert first == {name: (tmp_path / "again" / name).read_bytes() for name in first}
+
+
+def test_grouped_blend_reports_exhaustion_but_does_not_swallow_reader_failure(
+    tmp_path: Path, monkeypatch
+):
+    sources = [_source("a", revision="a" * 40)]
+    monkeypatch.setattr(
+        blend_module, "_iter_rows", lambda *args: iter([_chat(i) for i in range(6)])
+    )
+    config = {
+        "output_dir": str(tmp_path / "out"),
+        "output_format": "chat_jsonl",
+        "target_samples": 20,
+        "validation_samples": 2,
+        "group_split": True,
+        "sources": sources,
+    }
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump(config))
+    assert blend_module.prepare_chat_data_blend(path) == {"train": 4, "validation": 2}
+    report = json.loads((tmp_path / "out/report.json").read_text())
+    assert report["sources"][0]["shortfall"] == 14
+
+    def broken(*args):
+        yield _chat(0)
+        raise OSError("network interrupted")
+
+    monkeypatch.setattr(blend_module, "_iter_rows", broken)
+    config["seed"] = 91
+    path.write_text(yaml.safe_dump(config))
+    with pytest.raises(OSError, match="network interrupted"):
+        blend_module.prepare_chat_data_blend(path)
+
+
+@pytest.mark.parametrize("prompt_mode", ["populated", "mixed", "unconfigured"])
+def test_grouped_blend_isolates_populated_problem_identities(
+    tmp_path: Path, monkeypatch, prompt_mode
+):
+    chat_blend_module._questions.cache_clear()
+    question_path = tmp_path / "questions.jsonl"
+    blend_module._write_jsonl(question_path, [{"question": "Add two integers."}])
+
+    def load_questions(*args, **kwargs):
+        return load_dataset("json", data_files=str(question_path), split="train", streaming=True)
+
+    monkeypatch.setattr(chat_blend_module, "load_dataset", load_questions)
+    rows = {
+        language: {
+            "dataset": "apps",
+            "split": "train",
+            "index": "0" if language == "python" else 0,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "-"
+                    if language == "python" and prompt_mode == "mixed"
+                    else f"Add two integers in {language}.",
+                },
+                {"role": "assistant", "content": f"{language} solution"},
+            ],
+        }
+        for language in ("python", "cpp")
+    }
+    monkeypatch.setattr(
+        blend_module,
+        "_iter_rows",
+        lambda source, *args: iter([rows[source["split"]]]),
+    )
+    config = {
+        "output_dir": str(tmp_path / "out"),
+        "output_format": "chat_jsonl",
+        "target_samples": 2,
+        "validation_samples": 1,
+        "group_split": True,
+        "sources": [
+            _source("cp", split=language, revision="a" * 40) for language in ("python", "cpp")
+        ],
+    }
+    if prompt_mode != "unconfigured":
+        config["question_sources"] = {"apps": {"hf_dataset": "org/questions", "revision": "c" * 40}}
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump(config))
+    # Holding out either language also holds out the other representation of the same problem.
+    assert blend_module.prepare_chat_data_blend(path) == {"train": 0, "validation": 1}
+    assert not _read_jsonl(tmp_path / "out/train.jsonl")
+    assert len(_read_jsonl(tmp_path / "out/validation.jsonl")) == 1
+    chat_blend_module._questions.cache_clear()
+
+
+@pytest.mark.parametrize("kind", ["apps", "taco", "code_contests", "open-r1/codeforces"])
+def test_grouped_blend_restores_pinned_questions(tmp_path: Path, monkeypatch, kind):
+    # Only the remote reader is replaced; exercise restoration, alias grouping and selection.
+    chat_blend_module._questions.cache_clear()
+    questions = [
+        {
+            "question": f"Solve problem {i}.",
+            "description": f"Solve problem {i}.",
+            "input_format": "Read an integer.",
+            "output_format": "Print the result.",
+            "note": "Example explanation.",
+            "examples": [{"input": str(i), "output": str(i + 1)}],
+            "unused_solutions": ["large unused solution"],
+        }
+        for i in range(30)
+    ]
+    question_path = tmp_path / ("questions.jsonl" if kind == "apps" else "questions.parquet")
+    if kind == "apps":
+        blend_module._write_jsonl(question_path, questions)
+    else:
+        Dataset.from_list(questions).to_parquet(question_path)
+    loaded_columns = []
+
+    def load_questions(*args, **kwargs):
+        kwargs.pop("revision", None)
+        kwargs.update(data_files=str(question_path), split="train")
+        dataset = load_dataset("json" if kind == "apps" else "parquet", **kwargs)
+        loaded_columns.append(set(dataset.column_names))
+        return dataset
+
+    monkeypatch.setattr(chat_blend_module, "load_dataset", load_questions)
+    raw = [
+        {
+            "dataset": kind,
+            "split": "train",
+            "index": i,
+            "messages": [
+                {"role": "user", "content": "-"},
+                {"role": "assistant", "content": str(i), "reasoning_content": "reason"},
+            ],
+        }
+        for i in range(30)
+    ]
+    monkeypatch.setattr(blend_module, "_iter_rows", lambda *args: iter(raw))
+    config = {
+        "output_dir": str(tmp_path / "out"),
+        "output_format": "chat_jsonl",
+        "target_samples": 20,
+        "validation_samples": 2,
+        "group_split": True,
+        "question_sources": {kind: {"hf_dataset": "org/questions", "revision": "c" * 40}},
+        "sources": [_source("cp", split="competitive_coding_python_part00", revision="a" * 40)],
+    }
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump(config))
+    blend_module.prepare_chat_data_blend(path)
+    records = _read_jsonl(tmp_path / "out/train.jsonl") + _read_jsonl(
+        tmp_path / "out/validation.jsonl"
+    )
+    if kind in ("code_contests", "open-r1/codeforces"):
+        expected_columns = {"description"}
+        if kind == "open-r1/codeforces":
+            expected_columns.update(("input_format", "output_format", "note", "examples"))
+        assert loaded_columns == [expected_columns]
+    for row in records:
+        a = row["messages"][-1]
+        expected = f"Solve problem {a['content']}."
+        if kind == "open-r1/codeforces":
+            expected += (
+                "\n\ninput_format\n\nRead an integer.\n\noutput_format\n\nPrint the result."
+                "\n\nnote\n\nExample explanation."
+                f"\n\nInput\n\n{a['content']}\n\nOutput\n\n{int(a['content']) + 1}"
+            )
+        assert row["messages"][0]["content"].endswith(expected)
+        assert a["reasoning_content"] == "reason"
+    chat_blend_module._questions.cache_clear()

@@ -18,10 +18,9 @@ import tempfile
 from collections import OrderedDict
 
 import numpy as np
+import onnx
 import pytest
 from onnx import TensorProto, helper, numpy_helper
-from onnxruntime import __version__ as ort_version
-from packaging.version import Version
 
 from modelopt.onnx.autocast.logging_config import configure_logging
 from modelopt.onnx.autocast.nodeclassifier import (
@@ -33,6 +32,7 @@ from modelopt.onnx.autocast.nodeclassifier import (
     NodeRuleBase,
 )
 from modelopt.onnx.autocast.referencerunner import ReferenceRunner, TensorStats
+from modelopt.onnx.autocast.utils import setup_mappings
 
 configure_logging("DEBUG")
 
@@ -233,9 +233,6 @@ def test_depth_of_reduction_rule():
     assert rule.check(reduce_init_node) is True
 
 
-@pytest.mark.skipif(
-    Version(ort_version) < Version("1.21.0"), reason="WAR: Requires onnxruntime>=1.21.0"
-)
 def test_node_classifier(test_model):
     node_to_init_map = {key: [] for key in ["add_node", "mul_node"]}
 
@@ -273,9 +270,6 @@ def test_node_classifier(test_model):
     assert not set(fp16_nodes).intersection(set(fp32_nodes))
 
 
-@pytest.mark.skipif(
-    Version(ort_version) < Version("1.21.0"), reason="WAR: Requires onnxruntime>=1.21.0"
-)
 def test_node_classifier_custom_rule(test_model):
     node_to_init_map = {
         "add_node": [numpy_helper.from_array(np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32))],
@@ -302,9 +296,6 @@ def test_node_classifier_custom_rule(test_model):
     assert not set(fp16_nodes).intersection(set(fp32_nodes))
 
 
-@pytest.mark.skipif(
-    Version(ort_version) < Version("1.21.0"), reason="WAR: Requires onnxruntime>=1.21.0"
-)
 def test_node_classifier_op_types_to_exclude(test_model):
     node_to_init_map = {
         "add_node": [numpy_helper.from_array(np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32))],
@@ -515,9 +506,6 @@ def test_depth_of_reduction_rule_with_tensor_stats():
     assert rule.check(small_conv_node) is False
 
 
-@pytest.mark.skipif(
-    Version(ort_version) < Version("1.21.0"), reason="WAR: Requires onnxruntime>=1.21.0"
-)
 def test_node_classifier_with_multi_batch_calibration(test_model):
     """Test NodeClassifier with multi-batch calibration data."""
     node_to_init_map = {key: [] for key in ["add_node", "mul_node"]}
@@ -558,3 +546,91 @@ def test_node_classifier_with_multi_batch_calibration(test_model):
         # Verify classification works correctly
         assert len(fp16_nodes) + len(fp32_nodes) == 2
         assert not set(fp16_nodes).intersection(set(fp32_nodes))
+
+
+@pytest.mark.parametrize(
+    "square", ["pow_initializer", "pow_constant", "pow_constant_float", "pow_constant_int", "mul"]
+)
+def test_norm_variance_stays_high_precision_without_reference_data(square):
+    """An RMSNorm variance overflows fp16 for |x| > 256, which random reference data misses."""
+    two = numpy_helper.from_array(np.array(2.0, dtype=np.float32), "two")
+    square_op = "Mul" if square == "mul" else "Pow"
+    square_inputs = ["x", "x"] if square == "mul" else ["x", "two"]
+    constant_value = {
+        "pow_constant": {"value": two},
+        "pow_constant_float": {"value_float": 2.0},
+        "pow_constant_int": {"value_int": 2},
+    }
+    nodes = []
+    if square in constant_value:
+        nodes.append(
+            helper.make_node("Constant", [], ["two"], name="two", **constant_value[square])
+        )
+    nodes += [
+        helper.make_node(square_op, square_inputs, ["sq"], name="square"),
+        helper.make_node("ReduceMean", ["sq", "axes"], ["var"], name="reduce", keepdims=1),
+        helper.make_node("Add", ["var", "eps"], ["var_eps"], name="add_eps"),
+        helper.make_node("Sqrt", ["var_eps"], ["rms"], name="sqrt"),
+        helper.make_node("Div", ["x", "rms"], ["normed"], name="div"),
+        helper.make_node("Mul", ["normed", "weight"], ["y"], name="scale"),
+    ]
+    initializers = [two] if square == "pow_initializer" else []
+    initializers += [
+        numpy_helper.from_array(np.array([-1], dtype=np.int64), "axes"),
+        numpy_helper.from_array(np.array(1e-6, dtype=np.float32), "eps"),
+        numpy_helper.from_array(np.ones(8, dtype=np.float32), "weight"),
+    ]
+    graph = helper.make_graph(
+        nodes,
+        "rmsnorm",
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, [1, 4, 8])],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, [1, 4, 8])],
+        initializers,
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 18)])
+    _, _, node_to_init_map = setup_mappings(model)
+
+    def classify(**kwargs):
+        # initializer_map is optional; the rule must still find initializer exponents without it.
+        return NodeClassifier(model, node_to_init_map, **kwargs).run()
+
+    variance = {"square", "reduce", "add_eps", "sqrt"}
+    fp16_nodes, fp32_nodes = classify()
+    assert set(fp32_nodes) == variance
+    assert set(fp16_nodes) == {node.name for node in nodes} - variance
+
+    fp16_nodes, fp32_nodes = classify(nodes_to_include=["square|reduce|add_eps|sqrt"])
+    assert fp32_nodes == []
+
+
+def test_per_node_classifier_preserves_range_violation_after_nan_batch(test_model):
+    test_model = onnx.shape_inference.infer_shapes(test_model)
+    node_to_init_map = {key: [] for key in ["add_node", "mul_node"]}
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        np.savez(
+            os.path.join(temp_dir, "batch_001.npz"),
+            X=np.full((2, 2), np.nan, dtype=np.float32),
+        )
+        np.savez(
+            os.path.join(temp_dir, "batch_002.npz"),
+            X=np.full((2, 2), 10.0, dtype=np.float32),
+        )
+
+        runner = ReferenceRunner(test_model)
+        default_data = runner.run(temp_dir)
+        per_node_data = runner.run(temp_dir, calibrate_per_node=True)
+
+    default_classification = NodeClassifier(
+        model=test_model,
+        node_to_init_map=node_to_init_map,
+        data_max=4.1,
+    ).run(default_data)
+    per_node_classification = NodeClassifier(
+        model=test_model,
+        node_to_init_map=node_to_init_map,
+        data_max=4.1,
+    ).run(per_node_data)
+
+    assert per_node_classification == default_classification
+    assert "add_node" in per_node_classification[1]

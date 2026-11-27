@@ -19,9 +19,12 @@ from pathlib import Path
 import numpy as np
 import onnx
 import onnx_graphsurgeon as gs
+import onnxruntime as ort
 import pytest
 from _test_utils.onnx.lib_test_models import build_conv_isinf_model, build_conv_resize_model
 
+import modelopt.onnx.autocast.convert as convert
+import modelopt.onnx.autocast.graphsanitizer as graphsanitizer
 import modelopt.onnx.autocast.utils as utils
 import modelopt.onnx.utils as onnx_utils
 from modelopt.onnx.autocast import convert_to_mixed_precision
@@ -91,6 +94,49 @@ def test_invalid_model_path():
         convert_to_mixed_precision(onnx_path="nonexistent.onnx")
 
 
+def test_convert_contrib_op_without_tensorrt(tmp_path, monkeypatch):
+    x = onnx.helper.make_tensor_value_info("X", onnx.TensorProto.FLOAT, [1, 4])
+    y = onnx.helper.make_tensor_value_info("Y", onnx.TensorProto.FLOAT, [1, 4])
+    bias = onnx.numpy_helper.from_array(np.ones(4, dtype=np.float32), name="bias")
+    node = onnx.helper.make_node("BiasGelu", ["X", "bias"], ["Y"], domain="com.microsoft")
+    graph = onnx.helper.make_graph([node], "contrib_graph", [x], [y], [bias])
+    model = onnx.helper.make_model(
+        graph,
+        opset_imports=[
+            onnx.helper.make_opsetid("", 21),
+            onnx.helper.make_opsetid("com.microsoft", 1),
+        ],
+        ir_version=10,
+    )
+    model_path = tmp_path / "contrib.onnx"
+    onnx.save(model, model_path)
+    providers = ["cpu"]
+    monkeypatch.setattr(graphsanitizer, "TRT_PYTHON_AVAILABLE", False)
+
+    converted = convert_to_mixed_precision(str(model_path), providers=providers, keep_io_types=True)
+
+    assert providers == ["cpu"]
+    assert (
+        next(n for n in converted.graph.node if n.op_type == "BiasGelu").domain == "com.microsoft"
+    )
+    assert all(opset.domain != "trt.plugins" for opset in converted.opset_import)
+    onnx.checker.check_model(converted)
+
+    inputs = {"X": np.array([[-2.0, -0.5, 0.5, 2.0]], dtype=np.float32)}
+    original_session = ort.InferenceSession(
+        model.SerializeToString(), providers=["CPUExecutionProvider"]
+    )
+    converted_session = ort.InferenceSession(
+        converted.SerializeToString(), providers=["CPUExecutionProvider"]
+    )
+    np.testing.assert_allclose(
+        converted_session.run(None, inputs)[0],
+        original_session.run(None, inputs)[0],
+        rtol=2e-3,
+        atol=2e-3,
+    )
+
+
 def test_setup_mappings(simple_model):
     simple_model = onnx_utils.infer_shapes(simple_model)
     value_info_map, initializer_map, node_to_init_map = utils.setup_mappings(simple_model)
@@ -154,6 +200,13 @@ def test_convert_simple_model(temp_model_path, temp_output_path, keep_io_types):
     onnx.checker.check_model(loaded_model)
 
 
+def test_convert_with_per_node_calibration(temp_model_path):
+    converted_model = convert_to_mixed_precision(onnx_path=temp_model_path, calibrate_per_node=True)
+
+    assert isinstance(converted_model, onnx.ModelProto)
+    onnx.checker.check_model(converted_model)
+
+
 def test_convert_external_data_sanitizes_once_and_materializes_initializers(
     tmp_path, simple_model, monkeypatch
 ):
@@ -187,6 +240,26 @@ def test_convert_external_data_sanitizes_once_and_materializes_initializers(
         assert not initializer.external_data
         assert initializer.raw_data
         assert initializer.data_type == onnx.TensorProto.FLOAT16
+    onnx.checker.check_model(converted_model)
+
+
+def test_convert_external_data_with_per_node_calibration(tmp_path, simple_model):
+    model_path = tmp_path / "external_model.onnx"
+    onnx.save_model(
+        simple_model,
+        model_path,
+        save_as_external_data=True,
+        all_tensors_to_one_file=True,
+        location="external_model.data",
+        size_threshold=0,
+    )
+
+    converted_model = convert_to_mixed_precision(onnx_path=str(model_path), calibrate_per_node=True)
+
+    assert all(
+        initializer.data_location != onnx.TensorProto.EXTERNAL
+        for initializer in converted_model.graph.initializer
+    )
     onnx.checker.check_model(converted_model)
 
 
@@ -357,6 +430,16 @@ def test_opset_parser_argument():
     assert args.opset is None
 
 
+def test_calibrate_per_node_parser_argument():
+    parser = get_parser()
+
+    args = parser.parse_args(["--onnx_path", "test.onnx", "--calibrate_per_node"])
+    assert args.calibrate_per_node
+
+    args = parser.parse_args(["--onnx_path", "test.onnx"])
+    assert not args.calibrate_per_node
+
+
 @pytest.fixture
 def weakly_typed_topk_model():
     # TopK k (5) exceeds the static axis size (3), so ONNX shape inference cannot resolve it.
@@ -388,3 +471,59 @@ def test_convert_to_f16_falls_back_on_unresolvable_op(weakly_typed_topk_model):
 
     onnx.checker.check_model(converted_model)
     assert any(n.op_type == "TopK" for n in converted_model.graph.node)
+
+
+@pytest.fixture
+def custom_op_model_path(tmp_path):
+    """A model whose second node is in a non-standard domain, so custom ops are detected."""
+    x = onnx.helper.make_tensor_value_info("X", onnx.TensorProto.FLOAT, [2])
+    y = onnx.helper.make_tensor_value_info("Y", onnx.TensorProto.FLOAT, [2])
+    nodes = [
+        onnx.helper.make_node("Identity", ["X"], ["t"], name="identity"),
+        onnx.helper.make_node("MyPlugin", ["t"], ["Y"], name="plugin", domain="custom.ops"),
+    ]
+    graph = onnx.helper.make_graph(nodes, "custom_op_graph", [x], [y])
+    model = onnx.helper.make_model(
+        graph,
+        opset_imports=[
+            onnx.helper.make_opsetid("", 19),
+            onnx.helper.make_opsetid("custom.ops", 1),
+        ],
+    )
+    path = tmp_path / "custom_op.onnx"
+    onnx.save(model, path)
+    return str(path)
+
+
+def test_custom_ops_trt_does_not_leak_into_provider_lists(
+    custom_op_model_path, temp_model_path, monkeypatch
+):
+    """Adding 'trt' for custom ops must not mutate the default providers or a caller's list."""
+    # Reading custom layers needs a TensorRT network, which the `onnx` extra does not install.
+    monkeypatch.setattr(graphsanitizer, "TRT_PYTHON_AVAILABLE", True)
+    monkeypatch.setattr(
+        graphsanitizer, "get_custom_layers", lambda *args, **kwargs: (["plugin"], {})
+    )
+    monkeypatch.setattr(
+        graphsanitizer, "infer_types_shapes_tensorrt", lambda model, *args, **kwargs: model
+    )
+
+    seen_providers = []
+
+    class RecordingReferenceRunner:
+        def __init__(self, model, providers, trt_plugins):
+            seen_providers.append(list(providers))
+
+        def run(self, calibration_data, *, calibrate_per_node=False):
+            return {}
+
+    monkeypatch.setattr(convert, "ReferenceRunner", RecordingReferenceRunner)
+
+    convert_to_mixed_precision(onnx_path=custom_op_model_path)
+    convert_to_mixed_precision(onnx_path=temp_model_path)
+    assert seen_providers == [["trt", "cpu"], ["cpu"]]
+
+    mine = ["cpu"]
+    convert_to_mixed_precision(onnx_path=custom_op_model_path, providers=mine)
+    assert seen_providers[-1] == ["trt", "cpu"]
+    assert mine == ["cpu"]

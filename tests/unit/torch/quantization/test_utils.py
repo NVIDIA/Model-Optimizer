@@ -22,6 +22,8 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import fully_shard
 from torch.distributed.tensor import DTensor, Shard, distribute_tensor
 
+from modelopt.torch.quantization.config import QuantizerAttributeConfig
+from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.utils import (
     convert_quantization_axis_to_reduce_axis,
     core_utils,
@@ -33,6 +35,7 @@ from modelopt.torch.quantization.utils.core_utils import (
     _fsdp2_owned_params,
     _fsdp2_owns,
     _fsdp2_param_groups,
+    enable_fake_quant,
     fsdp2_weight_access_and_writeback_context,
     persistent_materialization,
 )
@@ -348,6 +351,21 @@ def test_layer_activation_collector_run_uses_cached_inputs_not_parent(monkeypatc
     assert "L1" not in call_log_for_layer1
 
     assert torch.allclose(inp2[0][0][0], torch.tensor([[10.0 + 1.0 + 2.0]]))
+
+
+def test_enable_fake_quant_restores_each_stage_when_the_window_raises():
+    """A W4A8 weight quantizer holds the flag on each of its stages. A window that raises, such as
+    an FSDP2 unshard running out of memory, must give every stage its own flag back."""
+    module = torch.nn.Module()
+    module.weight_quantizer = SequentialQuantizer(
+        TensorQuantizer(QuantizerAttributeConfig(fake_quant=False)), TensorQuantizer()
+    )
+
+    with pytest.raises(RuntimeError), enable_fake_quant(module):
+        assert [q._fake_quant for q in module.weight_quantizer] == [True, True]
+        raise RuntimeError
+
+    assert [q._fake_quant for q in module.weight_quantizer] == [False, True]
 
 
 def _forward_through_other_layers_while_one_is_materialized(rank, size, writeback):

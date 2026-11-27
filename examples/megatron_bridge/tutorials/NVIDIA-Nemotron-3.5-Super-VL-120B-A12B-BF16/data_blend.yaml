@@ -5,64 +5,106 @@
 
 output_dir: /path/to/qad_blend
 output_format: chat_jsonl
-# 600 iterations x 64 conversations read the 35,800-row training split about once.
-target_samples: 36_800
-# Take the first usable rows of each split in order, then mix them with `seed`.
-shuffle: false
+# 600 iterations x 64 conversations read the 37,000-row training split about once.
+target_samples: 38_000
+# Buffer-shuffle each source before selection; keep all dataset revisions fixed.
+shuffle: true
 seed: 1234
+shuffle_buffer_size: 10_000
+validation_samples: 1_000
+group_split: true
+filter_image_references: true
+filter_tool_calls: true
+filter_invalid_reasoning: true
 sources:
   - hf_dataset: nvidia/Nemotron-Pretraining-SFT-v1
+    revision: 3f1a5b884d0b890f02ead979ce698dc95debd953
     config: Nemotron-SFT-Code
     split: train
     content_field: text
     weight: 5
   - hf_dataset: nvidia/Nemotron-Pretraining-SFT-v1
+    revision: 3f1a5b884d0b890f02ead979ce698dc95debd953
     config: Nemotron-SFT-General
     split: train
     content_field: text
     weight: 20
   - hf_dataset: nvidia/Nemotron-Pretraining-SFT-v1
+    revision: 3f1a5b884d0b890f02ead979ce698dc95debd953
     config: Nemotron-SFT-MATH
     split: train
     content_field: text
     weight: 5
   - hf_dataset: nvidia/Nemotron-Math-v2
+    revision: 8e793210e175b6406c752a870f585f62de98c0d3
     config: default
     split: high_part00
     content_field: messages
     weight: 10
   - hf_dataset: nvidia/Nemotron-SFT-Math-v3
+    revision: ff4439c1073c87e006ab7ee5f1e5e28c4790dab3
     config: default
     split: train
     content_field: messages
     weight: 17
   - hf_dataset: nvidia/Nemotron-Competitive-Programming-v1
+    revision: d6e7c6b404ed5db6e1104b41d0f80a0c7dad7bf8
     config: default
     split: competitive_coding_python_part00
     content_field: messages
     weight: 15
   - hf_dataset: nvidia/Nemotron-Competitive-Programming-v1
+    revision: d6e7c6b404ed5db6e1104b41d0f80a0c7dad7bf8
     config: default
     split: competitive_coding_cpp_part00
     content_field: messages
     weight: 5
   - hf_dataset: nvidia/Nemotron-Post-Training-Dataset-v1
+    revision: 74e23eb6f830fef4a9e96a92f6f6262214cbb9a8
     config: default
     split: stem
     content_field: messages
     weight: 8
   - hf_dataset: nvidia/Nemotron-Science-v1
+    revision: 82e1af468197076b4f0f392c239274eac032adc7
     config: default
     split: MCQ
     content_field: messages
     weight: 3
   - hf_dataset: nvidia/Nemotron-Science-v1
+    revision: 82e1af468197076b4f0f392c239274eac032adc7
     config: default
     split: RQA
     content_field: messages
     weight: 2
   - hf_dataset: nvidia/Nemotron-SFT-Instruction-Following-Chat-v2
+    revision: 1a9454ed054b8544503ab8d8c0a519d141a44c5b
     config: default
     split: reasoning_off
+    files:
+      - data/reasoning_off.jsonl
     content_field: messages
     weight: 2
+  - hf_dataset: nvidia/Nemotron-SFT-Instruction-Following-Chat-v2
+    revision: 1a9454ed054b8544503ab8d8c0a519d141a44c5b
+    config: default
+    split: reasoning_on
+    files:
+      - data/reasoning_on.jsonl
+    content_field: messages
+    weight: 3
+
+# Original question banks used to recover indexed competitive-programming prompts.
+question_sources:
+  taco:
+    hf_dataset: BAAI/TACO
+    revision: d593ed0a2becbbc952230bb89be09189bf1056dc
+  apps:
+    hf_dataset: codeparrot/apps
+    revision: 21e74ddf8de1a21436da12e3e653065c5213e9d1
+  code_contests:
+    hf_dataset: deepmind/code_contests
+    revision: 802411c3010cb00d1b05bad57ca77365a3c699d6
+  open-r1/codeforces:
+    hf_dataset: open-r1/codeforces
+    revision: fbe3f6e903ee854eec2e69e9d96d0306cde59baf

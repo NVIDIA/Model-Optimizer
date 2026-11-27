@@ -304,6 +304,8 @@ def _tensor_parallel_sync_helper(rank, size, case):
             linear.input_quantizer.set_from_attribute_config({"axis": None})
 
     try:
+        # A no-sync peer must not destroy the group while another rank is still connecting.
+        dist.barrier(group=tp_group)
         max_calibrate(model, forward_loop)
     finally:
         dist.destroy_process_group(tp_group)
