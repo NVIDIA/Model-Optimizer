@@ -20,6 +20,7 @@
 """MiMo-V2.6 release metadata on the upstream differentiable MiMo implementation."""
 
 import copy
+import math
 import re
 
 import torch
@@ -40,9 +41,7 @@ class _MiMoV26Experts(MiMoV2FlashExperts):
 
     def forward(self, hidden_states, top_k_index, top_k_weights):
         output = torch.zeros_like(hidden_states, dtype=top_k_weights.dtype)
-        for expert in top_k_index.unique().tolist():
-            if expert == self.num_experts:
-                continue
+        for expert in range(self.num_experts):
             tokens, slot = torch.where(top_k_index == expert)
             gate, up = torch.nn.functional.linear(
                 hidden_states[tokens], self.gate_up_proj[expert]
@@ -108,7 +107,10 @@ class MiMoV2Config(MiMoV2FlashConfig):
             kwargs.setdefault("rms_norm_eps", kwargs["layernorm_epsilon"])
         super().__init__(**kwargs)
         for parameters in self.rope_parameters.values():
-            width = int(self.head_dim * parameters.get("partial_rotary_factor", 0.334))
+            factor = parameters.get("partial_rotary_factor", 0.334)
+            if not math.isfinite(factor) or not 0 <= factor <= 1:
+                raise ValueError("MiMo partial rotary factor must be finite and lie in [0, 1].")
+            width = int(self.head_dim * factor)
             if width % 2:
                 raise ValueError("MiMo release rotary dimension must be even.")
 
@@ -124,13 +126,20 @@ class MiMoV2ForCausalLM(MiMoV2FlashForCausalLM):
 
     def __init__(self, config):
         """Build upstream modules with the release's per-layer KV geometry."""
-        super().__init__(config)
+        if (
+            config.num_key_value_heads <= 0
+            or config.num_attention_heads % config.num_key_value_heads
+        ):
+            raise ValueError(
+                "MiMo full-attention KV-head count must be positive and divide attention heads."
+            )
         wanted = getattr(config, "swa_num_key_value_heads", None)
         wanted = config.num_key_value_heads * 2 if wanted is None else wanted
         if wanted <= 0 or wanted % 2 or config.num_attention_heads % wanted:
             raise ValueError(
                 "MiMo SWA KV-head count must be positive, even and divide attention heads."
             )
+        super().__init__(config)
         for index, layer in enumerate(self.model.layers):
             gate = getattr(layer.mlp, "gate", None)
             if gate is not None and hasattr(gate, "e_score_correction_bias"):
@@ -144,7 +153,10 @@ class MiMoV2ForCausalLM(MiMoV2FlashForCausalLM):
                 # Upstream doubles num_key_value_heads on sliding layers.
                 local.num_key_value_heads = wanted // 2
                 layer.self_attn = MiMoV2FlashAttention(local, index)
+                # Upstream _init_weights handles the attention module's sinks as well as projections.
                 layer.self_attn.apply(self._init_weights)
+                # Only construction needs local KV geometry; backend switches use shared config.
+                layer.self_attn.config = config
             sink = (
                 getattr(config, "add_swa_attention_sink_bias", True)
                 if sliding
@@ -172,6 +184,8 @@ class MiMoV2ForCausalLM(MiMoV2FlashForCausalLM):
             converted[name] = tensor
 
         for name, tensor in state_dict.items():
+            if tensor.is_meta:
+                raise ValueError(f"MiMo checkpoint tensors must be materialized; {name!r} is meta.")
             if tensor.dtype not in (
                 torch.float16,
                 torch.bfloat16,
@@ -200,7 +214,11 @@ class MiMoV2ForCausalLM(MiMoV2FlashForCausalLM):
             )
             if match:
                 owner, expert, part = match.groups()
-                experts.setdefault(owner, {})[int(expert), part] = tensor
+                weights = experts.setdefault(owner, {})
+                key = (int(expert), part)
+                if key in weights:
+                    raise ValueError(f"Duplicate MiMo normalized expert mapping for {name!r}.")
+                weights[key] = tensor
             else:
                 put(name.replace(".attention_sink_bias", ".sinks"), tensor)
         for owner, weights in experts.items():
@@ -246,7 +264,9 @@ class MiMoV2ForCausalLM(MiMoV2FlashForCausalLM):
                     down_dtype = torch.promote_types(down_dtype, weights[i, "down_proj"].dtype)
                 combined = weights[0, "gate_proj"].new_empty(combined.shape, dtype=gate_dtype)
                 projected = weights[0, "down_proj"].new_empty(projected.shape, dtype=down_dtype)
-            # All keys and shapes have passed validation before any destination is written.
+            # Dtype/materialization and shapes are validated before writing live destinations.
+            # assign=False reuses parameter storage; strict=False follows load_state_dict's
+            # partial-load semantics and reports missing/unexpected keys instead of refusing.
             with torch.no_grad():
                 for i in range(count):
                     combined[i, : width // 2].copy_(weights[i, "gate_proj"])

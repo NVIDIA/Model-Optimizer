@@ -20,10 +20,12 @@ import json
 
 import pytest
 import torch
+from torch.distributed.device_mesh import init_device_mesh
 
 pytest.importorskip("transformers", minversion="5.23")
 
 from _test_utils.transformers_families import build_model, hf_torch_kernels, release_cases
+from transformers.distributed.utils import TransformersDeviceMesh
 
 import modelopt.torch.distill as mtd
 import modelopt.torch.opt as mto
@@ -227,9 +229,6 @@ def test_step5_release_sparse_geometry_bounds_saved_gather_memory(monkeypatch, r
 
 
 def _native_port_worker(rank, size, record):
-    from torch.distributed.device_mesh import init_device_mesh
-    from transformers.distributed.utils import TransformersDeviceMesh
-
     assert size == 4
     torch.cuda.set_device(rank)
     torch.manual_seed(151)

@@ -56,9 +56,15 @@ def test_mimo_release_geometry_and_native_forward(swa_kv_heads, tmp_path):
     assert config.checkpoint_quantization_config["store_dtype"] == "mxfp4"
     with pytest.raises(ValueError, match="rotary dimension"):
         MiMoV2Config(**{**config.to_dict(), "head_dim": 16})
+    invalid = copy.deepcopy(config)
+    invalid.num_key_value_heads = 3
+    invalid.swa_num_key_value_heads = 2
+    with pytest.raises(ValueError, match="full-attention"):
+        MiMoV2ForCausalLM(invalid)
     config._attn_implementation = "eager"
     config._experts_implementation = "eager"
     model = MiMoV2ForCausalLM(config)
+    assert all(layer.self_attn.config is model.config for layer in model.model.layers)
     assert (model.model.layers[0].self_attn.sinks is not None) == (swa_kv_heads == 2)
     swa_kv_heads = 4 if swa_kv_heads is None else swa_kv_heads
     model.model.layers[1].mlp.gate.e_score_correction_bias.copy_(
@@ -102,6 +108,15 @@ def test_mimo_release_geometry_and_native_forward(swa_kv_heads, tmp_path):
     malformed = {**source, "model.norm.weight": source["model.norm.weight"][:-1]}
     with pytest.raises(ValueError, match="shape"):
         restored.load_published_state_dict(malformed)
+    for name, value in restored.state_dict().items():
+        torch.testing.assert_close(value, before[name], rtol=0, atol=0)
+    up_key = "model.layers.1.mlp.experts.0.up_proj.weight"
+    with pytest.raises(ValueError, match="materialized"):
+        restored.load_published_state_dict({**source, up_key: source[up_key].to("meta")})
+    duplicate_key = "model.layers.1.mlp.experts.00.gate_proj.weight"
+    gate_key = duplicate_key.replace(".00.", ".0.")
+    with pytest.raises(ValueError, match="Duplicate"):
+        restored.load_published_state_dict({**source, duplicate_key: source[gate_key] + 1})
     for name, value in restored.state_dict().items():
         torch.testing.assert_close(value, before[name], rtol=0, atol=0)
     restored.load_published_state_dict(source)
@@ -180,6 +195,12 @@ def test_mimo_release_geometry_and_native_forward(swa_kv_heads, tmp_path):
         outputs.append(F.linear(F.silu(gate) * up, experts.down_proj[expert]))
     expected = (torch.stack(outputs, 1).float() * routing[..., None]).sum(1).bfloat16()
     torch.testing.assert_close(experts(hidden, indices, routing), expected, rtol=0, atol=0)
+    experts.zero_grad(set_to_none=True)
+    empty = experts(hidden, torch.full_like(indices, experts.num_experts), routing)
+    assert torch.count_nonzero(empty) == 0
+    empty.sum().backward()
+    for parameter in experts.parameters():
+        assert parameter.grad is not None and torch.count_nonzero(parameter.grad) == 0
 
 
 @pytest.mark.parametrize("source_field", ["rope_scaling", "rope_parameters"])
@@ -207,6 +228,11 @@ def test_mimo_release_rotary_scaling_reaches_both_attention_types(source_field):
         torch.testing.assert_close(cos, angles.cos(), rtol=1e-6, atol=1e-7)
         torch.testing.assert_close(sin, angles.sin(), rtol=1e-6, atol=1e-7)
     serialized = config.to_dict()
+    for factor in (float("nan"), float("inf"), -0.1, 1.1):
+        invalid = copy.deepcopy(serialized)
+        invalid["rope_parameters"]["full_attention"]["partial_rotary_factor"] = factor
+        with pytest.raises(ValueError, match="rotary factor"):
+            MiMoV2Config(**invalid)
     serialized["rope_parameters"]["full_attention"]["rope_type"] = "unsupported"
     with pytest.raises(ValueError, match="rope"):
         MiMoV2Config(**serialized)

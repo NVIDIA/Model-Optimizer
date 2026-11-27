@@ -192,6 +192,9 @@ def test_modelopt_moe_blocks_resolve_from_local_port(model_type):
     for name in port.__all__:
         obj = getattr(port, name)
         if isinstance(obj, type):
-            modules.add(importlib.import_module(obj.__module__))
+            # Adapters can inherit their MoE blocks from the native HF implementation.
+            for base in obj.__mro__:
+                if base.__module__.startswith(("modelopt.torch.models.", "transformers.models.")):
+                    modules.add(importlib.import_module(base.__module__))
     for name in spec.moe_spec.block_names:
         assert any(isinstance(getattr(module, name, None), type) for module in modules), name
