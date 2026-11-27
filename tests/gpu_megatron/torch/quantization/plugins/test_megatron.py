@@ -18,7 +18,7 @@ import math
 import re
 import sys
 import types
-from contextlib import ExitStack, nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
 from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
@@ -64,10 +64,13 @@ from megatron.core.transformer import MegatronModule, TransformerConfig
 from megatron.core.transformer.mlp import MLP
 from megatron.core.transformer.moe.experts import SequentialMLP, TEGroupedMLP
 from megatron.core.transformer.moe.router import TopKRouter
+from megatron.core.transformer.moe.shared_experts import SharedExpertMLP
+from torch.distributed.checkpoint.api import CheckpointException
 
 import modelopt
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
+import modelopt.torch.quantization.plugins.megatron as mtq_megatron
 from modelopt.recipe import load_recipe
 from modelopt.torch.opt.dynamic import DynamicModule
 from modelopt.torch.opt.plugins.mcore_dist_checkpointing import (
@@ -82,6 +85,7 @@ from modelopt.torch.quantization.plugins.megatron import (
     _initialize_grouped_weight_quantizer_state,
     _output_layer_extra_state_has_data,
     _output_layer_untied,
+    _QuantMegatronMLP,
     _QuantMegatronTEGroupedLinear,
     _QuantTEMCoreRowParallelLinear,
     _resolve_output_layer_untied,
@@ -300,6 +304,9 @@ def _gpt_model_provider(
     ep_size=1,
     etp_size=None,
     transformer_impl="local",
+    activation_func="squared_relu",
+    moe_shared_expert_intermediate_size=None,
+    pp_size=1,
     # Hybrid mamba MOE parameters
     is_hybrid=False,
     hybrid_layer_pattern=None,
@@ -330,18 +337,20 @@ def _gpt_model_provider(
         else:
             model = get_mcore_gpt_model(
                 tensor_model_parallel_size=tp_size,
+                pipeline_model_parallel_size=pp_size,
                 expert_model_parallel_size=ep_size,
                 expert_tensor_parallel_size=etp_size,
                 num_layers=4,
                 ffn_hidden_size=None,
                 num_attention_heads=8,
-                activation_func="squared_relu",
+                activation_func=activation_func,
                 transformer_impl=transformer_impl,
                 hidden_size=hidden_size,
                 vocab_size=vocab_size,
                 use_cpu_initialization=meta_device,
                 num_moe_experts=num_moe_experts,
                 moe_grouped_gemm=moe_grouped_gemm,
+                moe_shared_expert_intermediate_size=moe_shared_expert_intermediate_size,
                 # MoE with TP requires sequence parallelism
                 sequence_parallel=tp_size > 1 and num_moe_experts is not None,
             )
@@ -1724,7 +1733,22 @@ def test_layerwise_calibrate_vlm_text_forward_loop(dist_workers_size_1, drive_wr
     dist_workers_size_1.run(partial(_test_layerwise_calibrate_vlm_text_forward_loop, drive_wrapper))
 
 
-def _test_ggml_payload_sharded_state_dict(tmp_path, preparation, grouped, rank, size):
+def _iq2_xs_config(preparation, sequential=False):
+    config = load_recipe("general/ptq/iq2_xs").quantize.model_dump()
+    if sequential:
+        # A list-valued cfg builds a one-member SequentialQuantizer around the GGML quantizer.
+        for entry in config["quant_cfg"]:
+            if entry.get("quantizer_name", "").endswith("weight_quantizer") and entry.get("cfg"):
+                entry["cfg"] = [entry["cfg"]]
+    if preparation == "gptq":
+        gptq = next(algo for algo in config["algorithm"] if algo["method"] == "gptq")
+        config["algorithm"] = {**gptq, "layerwise": {"enable": False}}
+    else:
+        config["algorithm"] = "max"
+    return config
+
+
+def _test_ggml_payload_sharded_state_dict(tmp_path, preparation, grouped, hidden_size, rank, size):
     initialize_for_megatron(
         tensor_model_parallel_size=size,
         expert_tensor_parallel_size=size if grouped else None,
@@ -1734,7 +1758,7 @@ def _test_ggml_payload_sharded_state_dict(tmp_path, preparation, grouped, rank, 
     def create_model(tp_size=size):
         return _gpt_model_provider(
             tp_size=tp_size,
-            hidden_size=512,
+            hidden_size=hidden_size,
             num_moe_experts=2 if grouped else None,
             moe_grouped_gemm=grouped,
             etp_size=tp_size if grouped else None,
@@ -1742,12 +1766,7 @@ def _test_ggml_payload_sharded_state_dict(tmp_path, preparation, grouped, rank, 
         )
 
     model_ref = create_model()
-    config = load_recipe("general/ptq/iq2_xs").quantize.model_dump()
-    if preparation == "gptq":
-        gptq = next(algo for algo in config["algorithm"] if algo["method"] == "gptq")
-        config["algorithm"] = {**gptq, "layerwise": {"enable": False}}
-    else:
-        config["algorithm"] = "max"
+    config = _iq2_xs_config(preparation)
     if grouped:
         for module in model_ref.modules():
             if isinstance(module, TopKRouter):
@@ -1841,13 +1860,454 @@ def _test_ggml_payload_sharded_state_dict(tmp_path, preparation, grouped, rank, 
 
 
 @pytest.mark.parametrize(
-    ("preparation", "grouped"), [("gptq", False), ("ptq", False), ("ptq", True)]
+    ("preparation", "grouped", "hidden_size"),
+    # 352 pads each TP=2 rank's 704 linear_fc2 input columns to whole 256-value blocks.
+    [("gptq", False, 512), ("ptq", False, 512), ("ptq", True, 512), ("ptq", False, 352)],
 )
-def test_ggml_payload_sharded_state_dict(dist_workers_size_2, tmp_path, preparation, grouped):
+def test_ggml_payload_sharded_state_dict(
+    dist_workers_size_2, tmp_path, preparation, grouped, hidden_size
+):
     """Dense/grouped scale pins and effective weights survive rank-local updates and reload."""
     dist_workers_size_2.run(
-        partial(_test_ggml_payload_sharded_state_dict, tmp_path, preparation, grouped)
+        partial(_test_ggml_payload_sharded_state_dict, tmp_path, preparation, grouped, hidden_size)
     )
+
+
+def _whole_pinned_effective_weights(model, size, gated):
+    """Each pinned weight's effective weight across the ``size`` TP ranks, as TP=1 holds it."""
+    whole = {}
+    for name, weight in _pinned_effective_weights(model).items():
+        shards = [torch.empty_like(weight) for _ in range(size)]
+        torch.distributed.all_gather(shards, weight, group=get_tensor_model_parallel_group())
+        if gated and name.endswith("linear_fc1"):
+            # Megatron restores a gated linear_fc1 as all gate rows, then all up rows.
+            shards = [shard.chunk(2)[i] for i in range(2) for shard in shards]
+        partition_dim = model.get_submodule(name).weight.partition_dim
+        whole[name] = torch.cat(shards, dim=partition_dim)
+    return whole
+
+
+def _test_ggml_payload_tp_reshard(
+    tmp_path, preparation, activation_func, moe, sequential, rank, size
+):
+    def create_model(tp_size):
+        # MoE: sequential experts and a shared expert, whose gated linear_fc1 is not an MLP's.
+        return _gpt_model_provider(
+            tp_size=tp_size,
+            hidden_size=512,
+            activation_func=activation_func,
+            num_moe_experts=2 if moe else None,
+            etp_size=tp_size if moe else None,
+            moe_shared_expert_intermediate_size=512 if moe else None,
+        )
+
+    initialize_for_megatron(
+        tensor_model_parallel_size=size,
+        expert_tensor_parallel_size=size if moe else None,
+        seed=SEED,
+    )
+    source = create_model(size)
+    for module in source.modules():
+        if isinstance(module, TopKRouter):
+            module.topk = module.num_experts
+    mtq.quantize(source, _iq2_xs_config(preparation, sequential), get_forward(source))
+    if preparation == "ptq":
+        mtq.initialize_qdq_weights(source)
+    expected = _whole_pinned_effective_weights(source, size, gated=activation_func == "swiglu")
+    assert expected
+    save_distributed_checkpoint(tmp_path, source)
+    save_sharded_modelopt_state([source], tmp_path)
+    torch.distributed.barrier()
+    del source
+    destroy_model_parallel()
+
+    initialize_for_megatron(
+        tensor_model_parallel_size=1, expert_tensor_parallel_size=1 if moe else None, seed=SEED
+    )
+    target = create_model(1)
+    restore_sharded_modelopt_state([target], tmp_path)
+    target = load_distributed_checkpoint(tmp_path, target)
+    assert not moe or any("shared_experts.linear_fc1" in name for name in expected)
+    for name, module in target.named_modules():
+        if name in expected:
+            ((weight, quantizer),) = module.iter_weights_for_calibration()
+            assert torch.equal(quantizer(weight), expected[name]), name
+
+
+@pytest.mark.parametrize(
+    ("preparation", "activation_func", "moe", "sequential"),
+    [
+        ("gptq", "squared_relu", False, False),
+        ("gptq", "swiglu", False, False),
+        ("ptq", "squared_relu", False, False),
+        ("ptq", "swiglu", False, False),
+        ("ptq", "swiglu", True, False),
+        ("ptq", "swiglu", False, True),
+    ],
+)
+def test_ggml_payload_tp_reshard(
+    dist_workers_size_2, tmp_path, preparation, activation_func, moe, sequential
+):
+    """GGML pins and effective weights quantized at TP=2 reload at TP=1."""
+    dist_workers_size_2.run(
+        partial(
+            _test_ggml_payload_tp_reshard, tmp_path, preparation, activation_func, moe, sequential
+        )
+    )
+
+
+@contextmanager
+def _quantizing_like_modelopt_0_48():
+    """Quantize as ModelOpt 0.48 did, which left MCore's SharedExpertMLP unconverted."""
+    quant_cls = QuantModuleRegistry._registry[SharedExpertMLP]
+    key = QuantModuleRegistry._key_registry[SharedExpertMLP]
+    QuantModuleRegistry.unregister(SharedExpertMLP)
+    try:
+        yield
+    finally:
+        QuantModuleRegistry.register({SharedExpertMLP: key})(quant_cls)
+
+
+def _test_shared_expert_checkpoint_from_before_its_registration(tmp_path, rank, size):
+    initialize_for_megatron(
+        tensor_model_parallel_size=size, expert_tensor_parallel_size=size, seed=SEED
+    )
+
+    def create_model():
+        # Grouped experts, as a typical MoE has: no MLP of the model's own is before the shared one.
+        return _gpt_model_provider(
+            tp_size=size,
+            hidden_size=256,
+            activation_func="swiglu",
+            num_moe_experts=2,
+            moe_grouped_gemm=True,
+            etp_size=size,
+            transformer_impl="transformer_engine",
+            moe_shared_expert_intermediate_size=256,
+        )
+
+    source = create_model()
+    config = copy.deepcopy(mtq.INT8_DEFAULT_CFG)
+    config["quant_cfg"].append({"quantizer_name": "*mlp.experts.*", "enable": False})
+    with _quantizing_like_modelopt_0_48():
+        mtq.quantize(source, config, get_forward(source))
+        # Grouped experts take no adapters.
+        mtq.enable_quant_lora(source, {"rank": 4, "target_modules": ["*shared_experts*"]})
+        with torch.no_grad():
+            for module in source.modules():
+                if hasattr(module, "lora_B"):
+                    module.lora_B.normal_()
+        save_distributed_checkpoint(tmp_path, source)
+        save_sharded_modelopt_state([source], tmp_path)
+    expected = {n: p for n, p in source.named_parameters() if ".shared_experts." in n}
+    assert any(n.endswith("linear_fc1.lora_B") for n in expected)
+    target = create_model()
+    restore_sharded_modelopt_state([target], tmp_path)
+    assert isinstance(target.decoder.layers[0].mlp.shared_experts, DynamicModule)
+    target = load_distributed_checkpoint(tmp_path, target)
+    params = dict(target.named_parameters())
+    for name, param in expected.items():
+        assert torch.equal(params[name], param), name
+    # Planned without singleton_local_shards, its weight keeps Megatron's own (unsuffixed) key.
+    shared = target.decoder.layers[0].mlp.shared_experts
+    fc1 = shared.sharded_state_dict("x.", metadata={"singleton_local_shards": False})
+    built = fc1["x.linear_fc1.weight"].build()
+    assert {t.key for t in built} == {"x.linear_fc1.weight"}
+
+
+def test_shared_expert_checkpoint_from_before_its_registration(dist_workers_size_2, tmp_path):
+    """A quantized shared expert saved before ModelOpt registered SharedExpertMLP still loads, with
+    its LoRA adapter."""
+    dist_workers_size_2.run(
+        partial(_test_shared_expert_checkpoint_from_before_its_registration, tmp_path)
+    )
+
+
+@contextmanager
+def _saving_like_modelopt_0_49_0rc0():
+    """Quantize and save as 0.49.0rc0 did: no pin layout mark, pins sharded like any row state."""
+    get_extra_state = mtq_megatron.quant_module_get_extra_state
+
+    def without_mark(module):
+        state = get_extra_state(module)
+        state.pop("modelopt_swiglu_ggml_pins", None)
+        return state
+
+    with (
+        patch.object(mtq_megatron, "quant_module_get_extra_state", without_mark),
+        patch.object(
+            _QuantMegatronMLP,
+            "_modelopt_state_keys",
+            [k for k in _QuantMegatronMLP._modelopt_state_keys if PINNED_PAYLOAD_PREFIX not in k],
+        ),
+    ):
+        yield
+
+
+def _pinned_effective_weights(model):
+    return {
+        name: quantizer(weight)
+        for name, module in model.named_modules()
+        if hasattr(module, "iter_weights_for_calibration")
+        for weight, quantizer in module.iter_weights_for_calibration()
+        if any(PINNED_PAYLOAD_PREFIX in n for n, _ in quantizer.named_buffers())
+    }
+
+
+def _test_ggml_rc0_pin_layout_same_tp(tmp_path, loader, rank, size):
+    regular = loader == "mto_save"
+    initialize_for_megatron(tensor_model_parallel_size=size, seed=SEED)
+    source = _gpt_model_provider(tp_size=size, hidden_size=512, activation_func="swiglu")
+    with _saving_like_modelopt_0_49_0rc0():
+        mtq.quantize(source, _iq2_xs_config("ptq"), get_forward(source))
+        mtq.initialize_qdq_weights(source)
+        expected = _pinned_effective_weights(source)
+        if regular:
+            mto.save(source, tmp_path / f"rank{rank}.pth")
+        else:
+            save_distributed_checkpoint(tmp_path, source)
+            save_sharded_modelopt_state([source], tmp_path)
+            if loader == "mbridge":
+                # The checkpoint without its modelopt_state, for a weights-only load.
+                (tmp_path / "weights").mkdir(exist_ok=True)
+                save_distributed_checkpoint(tmp_path / "weights", source)
+    assert any(name.endswith("linear_fc1") for name in expected)
+    target = _gpt_model_provider(tp_size=size, hidden_size=512, activation_func="swiglu")
+    # Loaded twice into the same model: the second load reads the checkpoint's layout again.
+    for i in range(1 if regular else 2):
+        if i:
+            # Cleared in place, so the checks see what the next load wrote.
+            for module in target.modules():
+                for name, buffer in module.named_buffers(recurse=False):
+                    if name.startswith(PINNED_PAYLOAD_PREFIX):
+                        buffer.zero_()
+                        module._quantizer_cache = None
+        if regular:
+            target = mto.restore(target, tmp_path / f"rank{rank}.pth")
+        elif loader == "mbridge":
+            from modelopt.torch.utils.plugins.mbridge import load_modelopt_megatron_checkpoint
+
+            # The second load, into the converted model, loads its weights only.
+            (target,) = load_modelopt_megatron_checkpoint(
+                [target],
+                str(tmp_path / "weights" if i else tmp_path),
+                restore_modelopt_state=i == 0,
+            )
+        else:
+            # Into a converted model, the restore only reads the layout: it loads no state.
+            with (
+                patch.object(target, "load_state_dict", side_effect=AssertionError)
+                if i
+                else nullcontext()
+            ):
+                restore_sharded_modelopt_state([target], tmp_path)
+            target = load_distributed_checkpoint(tmp_path, target)
+        restored = _pinned_effective_weights(target)
+        assert restored.keys() == expected.keys()
+        for name, weight in expected.items():
+            assert torch.equal(restored[name], weight), name
+    if loader == "sharded":
+        # A weight load that fails once the layout is read leaves a checkpoint to save whose
+        # layout marker says how its pins are written.
+        restore_sharded_modelopt_state([target], tmp_path)
+        with (
+            patch.object(target, "load_state_dict", side_effect=RuntimeError("weight load")),
+            pytest.raises(RuntimeError, match="weight load"),
+        ):
+            load_distributed_checkpoint(tmp_path, target)
+        resaved = tmp_path / "resaved"
+        resaved.mkdir(exist_ok=True)
+        save_distributed_checkpoint(resaved, target)
+        save_sharded_modelopt_state([target], resaved)
+        target = _gpt_model_provider(tp_size=size, hidden_size=512, activation_func="swiglu")
+        restore_sharded_modelopt_state([target], resaved)
+        target = load_distributed_checkpoint(resaved, target)
+        restored = _pinned_effective_weights(target)
+        assert restored.keys() == expected.keys()
+        for name, weight in expected.items():
+            assert torch.equal(restored[name], weight), name
+        # Saved again, it loads at another TP size, e.g. TP=1 to export it.
+        whole = _whole_pinned_effective_weights(target, size, gated=True)
+        migrated = tmp_path / "migrated"
+        migrated.mkdir(exist_ok=True)
+        save_distributed_checkpoint(migrated, target)
+        save_sharded_modelopt_state([target], migrated)
+        torch.distributed.barrier()
+        destroy_model_parallel()
+        initialize_for_megatron(tensor_model_parallel_size=1, seed=SEED)
+        target = _gpt_model_provider(tp_size=1, hidden_size=512, activation_func="swiglu")
+        restore_sharded_modelopt_state([target], migrated)
+        target = load_distributed_checkpoint(migrated, target)
+        restored = _pinned_effective_weights(target)
+        assert restored.keys() == whole.keys()
+        for name, weight in whole.items():
+            assert torch.equal(restored[name], weight), name
+
+
+@pytest.mark.parametrize("loader", ["sharded", "mto_save", "mbridge"])
+def test_ggml_rc0_pin_layout_same_tp(dist_workers_size_2, tmp_path, loader):
+    """Checkpoints with 0.49.0rc0's SwiGLU pin layout still load at the TP size they were saved at,
+    and, saved again, at another."""
+    if loader == "mbridge":
+        pytest.importorskip("megatron.bridge")
+    dist_workers_size_2.run(partial(_test_ggml_rc0_pin_layout_same_tp, tmp_path, loader))
+
+
+def _test_ggml_payload_tp_reshard_rejected(tmp_path, case, rank, size):
+    grouped = case in ("grouped_experts", "grouped_padded_fc2", "grouped_aligned_fc2")
+    rc0 = case.startswith("rc0_swiglu_pins")
+    if case == "mamba_in_proj" and not HAS_MAMBA:
+        pytest.skip("Mamba is not installed")
+    # 352 pads linear_fc2's 704 input columns per TP=2 rank (1408 at TP=1) to whole blocks; 192
+    # pads its 384 per rank but not the 768 at TP=1. 64 pads the experts' 128 linear_fc2 input
+    # columns per ETP=2 rank to the one 256-value block their 256 at ETP=1 fill, so the pins fit
+    # either way.
+    hidden_size = {
+        "padded_row_parallel": 352,
+        "padded_row_parallel_converted": 352,
+        "padded_to_aligned": 192,
+    }
+    hidden_size = hidden_size.get(case, 64 if case.endswith("_fc2") else 512)
+    # Saved at TP=2 and loaded at TP=1, or the other way around, or at the same size.
+    save_tp, load_tp = (1, size) if case == "grouped_aligned_fc2" else (size, 1)
+    same_tp = ("unpinned_converted", "sequential_into_direct_converted", "undecodable_converted")
+    save_tp, load_tp = (size, size) if case in same_tp else (save_tp, load_tp)
+    # Only the first of the target's two pipeline stages has pins.
+    load_pp = size if case == "rc0_swiglu_pins_one_stage" else 1
+
+    def create_model(tp_size, pp_size=1):
+        if case == "mamba_in_proj":
+            # Megatron saves a Mamba in_proj's weight split into its components.
+            return get_mcore_hybrid_model(
+                tensor_model_parallel_size=tp_size,
+                num_layers=2,
+                hybrid_layer_pattern="MM",
+                hidden_size=hidden_size,
+                ffn_hidden_size=None,
+                skip_moe=True,
+                sequence_parallel=tp_size > 1,
+            ).cuda()
+        return _gpt_model_provider(
+            tp_size=tp_size,
+            pp_size=pp_size,
+            hidden_size=hidden_size,
+            activation_func="swiglu" if rc0 else "squared_relu",
+            num_moe_experts=2 if grouped else None,
+            moe_grouped_gemm=grouped,
+            etp_size=tp_size if grouped else None,
+            transformer_impl="transformer_engine" if grouped else "local",
+        )
+
+    initialize_for_megatron(
+        tensor_model_parallel_size=save_tp,
+        expert_tensor_parallel_size=save_tp if grouped else None,
+        seed=SEED,
+    )
+    source = create_model(save_tp)
+    for module in source.modules():
+        if isinstance(module, TopKRouter):
+            module.topk = module.num_experts
+    config = _iq2_xs_config("ptq")
+    for entry in config["quant_cfg"]:
+        if entry.get("quantizer_name") != "*mlp*weight_quantizer":
+            continue
+        if case.endswith("_fc2"):
+            # Only the experts' linear_fc2: every pin then has a shape that fits the other ETP.
+            entry["quantizer_name"] = "*experts.linear_fc2.weight_quantizer"
+        elif case == "rc0_swiglu_pins_one_stage":
+            entry["quantizer_name"] = "*layers.0.mlp*weight_quantizer"
+        elif case == "mamba_in_proj":
+            entry["quantizer_name"] = "*in_proj.weight_quantizer"
+    # A one-member SequentialQuantizer's pins are saved under weight_quantizer.0.
+    sequential = case == "sequential_into_direct_converted"
+    with _saving_like_modelopt_0_49_0rc0() if rc0 else nullcontext():
+        source_config = _iq2_xs_config("ptq", sequential) if sequential else config
+        mtq.quantize(source, source_config, get_forward(source))
+        mtq.initialize_qdq_weights(source)
+        save_distributed_checkpoint(tmp_path, source)
+        save_sharded_modelopt_state([source], tmp_path)
+    torch.distributed.barrier()
+    del source
+    destroy_model_parallel()
+
+    initialize_for_megatron(
+        tensor_model_parallel_size=load_tp,
+        pipeline_model_parallel_size=load_pp,
+        expert_tensor_parallel_size=load_tp if grouped else None,
+        seed=SEED,
+    )
+    target = create_model(load_tp, load_pp)
+    if case.endswith("_converted"):
+        # Already converted: the restore only reads the checkpoint's layout. Its own pins, unless
+        # its weights were never pinned.
+        mtq.quantize(target, config, get_forward(target))
+        if case != "unpinned_converted":
+            mtq.initialize_qdq_weights(target)
+    if case == "padded_to_aligned":
+        # The saved shards hold more blocks than TP=1 asks for; Megatron's shape check rejects it.
+        restore_sharded_modelopt_state([target], tmp_path)
+        with pytest.raises(CheckpointException, match="Global shape mismatch"):
+            load_distributed_checkpoint(tmp_path, target)
+        return
+    # A rank whose own pins fit raises too, rather than enter the weight load alone.
+    error = NotImplementedError if grouped else ValueError
+    match = "0.49.0rc0" if rc0 else r"can't be loaded at another"
+    match = {
+        "mamba_in_proj": "by component",
+        "unpinned_converted": "no buffers for",
+        "sequential_into_direct_converted": "doesn't have",
+        "undecodable_converted": "undecodable",
+    }.get(case, match)
+    # Undecodable extra state on one rank only.
+    undecodable = case == "undecodable_converted" and rank == 0
+    with (
+        patch.object(
+            sys.modules[restore_sharded_modelopt_state.__module__],
+            "safe_load",
+            side_effect=ValueError("undecodable"),
+        )
+        if undecodable
+        else nullcontext(),
+        pytest.raises(error if rank == 0 else (error, RuntimeError), match=match),
+    ):
+        restore_sharded_modelopt_state([target], tmp_path)
+    if case.endswith("_converted") and case != "unpinned_converted":
+        # The rejected checkpoint changed nothing: saved again, the target reloads as it is.
+        expected = _pinned_effective_weights(target)
+        resaved = tmp_path / "resaved"
+        resaved.mkdir(exist_ok=True)
+        save_distributed_checkpoint(resaved, target)
+        save_sharded_modelopt_state([target], resaved)
+        reloaded = create_model(load_tp, load_pp)
+        restore_sharded_modelopt_state([reloaded], resaved)
+        reloaded = load_distributed_checkpoint(resaved, reloaded)
+        restored = _pinned_effective_weights(reloaded)
+        assert expected and restored.keys() == expected.keys()
+        for name, weight in expected.items():
+            assert torch.equal(restored[name], weight), name
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "padded_row_parallel",
+        "padded_row_parallel_converted",
+        "padded_to_aligned",
+        "grouped_experts",
+        "grouped_padded_fc2",
+        "grouped_aligned_fc2",
+        "rc0_swiglu_pins",
+        "rc0_swiglu_pins_converted",
+        "rc0_swiglu_pins_one_stage",
+        "mamba_in_proj",
+        "unpinned_converted",
+        "sequential_into_direct_converted",
+        "undecodable_converted",
+    ],
+)
+def test_ggml_payload_tp_reshard_rejected(dist_workers_size_2, tmp_path, case):
+    """GGML pins that can't be loaded fail at restore instead of loading misplaced blocks."""
+    dist_workers_size_2.run(partial(_test_ggml_payload_tp_reshard_rejected, tmp_path, case))
 
 
 @pytest.mark.parametrize("ep_size", [1, 2])
@@ -2295,7 +2755,7 @@ def test_registered_megatron_quant_modules_checkpoint_quantizer_state():
     without a class-level ``get/set_extra_state`` silently drops its amax from checkpoints (as
     DSAttention did). Containers whose child linears hold all quantizers are exempt.
     """
-    containers = {MLP, SequentialMLP, TEGroupedMLP}
+    containers = {MLP, SharedExpertMLP, SequentialMLP, TEGroupedMLP}
     base = torch.nn.Module
     missing = []
     for cls, quant_cls in QuantModuleRegistry._registry.items():

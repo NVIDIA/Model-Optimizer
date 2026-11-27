@@ -42,7 +42,12 @@ from megatron.core.utils import unwrap_model
 from torch.distributed.checkpoint import FileSystemReader
 from transformers import AutoConfig, AutoTokenizer
 
+import modelopt.torch.opt as mto
 from modelopt.torch.export.plugins.mcore_common import all_mcore_hf_export_mapping
+from modelopt.torch.opt.plugins.mcore_dist_checkpointing import (
+    _forget_checkpoint_layout,
+    _read_checkpoint_layout,
+)
 from modelopt.torch.utils import print_rank_0, warn_rank_0
 from modelopt.torch.utils.plugins.megatron_layer_specs import (
     hybrid_stack_spec_grouped_mlp,
@@ -320,7 +325,15 @@ def load_modelopt_megatron_checkpoint(
 
     # Restore the ModelOpt state before loading weights.
     # has_modelopt_state / load_modelopt_state resolves the latest iter_* directory
-    if restore_modelopt_state:
+    chunks = unwrap_model(model)
+    if mto.ModeloptStateManager.is_converted(chunks[0]):
+        # Already converted (e.g. loaded into before), which Megatron-Bridge's restore skips: its
+        # modules still read how this checkpoint laid out their state, restoring none of it. The
+        # layout is in the checkpoint's extra state, with or without a modelopt_state.
+        if len(chunks) > 1:
+            raise ValueError("Virtual pipeline parallelism is not supported.")
+        _read_checkpoint_layout(chunks[0], checkpoint_path, prefix="")
+    elif restore_modelopt_state:
         if has_modelopt_state(megatron_path):
             load_modelopt_state(model, megatron_path)
         elif any("_quantizer." in key for key in checkpoint_keys):
@@ -331,5 +344,10 @@ def load_modelopt_megatron_checkpoint(
                 "The state was dropped when the checkpoint was written -- re-run the step that "
                 "produced it."
             )
-    _load_model_weights_from_checkpoint(checkpoint_path, model)
+    try:
+        _load_model_weights_from_checkpoint(checkpoint_path, model)
+    finally:
+        # Also if the load fails: a save then writes the model's own layout, not the checkpoint's.
+        for chunk in chunks:
+            _forget_checkpoint_layout(chunk)
     return model

@@ -166,17 +166,24 @@ class _MegatronMLP(DynamicModule):
         """
         if metadata is None:
             metadata = {}
-        metadata["singleton_local_shards"] = True
+        if self._forces_singleton_local_shards():
+            metadata["singleton_local_shards"] = True
         sharded_state_dict = super().sharded_state_dict(prefix, sharded_offsets, metadata)
         if not self.config.gated_linear_unit:
             return sharded_state_dict
         for k, v in sharded_state_dict.items():
-            if "linear_fc1" in k and any(
-                re.compile(pattern).match(k) for pattern in self._modelopt_state_keys
-            ):
+            if "linear_fc1" in k and self._is_swiglu_state(k, v):
                 sharded_state_dict[k] = megatron_mlp.apply_swiglu_sharded_factory(
                     v,
                     sharded_offsets,
-                    metadata["singleton_local_shards"],
+                    metadata.get("singleton_local_shards", False),
                 )
         return sharded_state_dict
+
+    def _forces_singleton_local_shards(self) -> bool:
+        """Whether to plan with ``singleton_local_shards``, whatever the caller set."""
+        return True
+
+    def _is_swiglu_state(self, key, sharded_tensor) -> bool:
+        """Whether ``linear_fc1`` state ``key`` has gate and up rows, like the weight."""
+        return any(re.compile(pattern).match(key) for pattern in self._modelopt_state_keys)

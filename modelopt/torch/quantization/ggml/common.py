@@ -227,6 +227,89 @@ def pin_packed_weight(
     quantizer._quantizer_cache = None
 
 
+def _pin_shapes(shapes: dict[str, torch.Size], weight: torch.Tensor):
+    """Yield each pin of ``shapes`` (by buffer name) with its shape for ``weight``, and block size."""
+    # Local: the registry imports GGMLFormat from this module.
+    from .registry import GGML_FORMAT_REGISTRY
+
+    for name, shape in shapes.items():
+        if name.startswith(PINNED_IMPORTANCE_PREFIX):
+            yield name, weight.shape[-1:], None
+        elif name.startswith(PINNED_PAYLOAD_PREFIX):
+            format_name = name.removeprefix(PINNED_PAYLOAD_PREFIX)
+            format_name = format_name.removesuffix("_search_scales").removesuffix("_source")
+            block_size = GGML_FORMAT_REGISTRY[format_name].block_size
+            # Block quantization pads the last dimension to whole blocks.
+            blocks = -(-weight.shape[-1] // block_size)
+            # ``[*rows, blocks, ...]``, the payload's block bytes or the source's keys last.
+            yield name, (*weight.shape[:-1], blocks, *shape[weight.dim() :]), block_size
+
+
+def _saved_pins(quantizer) -> tuple[dict[str, torch.Size], tuple | None]:
+    """``quantizer``'s buffer shapes by name and its ``_slices``, or those of its saved state."""
+    if isinstance(quantizer, dict):
+        buffers = quantizer.get("_pytorch_state_metadata", {}).get("buffers", {})
+        shapes = {name: torch.Size(meta["shape"]) for name, meta in buffers.items()}
+        return shapes, quantizer.get("_slices")
+    shapes = {name: b.shape for name, b in quantizer.named_buffers(recurse=False)}
+    return shapes, getattr(quantizer, "_slices", None)
+
+
+def pin_names(quantizer) -> set[str]:
+    """The names of ``quantizer``'s pinned buffers, or those of its saved state."""
+    return {
+        name
+        for name in _saved_pins(quantizer)[0]
+        if name.startswith((PINNED_PAYLOAD_PREFIX, PINNED_IMPORTANCE_PREFIX))
+    }
+
+
+def pins_fit(quantizer, weight: torch.Tensor) -> bool:
+    """Whether ``quantizer``'s pins, or those of its saved modelopt state, have ``weight``'s shape."""
+    shapes, slices = _saved_pins(quantizer)
+    pins = [
+        (shapes[name], shape, block_size) for name, shape, block_size in _pin_shapes(shapes, weight)
+    ]
+    # Pins padded to whole blocks may have as many as another size's: compare the saved columns,
+    # which pins saved without padding fill whole blocks of.
+    columns = slices[-1].stop if slices else None
+    for saved, shape, block_size in pins:
+        if columns is None and block_size:
+            columns = saved[weight.dim() - 1] * block_size
+        if saved != shape:
+            return False
+    return not pins or columns is None or columns == weight.shape[-1]
+
+
+def check_pin_blocks(quantizer, weight: torch.Tensor, *, sharded_blocks: bool) -> None:
+    """Raise if ``quantizer``'s pins (or its saved state's) can't be resharded to ``weight``'s.
+
+    ``sharded_blocks`` says the shards split the blocks (row-parallel layers), which only works
+    without padding.
+    """
+    shapes, _ = _saved_pins(quantizer)
+    for _, _, block_size in _pin_shapes(shapes, weight):
+        if sharded_blocks and block_size and weight.shape[-1] % block_size:
+            raise ValueError(
+                f"GGML pins can't be loaded at another tensor-parallel size: each rank's "
+                f"{weight.shape[-1]} input columns aren't a multiple of the {block_size}-value "
+                "block. Load the checkpoint at the tensor-parallel size it was saved at."
+            )
+
+
+def resize_pins(quantizer, weight: torch.Tensor) -> None:
+    """Shape ``quantizer``'s pins for ``weight``, this rank's shard at the current tensor parallelism.
+
+    Restoring a checkpoint saved at another tensor parallelism gives the pins the saved shard's
+    shape; the sharded checkpoint load that follows fills them with this shard.
+    """
+    buffers = dict(quantizer.named_buffers(recurse=False))
+    for name, shape, _ in _pin_shapes({n: b.shape for n, b in buffers.items()}, weight):
+        if buffers[name].shape != shape:
+            quantizer._set_buffer(name, buffers[name].new_zeros(shape))
+            quantizer._quantizer_cache = None
+
+
 def pinned_packed_weight(quantizer, format_name: str) -> torch.Tensor | None:
     """The ``format_name`` payload pinned to ``quantizer``, if any."""
     return getattr(quantizer, _pin_name(format_name), None)

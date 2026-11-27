@@ -18,11 +18,13 @@
 # TODO: Add unit tests for this plugin
 import copy
 import os
+from functools import partial
 from pathlib import Path
 from typing import Any
 
 import torch
 from megatron.core import dist_checkpointing, mpu
+from megatron.core.dist_checkpointing.mapping import ShardedTensorFactory
 from megatron.core.dist_checkpointing.strategies.common import COMMON_STATE_FNAME
 from megatron.core.dist_checkpointing.strategies.torch import TorchDistLoadShardedStrategy
 from megatron.core.dist_checkpointing.validation import StrictHandling
@@ -135,6 +137,26 @@ def save_sharded_modelopt_state(
     dist_checkpointing.save(modelopt_state, modelopt_checkpoint_name, sharded_strategy)
 
 
+def _load_sharded_extra_state(
+    model: torch.nn.Module, checkpoint_name: str | Path, prefix: str
+) -> dict[str, Any]:
+    """Load the extra state of ``model``'s modules from the checkpoint, by state-dict name."""
+    sharded_state_dict = model.sharded_state_dict(prefix=prefix)
+    # Whether Megatron shards each such module's weight through a factory (e.g. split by component).
+    for name, module in model.named_modules():
+        weight = sharded_state_dict.get(f"{prefix}{name}.weight")
+        if hasattr(module, "modelopt_read_checkpoint_layout") and weight is not None:
+            module._modelopt_weight_factory = isinstance(weight, ShardedTensorFactory)
+    extra_sharded_state_dict = {k: v for k, v in sharded_state_dict.items() if "_extra_state" in k}
+    extra_state_dict = dist_checkpointing.load(
+        extra_sharded_state_dict,
+        checkpoint_name,
+        TorchDistLoadShardedStrategy(),
+        strict=StrictHandling.LOG_UNEXPECTED,
+    )
+    return {k[len(prefix) :]: v for k, v in extra_state_dict.items() if k.startswith(prefix)}
+
+
 def _load_extra_state_from_sharded_checkpoint(
     model: torch.nn.Module,
     checkpoint_name: str | Path,
@@ -157,34 +179,57 @@ def _load_extra_state_from_sharded_checkpoint(
         is set to `True` (was not set before) in megatron-core-0.15.0. This flag affects the
         sharded state_dict format and must be consistent between saving and loading.
     """
-    sharded_state_dict = model.sharded_state_dict(prefix=prefix)
-    extra_sharded_state_dict = {k: v for k, v in sharded_state_dict.items() if "_extra_state" in k}
-    extra_state_dict = dist_checkpointing.load(
-        extra_sharded_state_dict,
-        checkpoint_name,
-        TorchDistLoadShardedStrategy(),
-        strict=StrictHandling.LOG_UNEXPECTED,
-    )
-    extra_state_dict_no_prefix = {}
+    extra_state_dict_no_prefix = _load_sharded_extra_state(model, checkpoint_name, prefix)
 
-    for k, v in extra_state_dict.items():
-        if k.startswith(prefix):
-            extra_state_dict_no_prefix[k[len(prefix) :]] = v
-    model.load_state_dict(extra_state_dict_no_prefix, strict=False)
+    def set_extra_state():
+        model.load_state_dict(extra_state_dict_no_prefix, strict=False)
 
-    # PyTorch load_state_dict calls set_extra_state only when the CLASS overrides it; modelopt registers it at
-    # instance level, so bare output_layer/ColumnParallelLinear is skipped -> saved static amax not applied.
-    # Invoke it explicitly here (idempotent via allow_post_restore).
-    for name, module in model.named_modules():
-        key = f"{name}._extra_state" if name else "_extra_state"
-        if key in extra_state_dict_no_prefix and hasattr(
-            module, "modelopt_set_extra_state_callbacks"
-        ):
-            module.set_extra_state(extra_state_dict_no_prefix[key])
+        # PyTorch load_state_dict calls set_extra_state only when the CLASS overrides it; modelopt registers it at
+        # instance level, so bare output_layer/ColumnParallelLinear is skipped -> saved static amax not applied.
+        # Invoke it explicitly here (idempotent via allow_post_restore).
+        for name, module in model.named_modules():
+            key = f"{name}._extra_state" if name else "_extra_state"
+            if key in extra_state_dict_no_prefix and hasattr(
+                module, "modelopt_set_extra_state_callbacks"
+            ):
+                module.set_extra_state(extra_state_dict_no_prefix[key])
+        for module in model.modules():
+            post_load_extra_state = getattr(module, "modelopt_post_load_extra_state", None)
+            if callable(post_load_extra_state):
+                post_load_extra_state()
+
+    # A module may reject its state (e.g. at another TP size): every rank then raises, so none
+    # enters the weight load alone (e.g. a pipeline stage without that module).
+    dist.all_reduce("ModelOpt's per-module state", set_extra_state, combine=lambda _: None)
+
+
+def _read_checkpoint_layout(model: torch.nn.Module, checkpoint_name: str | Path, prefix: str):
+    """Have a converted model's modules read how the checkpoint laid out their state, loading none."""
+    extra_state_dict = _load_sharded_extra_state(model, checkpoint_name, prefix)
+    readers = []
+
+    def check_layouts():
+        for name, module in model.named_modules():
+            state = extra_state_dict.get(f"{name}._extra_state" if name else "_extra_state")
+            read_layout = getattr(module, "modelopt_read_checkpoint_layout", None)
+            if callable(read_layout) and isinstance(state, torch.Tensor) and state.numel():
+                state = safe_load(state.detach().cpu().numpy().tobytes())
+                read_layout(state, check_only=True)
+                readers.append(partial(read_layout, state))
+
+    # Every rank decodes and checks first, so a failure on any rank leaves every module's layout as
+    # it was, and no rank enters the weight load alone.
+    dist.all_reduce("ModelOpt's per-module state", check_layouts, combine=lambda _: None)
+    for read_layout in readers:
+        read_layout()
+
+
+def _forget_checkpoint_layout(model: torch.nn.Module):
+    """Have ``model``'s modules plan their keys in their own layout again, as after a load."""
     for module in model.modules():
-        post_load_extra_state = getattr(module, "modelopt_post_load_extra_state", None)
-        if callable(post_load_extra_state):
-            post_load_extra_state()
+        forget = getattr(module, "modelopt_forget_checkpoint_layout", None)
+        if callable(forget):
+            forget()
 
 
 def restore_sharded_modelopt_state(
@@ -211,10 +256,12 @@ def restore_sharded_modelopt_state(
 
     modelopt_checkpoint_name = f"{checkpoint_name}/modelopt_state"
 
-    # Early return if the model already has a modelopt_state or the checkpoint does not exist.
-    if not os.path.exists(modelopt_checkpoint_name) or mto.ModeloptStateManager.is_converted(
-        model[0]
-    ):
+    if not os.path.exists(modelopt_checkpoint_name):
+        return
+    if mto.ModeloptStateManager.is_converted(model[0]):
+        # Already restored (e.g. loaded before): its modules only read how this checkpoint laid out
+        # their state, which the keys their sharded_state_dict() requests follow.
+        _read_checkpoint_layout(model[0], checkpoint_name, prefix)
         return
 
     # Loading the common modelopt_state (replicated on all ranks).

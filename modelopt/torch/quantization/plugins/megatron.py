@@ -28,6 +28,7 @@ import megatron.core.parallel_state as mcore_parallel
 import megatron.core.tensor_parallel.layers as megatron_parallel
 import megatron.core.transformer.mlp as megatron_mlp
 import megatron.core.transformer.moe.experts as megatron_moe
+import megatron.core.transformer.moe.shared_experts as megatron_shared_experts
 import torch
 from megatron.core.dist_checkpointing.utils import replace_prefix_for_sharding
 from megatron.core.extensions.transformer_engine import (
@@ -58,7 +59,14 @@ from modelopt.torch.utils.distributed import ParallelState
 
 from ..algorithms import AutoQuantizeGradientSearcher
 from ..conversion import maybe_promote_nvfp4_static_quantizer
-from ..ggml.common import PINNED_IMPORTANCE_PREFIX, PINNED_PAYLOAD_PREFIX
+from ..ggml.common import (
+    PINNED_IMPORTANCE_PREFIX,
+    PINNED_PAYLOAD_PREFIX,
+    check_pin_blocks,
+    pin_names,
+    pins_fit,
+    resize_pins,
+)
 from ..nn import (
     GroupedQuantizer,
     QuantModule,
@@ -211,6 +219,10 @@ def quant_module_get_extra_state(self) -> dict:
             quantizer_state[name] = module.get_modelopt_state()
 
     extra_state["modelopt_quantizer_state"] = quantizer_state
+    # A gated linear_fc1's GGML pins are saved in Megatron's SwiGLU layout (not 0.49.0rc0's).
+    if not getattr(self, "_legacy_ggml_pin_layout", False):
+        # What sharded_state_dict() now writes, also after a failed load of a 0.49.0rc0 checkpoint.
+        extra_state["modelopt_swiglu_ggml_pins"] = True
 
     # Handle real_quantizer_state and q_tensor_state
     extra_state.update(real_quant_module_get_extra_state(self))
@@ -288,6 +300,8 @@ def quant_module_set_extra_state(self, state: Any):
     """
     if state is None or not self.allow_post_restore:
         return
+    # TODO: Drop the 0.49.0rc0 pin layout (sharded like any column-parallel state) in a future release.
+    self._legacy_ggml_pin_layout = "modelopt_swiglu_ggml_pins" not in state
 
     quantizer_state = state.get("modelopt_quantizer_state", None)
 
@@ -527,6 +541,97 @@ class _MegatronParallelLinear(_ParallelLinear):
 
         super()._setup()
 
+    def _weight_quantizer_leaves(self):
+        """Each weight with each of its leaf quantizers and that quantizer's name in this module."""
+        names = {leaf: name for name, leaf in self.named_modules()}
+        return [
+            (weight, leaf, names[leaf])
+            for weight, quantizer in self.iter_weights_for_calibration()
+            for leaf in quantizer.modules()
+            if isinstance(leaf, TensorQuantizer)
+        ]
+
+    def _check_pin_reshard(self, leaves, legacy: bool) -> bool:
+        """Whether ``leaves``' GGML pins were saved at another TP size; raise if they'd load misplaced.
+
+        ``leaves`` pairs each weight with its quantizer, or with the quantizer's saved state;
+        ``legacy`` says the pins are in 0.49.0rc0's layout.
+        """
+        unfit = [
+            (weight, quantizer) for weight, quantizer in leaves if not pins_fit(quantizer, weight)
+        ]
+        if not unfit:
+            return False
+        if isinstance(self.weight_quantizer, GroupedQuantizer):
+            raise NotImplementedError(
+                "GGML pins of grouped experts can't be loaded at another expert "
+                "tensor-parallel size. Load the checkpoint at the size it was saved at."
+            )
+        gated_fc1 = getattr(self, "_modelopt_gated_fc1", False)
+        if gated_fc1 and legacy:
+            raise ValueError(
+                "This checkpoint stores the GGML pins of a gated MLP in ModelOpt 0.49.0rc0's "
+                "layout, which can't be loaded at another tensor-parallel size. Load it at the "
+                "size it was saved at and save it again with this version, which lifts this "
+                "restriction (other TP limits on GGML pins still apply)."
+            )
+        # Pins are sharded plainly, or like a gated linear_fc1's weight; not like one Megatron
+        # splits by component (e.g. a Mamba or GatedDeltaNet in_proj).
+        if getattr(self, "_modelopt_weight_factory", False) and not gated_fc1:
+            raise ValueError(
+                "GGML pins can't be loaded at another tensor-parallel size here: Megatron shards "
+                "this layer's weight by component. Load the checkpoint at the tensor-parallel "
+                "size it was saved at."
+            )
+        for weight, quantizer in unfit:
+            check_pin_blocks(quantizer, weight, sharded_blocks=self._is_row_parallel)
+        return True
+
+    def modelopt_post_restore(self, prefix: str = ""):
+        # GGML pins are restored at the saved shard's shape; the sharded load fills this rank's.
+        leaves = [(weight, leaf) for weight, leaf, _ in self._weight_quantizer_leaves()]
+        if self._check_pin_reshard(leaves, getattr(self, "_legacy_ggml_pin_layout", False)):
+            for weight, leaf in leaves:
+                resize_pins(leaf, weight)
+        super().modelopt_post_restore(prefix=prefix)
+
+    def modelopt_read_checkpoint_layout(self, state: dict, check_only: bool = False):
+        """Read how a checkpoint loaded into this converted module laid out its state.
+
+        With ``check_only``, only raise if this module can't load the checkpoint's state.
+        """
+        legacy = "modelopt_swiglu_ggml_pins" not in state
+        if not check_only:
+            self._legacy_ggml_pin_layout = legacy
+            return
+        saved = state.get("modelopt_quantizer_state") or {}
+        names = {name for _, _, name in self._weight_quantizer_leaves()}
+        # Experts' quantizers are saved per EP rank, so another size may have experts this rank lacks.
+        experts = any(re.fullmatch(r"weight_quantizer\.\d+", name) for name in names)
+        for name, substate in saved.items():
+            if pin_names(substate) and name not in names:
+                if not (experts and re.match(r"weight_quantizer\.\d+", name)):
+                    raise ValueError(
+                        f"This checkpoint has GGML pins in {name}, which this quantized model "
+                        "doesn't have (e.g. it was quantized with another recipe), so they wouldn't "
+                        "load. Load it into a model that isn't quantized yet."
+                    )
+        leaves = []
+        for weight, leaf, name in self._weight_quantizer_leaves():
+            # Saved per EP rank, as in quant_module_set_extra_state.
+            substate = saved.get(name, saved.get(re.sub(r"(weight_quantizer)\.\d+", r"\1.0", name)))
+            if substate is None:
+                continue
+            # The load only fills the pins this module already has.
+            if not pin_names(substate) <= pin_names(leaf):
+                raise ValueError(
+                    "This checkpoint has GGML pins that this quantized model has no buffers for "
+                    "(e.g. its weights were never pinned), so they wouldn't load. Load it into a "
+                    "model that isn't quantized yet, whose restore creates them."
+                )
+            leaves.append((weight, substate))
+        self._check_pin_reshard(leaves, legacy)
+
     def _process_quantizer_amax(self, k, v, quantizer_state_dict):
         if v.ndim == 4:
             quantizer_state_dict[k] = v.squeeze(1).squeeze(-1)
@@ -596,6 +701,14 @@ class _MegatronParallelLinear(_ParallelLinear):
             name = k.split(prefix)[-1] if prefix else k
             state_dict[k] = state_dict[k].view_as(self.state_dict()[name])
         super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
+        # The restore's first load has only the extra state; once the tensors load they are in this
+        # rank's layout, so the next save writes the current one.
+        if any(k.startswith(prefix) and not k.endswith("_extra_state") for k in state_dict):
+            self.modelopt_forget_checkpoint_layout()
+
+    def modelopt_forget_checkpoint_layout(self):
+        """Plan keys in this module's own layout again, as once a checkpoint's tensors load."""
+        self._legacy_ggml_pin_layout = False
 
 
 @QuantModuleRegistry.register(
@@ -678,14 +791,45 @@ class _MegatronRowParallelLinear(_MegatronParallelLinear):
         return shard_axis_dict
 
 
-@QuantModuleRegistry.register({megatron_mlp.MLP: "megatron_MegatronMLP"})
+@QuantModuleRegistry.register(
+    {
+        megatron_mlp.MLP: "megatron_MegatronMLP",
+        # Its own forward keeps it from matching the MLP registration; its linear_fc1 is gated too.
+        megatron_shared_experts.SharedExpertMLP: "megatron_SharedExpertMLP",
+    }
+)
 class _QuantMegatronMLP(_MegatronMLP):
     """Module to support special handling of `linear_fc1` in `sharded_state_dict()` of MCore `MLP`."""
 
     _modelopt_state_keys = [
         r"weight_quantizer\.(\d+\.)*_amax$",
         r"weight_quantizer\.(\d+\.)*_scale$",
+        # GGML pins have the weight's rows, so a gated linear_fc1's split into gate and up rows too.
+        rf".*weight_quantizer\.(\d+\.)*{PINNED_PAYLOAD_PREFIX}\w+$",
     ]
+
+    def _setup(self):
+        super()._setup()
+        # Lets linear_fc1 tell 0.49.0rc0's pin layout apart (see quant_module_set_extra_state).
+        self.linear_fc1._modelopt_gated_fc1 = self.config.gated_linear_unit
+
+    def _is_swiglu_state(self, key, sharded_tensor) -> bool:
+        # 0.49.0rc0 saved a gated linear_fc1's pins like any column-parallel state.
+        if PINNED_PAYLOAD_PREFIX in key and getattr(
+            self.linear_fc1, "_legacy_ggml_pin_layout", False
+        ):
+            return False
+        # A shared expert is registered for its pins: its other state (e.g. LoRA's B) keeps the
+        # layout it was saved in before.
+        if PINNED_PAYLOAD_PREFIX not in key and isinstance(
+            self, megatron_shared_experts.SharedExpertMLP
+        ):
+            return False
+        return super()._is_swiglu_state(key, sharded_tensor)
+
+    def _forces_singleton_local_shards(self) -> bool:
+        # A shared expert plans its other state as unconverted, with the caller's setting.
+        return not isinstance(self, megatron_shared_experts.SharedExpertMLP)
 
 
 class _RealQuantMegatronParallelLinear(RealQuantLinear):
