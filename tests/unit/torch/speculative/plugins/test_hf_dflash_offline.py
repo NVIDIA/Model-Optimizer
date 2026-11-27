@@ -111,9 +111,11 @@ def _context_parallel_parity_job(rank, size, gradient_checkpointing):
     # Ranks seeded apart must still draft the blocks rank 0 samples.
     loss, grads = _loss_and_grads(model, input_ids, features, seed=rank)
 
+    for grad in grads.values():
+        dist.all_reduce(grad)  # the trainer averages gradients over the ranks
+    # Assert only after the last collective, so a failing rank cannot leave its peer waiting.
     torch.testing.assert_close(loss, expected_loss)
     for name, grad in grads.items():
-        dist.all_reduce(grad)  # the trainer averages gradients over the ranks
         torch.testing.assert_close(
             grad / size, expected_grads[name], rtol=1e-4, atol=1e-5, msg=name
         )
@@ -130,7 +132,7 @@ def test_context_parallel_matches_single_rank(cpu_dist_workers, gradient_checkpo
     [
         ("dflash_offline", False, "online training"),
         ("dflash_use_torch_compile", True, "torch_compile"),
-        ("dflash_architecture_config", {"projector_type": "dspark"}, "dspark"),
+        ("dflash_architecture_config", {"projector_type": "dspark", "markov_rank": 8}, "dspark"),
         ("dflash_architecture_config", {"attention_dropout": 0.1}, "attention_dropout"),
     ],
 )
