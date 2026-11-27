@@ -76,6 +76,47 @@ def test_invalid_objective_is_rejected(bad):
         _convert(_tiny_causal_lm(), external_loss=bad)
 
 
+@pytest.mark.parametrize(
+    ("weights", "match"),
+    [
+        ({"external_tvd_alpha": 0.0, "external_ce_alpha": 0.0}, "always 0"),
+        ({"external_tvd_alpha": float("inf")}, "finite"),
+        ({"external_ce_alpha": float("inf")}, "finite"),
+    ],
+)
+def test_tvd_ce_rejects_weights_that_break_the_loss(weights, match):
+    """A zero objective or an infinite loss must fail at configuration, not mid-training."""
+    with pytest.raises(ValueError, match=match):
+        _convert(_tiny_causal_lm(), external_loss="tvd_ce", **weights)
+
+
+@pytest.mark.parametrize(
+    "weights",
+    [
+        {"external_tvd_alpha": 0.0, "external_ce_alpha": 0.1},
+        {"external_tvd_alpha": 0.9, "external_ce_alpha": 0.0},
+    ],
+)
+def test_tvd_ce_accepts_either_term_on_its_own(weights):
+    model = _convert(_tiny_causal_lm(), external_loss="tvd_ce", **weights)
+    assert (model.external_tvd_alpha, model.external_ce_alpha) == (
+        weights["external_tvd_alpha"],
+        weights["external_ce_alpha"],
+    )
+
+
+def test_unused_tvd_ce_weights_are_not_checked_for_other_objectives():
+    _convert(_tiny_causal_lm(), external_loss="tvd", external_tvd_alpha=0.0, external_ce_alpha=0.0)
+
+
+def test_switching_to_tvd_ce_with_zero_weights_is_rejected():
+    config = mtsp.config.ExternalDraftConfig(
+        external_loss="tvd", external_tvd_alpha=0.0, external_ce_alpha=0.0
+    )
+    with pytest.raises(ValueError, match="always 0"):
+        config.external_loss = "tvd_ce"
+
+
 def test_draft_does_not_share_base_parameters():
     """The point of the mode: the draft owns its embeddings and lm_head."""
     draft = _convert(_tiny_causal_lm())
