@@ -16,7 +16,9 @@
 
 """CPU lifecycle and ownership contracts for native IQ scale repair."""
 
+import builtins
 import copy
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -184,3 +186,69 @@ def test_planning_units_keeps_expert_weights_lazy(monkeypatch):
     plan = plan_iq_repair(banks)
     assert materializations == [0, 0]
     assert [len(bindings) for bindings in plan.bindings] == expected
+
+
+def test_iq_plan_refuses_uninspectable_storage():
+    class StorageLessTensor(torch.Tensor):
+        def untyped_storage(self):
+            raise NotImplementedError("No physical storage")
+
+    model = nn.Linear(256, 2, bias=False)
+    mtq.quantize(model, {**_config([_iq("*weight_quantizer", "iq1_s")]), "algorithm": None})
+    model.weight = nn.Parameter(model.weight.as_subclass(StorageLessTensor))
+    with pytest.raises(ValueError, match="cannot inspect physical storage"):
+        plan_iq_repair([model])
+
+
+def _iq_sharded_ownership_job(rank, size):
+    from torch.distributed.device_mesh import init_device_mesh
+    from torch.distributed.fsdp import fully_shard
+    from torch.distributed.tensor import DTensor
+
+    from modelopt.torch.quantization.utils.core_utils import _fsdp2_persistent_parameters
+
+    mesh = init_device_mesh("cpu", (size,))
+    for tied in (False, True):
+        model = nn.Sequential(*(nn.Linear(256, 4, bias=False) for _ in range(2)))
+        mtq.quantize(model, {**_config([_iq("*weight_quantizer", "iq1_s")]), "algorithm": None})
+        if tied:
+            model[1].weight = model[0].weight
+        model[0].weight.requires_grad_(False)
+        fully_shard(model, mesh=mesh)
+        persistent = _fsdp2_persistent_parameters(model)
+        assert all(isinstance(persistent[owner, "weight"], DTensor) for owner in model)
+        if tied:
+            assert persistent[model[0], "weight"] is persistent[model[1], "weight"]
+            with pytest.raises(ValueError, match=r"ownership|storage"):
+                plan_iq_repair([model[0]], root_model=model)
+        else:
+            plan = plan_iq_repair(list(model), root_model=model)
+            for index, owner in enumerate(model):
+                flags = [
+                    entry for entry in plan.parameter_flags[index] if entry[:2] == (owner, "weight")
+                ]
+                assert len(flags) == 1
+                assert flags[0][2] is persistent[owner, "weight"]
+                assert flags[0][3] is (index != 0)
+
+
+def test_iq_plan_inspects_persistent_shards_and_shared_registrations(cpu_dist_workers):
+    cpu_dist_workers.run(_iq_sharded_ownership_job)
+
+
+def test_iq_resident_nonoffload_hook_needs_no_optional_offload_plugin(monkeypatch):
+    model = nn.Linear(256, 2, bias=False)
+    mtq.quantize(model, {**_config([_iq("weight_quantizer", "iq1_s")]), "algorithm": None})
+    model._hf_hook = SimpleNamespace(offload=False)
+    original_import = builtins.__import__
+
+    def without_offload_plugin(name, *args, **kwargs):
+        if name.endswith("plugins.accelerate"):
+            raise ImportError("Optional offload dependencies are unavailable")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", without_offload_plugin)
+    original = model.weight
+    plan = plan_iq_repair([model])
+    assert len(plan.bindings[0]) == 1
+    assert model.weight is original and model.weight.requires_grad

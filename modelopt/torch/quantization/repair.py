@@ -15,7 +15,7 @@
 
 """Internal native IQ repair adapters for :func:`modelopt.torch.distill.bypass`."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from itertools import chain
 
 import torch
@@ -32,9 +32,7 @@ __all__: list[str] = []
 @dataclass(frozen=True)
 class _WeightBinding:
     module: QuantModule
-    index: int
     quantizer: TensorQuantizer
-    name: str
 
 
 @dataclass(frozen=True)
@@ -46,8 +44,6 @@ class IQRepairPlan:
     parameter_flags: tuple[tuple[tuple[nn.Module, str, nn.Parameter, bool], ...], ...]
     calibration_flags: dict[TensorQuantizer, bool]
     gemm_flags: dict[nn.Module, tuple[bool, bool]]
-    _layouts: dict = field(default_factory=dict, repr=False, compare=False)
-    _users: dict = field(default_factory=dict, repr=False, compare=False)
 
 
 def _iq_quantizer(container):
@@ -102,14 +98,18 @@ def _storage_span(tensor):
         tensor = tensor.to_local()
     if tensor.is_meta or not tensor.numel():
         return None
-    start = tensor.untyped_storage().data_ptr() + tensor.storage_offset() * tensor.element_size()
-    size = (
-        1
-        + sum(
-            (n - 1) * abs(stride) for n, stride in zip(tensor.shape, tensor.stride(), strict=True)
-        )
-    ) * tensor.element_size()
-    return tensor.device, start, start + size
+    try:
+        address = tensor.untyped_storage().data_ptr()
+    except NotImplementedError as exc:
+        raise ValueError("IQ repair cannot inspect physical storage for this layout") from exc
+    offsets = [(n - 1) * stride for n, stride in zip(tensor.shape, tensor.stride(), strict=True)]
+    start = tensor.storage_offset() + sum(min(0, offset) for offset in offsets)
+    stop = tensor.storage_offset() + sum(max(0, offset) for offset in offsets) + 1
+    return (
+        tensor.device,
+        address + start * tensor.element_size(),
+        address + stop * tensor.element_size(),
+    )
 
 
 def _storage_spans(tensor):
@@ -151,11 +151,19 @@ def _validate_ownership(units, plans):
     seen_modules = set()
     for unit in units:
         backings, slots = {}, {}
-        if any(hasattr(module, "_hf_hook") for module in unit.modules()):
-            # Accelerate is optional; its shared CPU backings outlive meta placeholders.
+        hooks = [getattr(module, "_hf_hook", None) for module in unit.modules()]
+        while hooks:
+            hook = hooks.pop()
+            hooks.extend(getattr(hook, "hooks", ()))
+            if getattr(hook, "weights_map", None) is None or not (
+                getattr(hook, "offload", False) or hasattr(hook, "original_devices")
+            ):
+                continue
+            # Import the optional adapter only for an initialized offload backing owner.
             from .plugins.accelerate import _offloaded_tensor_backings
 
             backings, slots = _offloaded_tensor_backings(unit)
+            break
         for _, module in unit.named_modules(remove_duplicate=False):
             seen_modules.add(module)
             if id(module) in quantizers:
@@ -213,7 +221,7 @@ def plan_iq_repair(units, *, root_model=None):
     """
     units = tuple(units)
     plans, seen_quantizers = [], set()
-    for unit_index, unit in enumerate(units):
+    for unit in units:
         bindings = []
         routers = _router_paths(unit)
         for path, module in unit.named_modules(remove_duplicate=False):
@@ -221,7 +229,7 @@ def plan_iq_repair(units, *, root_model=None):
                 path == router or path.startswith(router + ".") for router in routers
             )
             containers = module.iter_weight_quantizers_for_calibration() if eligible else ()
-            for index, container in enumerate(containers):
+            for container in containers:
                 quantizer = _iq_quantizer(container)
                 if quantizer is None:
                     continue
@@ -231,9 +239,7 @@ def plan_iq_repair(units, *, root_model=None):
                 if hasattr(quantizer, "_local_repair_state"):
                     raise ValueError("An IQ repair operation is already active")
                 seen_quantizers.add(id(quantizer))
-                bindings.append(
-                    _WeightBinding(module, index, quantizer, f"{unit_index}.{path}.{index}")
-                )
+                bindings.append(_WeightBinding(module, quantizer))
         if not bindings:
             raise ValueError("A selected Bypass boundary has no enabled native IQ weights")
         plans.append(tuple(bindings))

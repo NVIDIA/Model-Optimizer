@@ -1292,6 +1292,7 @@ def test_weight_access_rollback_checks_backing_aliases_before_body(alias_kind):
         "custom_dict",
         "conflicting_hooks",
         "same_backing_hooks",
+        "sequential_shared_slot",
         "resident_shared_slot",
         "resident_shared_slot_missing",
         "resident_shared_backing",
@@ -1387,6 +1388,13 @@ def test_iq_plan_checks_resident_offload_mapping_backings(mapping_mode, monkeypa
         )
         if mapping_mode.startswith("resident_"):
             owner.weight = nn.Parameter(resident_values[index])
+    if mapping_mode == "sequential_shared_slot":
+        # The first hook is independent; the second publishes through the frozen owner.
+        from accelerate.hooks import SequentialHook
+
+        hidden = AlignDevicesHook(execution_device="cpu", offload=True, weights_map=mappings[1])
+        hidden.original_devices = {"weight": torch.device("cpu")}
+        model[0]._hf_hook = SequentialHook(model[0]._hf_hook, SequentialHook(hidden))
     if mapping_mode == "resident_shared_slot_missing":
         del mappings[0]["weight"]
     active = mapping_mode.startswith("active_")
