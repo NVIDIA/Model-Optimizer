@@ -498,7 +498,12 @@ def _plain_tp_owner_worker(rank, size, layout):
     replays = []
     handle = student.mlp.register_forward_pre_hook(lambda *args: replays.append(True))
     try:
-        with bounded_collectives(10), pytest.raises(ValueError):
+        with (
+            bounded_collectives(10),
+            pytest.raises(
+                ValueError, match="Plain TP boundary output from a directly distributed owner"
+            ),
+        ):
             mtd.bypass(
                 student,
                 teacher,
@@ -635,7 +640,12 @@ def _hf_plain_projection_worker(rank, size, style):
                 name: (value.to_local() if isinstance(value, DTensor) else value).clone()
                 for name, value in student.state_dict().items()
             }
-            with bounded_collectives(10), pytest.raises(ValueError):
+            diagnostic = (
+                "Unsupported native TP boundary output style"
+                if style == "local_params"
+                else "TP boundary output declaration conflicts with target ownership"
+            )
+            with bounded_collectives(10), pytest.raises(ValueError, match=diagnostic):
                 mtd.bypass(student, teacher, [batch], config, device_mesh=mesh)
             for name, value in student.state_dict().items():
                 local = value.to_local() if isinstance(value, DTensor) else value
@@ -954,6 +964,22 @@ def _unequal_documents_worker(rank, size, padding_failure=False):
         teacher.seen.clear()
         runtime = DistributedBypassRuntime(adapter.context, config)
         local = {key: value[rank : rank + 1] for key, value in batch.items()}
+        if padding_failure == "head_setup":
+
+            def embeddings():
+                if rank == 1:
+                    raise OSError("output-head setup failure")
+
+            with (
+                bounded_collectives(10),
+                patch.object(teacher, "get_input_embeddings", embeddings, create=True),
+                pytest.raises(ValueError, match="output-head setup failure") as refusal,
+            ):
+                adapter.teacher_microbatch(teacher, units, local, lambda *_: None)
+            errors = [None] * size
+            dist.all_gather_object(errors, str(refusal.value), group=mesh.get_group())
+            assert len(set(errors)) == 1 and not teacher.seen
+            return
         if padding_failure:
             original_zeros = torch.zeros_like
 
@@ -1005,17 +1031,13 @@ def _unequal_documents_worker(rank, size, padding_failure=False):
 
 
 @pytest.mark.timeout(180)
-@pytest.mark.parametrize("padding_failure", [False, True])
+@pytest.mark.parametrize("padding_failure", [False, True, "head_setup"])
 def test_unequal_document_slots_have_zero_contribution(bypass_cpu_workers, padding_failure):
     pytest.importorskip("transformers", minversion="5.23")
     bypass_cpu_workers.run(_unequal_documents_worker, padding_failure)
 
 
 def _asymmetric_gradient_schedule_worker(rank, size, mismatch):
-    from torch.distributed.device_mesh import init_device_mesh
-
-    from modelopt.torch.distill._bypass_parallel import BypassMeshContext
-    from modelopt.torch.distill._bypass_runtime import DistributedBypassRuntime
 
     mesh = init_device_mesh("cpu", (size,), mesh_dim_names=("dp",))
     runtime = DistributedBypassRuntime(
@@ -1036,9 +1058,6 @@ def test_gradient_schedule_asymmetry_is_refused_before_reductions(bypass_cpu_wor
 
 
 def _unique_batch_worker(rank, size, axis, unequal):
-    from torch.distributed.device_mesh import init_device_mesh
-
-    from modelopt.torch.distill._bypass_optimizer import Lion
 
     torch.manual_seed(67)
     teacher = torch.nn.Sequential(
@@ -1097,8 +1116,6 @@ def _unique_batch_worker(rank, size, axis, unequal):
     expected_gradients = gradients[:]
     gradients.clear()
     if axis == "fsdp":
-        from torch.distributed.fsdp import fully_shard
-
         for model in (student, teacher):
             fully_shard(model.mlp, mesh=mesh)
             fully_shard(model.moe, mesh=mesh)
@@ -1168,8 +1185,6 @@ def test_distributed_bypass_matches_unique_batch(bypass_cpu_workers, axis, unequ
 
 
 def _validation_refusal_worker(rank, size, problem):
-    from _test_utils.torch.distributed.utils import bounded_collectives
-    from torch.distributed.device_mesh import init_device_mesh
 
     group = dist.new_group(timeout=timedelta(seconds=10))
 
@@ -1218,10 +1233,14 @@ def _validation_refusal_worker(rank, size, problem):
         mtd.bypass(reference, copy.deepcopy(teacher), [batch], recipe, device_mesh=mesh)
         before = copy.deepcopy(reference.state_dict())
     student.fail_lookup = problem == "resolve" and rank == 1
+    mutations = []
     if problem == "finalization_format" and rank == 1:
-        student.mlp.register_forward_hook(
-            lambda module, args, output: setattr(module.weight_quantizer, "num_bits", "iq1_s")
-        )
+
+        def change_format(module, args, output):
+            mutations.append(True)
+            module.weight_quantizer.num_bits = "iq1_s"
+
+        student.mlp.register_forward_hook(change_format)
 
     class Validation:
         def __iter__(self):
@@ -1259,6 +1278,9 @@ def _validation_refusal_worker(rank, size, problem):
                 validation_dataloader=validation,
                 device_mesh=mesh,
             )
+        if problem == "finalization_format":
+            assert "native IQ format changed during repair" in str(refusal.value)
+            assert bool(mutations) == (rank == 1)
         if problem in ("global_batch", "finalization_format", "train_mask", "validation_mask"):
             errors = [None] * size
             dist.all_gather_object(errors, str(refusal.value), group=group)
@@ -1296,7 +1318,7 @@ def test_distributed_bypass_refuses_unequal_validation(bypass_cpu_workers, probl
 
 
 def _native_geometry_preflight_worker(rank, size):
-    from torch.distributed.device_mesh import init_device_mesh
+    # This worker targets optional Transformers 5.23 TP/EP interfaces.
     from torch.distributed.tensor.placement_types import _StridedShard
     from transformers import Qwen3MoeConfig
     from transformers.distributed.expert_parallel import MoEParamShard
@@ -1533,7 +1555,6 @@ def test_native_packed_tp_preserves_codes_projection_and_input_vjp(
 @pytest.mark.timeout(60)
 def test_native_mesh_adoption_preserves_forward_and_hooks(tmp_path, format_name):
     pytest.importorskip("transformers", minversion="5.23")
-    from torch.distributed.device_mesh import init_device_mesh
     from transformers import LlamaConfig, LlamaForCausalLM
     from transformers.distributed.utils import TransformersDeviceMesh
 
@@ -1649,11 +1670,8 @@ def test_native_mesh_adoption_preserves_forward_and_hooks(tmp_path, format_name)
 
 def _native_projection_worker(rank, size, frozen_format, layout=None):
     from _test_utils.transformers_families import build_model, cases
-    from torch.distributed.device_mesh import init_device_mesh
-    from torch.distributed.tensor import DTensor
     from transformers.distributed.utils import TransformersDeviceMesh
 
-    from modelopt.torch.distill._bypass_runtime import DistributedBypassRuntime
     from modelopt.torch.distill.plugins.transformers import TransformersBypassAdapter
 
     assert size == 4
@@ -1814,8 +1832,6 @@ def test_native_owner_updates_match_reference(native_workers, layout, frozen_for
 
 
 def _native_ep_transport_policy_worker(rank, size):
-    from torch.distributed.device_mesh import init_device_mesh
-    from torch.distributed.tensor import DTensor
     from transformers import Qwen3MoeConfig, Qwen3MoeForCausalLM
     from transformers.distributed.configuration_utils import DistributedConfig
     from transformers.distributed.expert_parallel import AllReduceEP, AllToAllEP

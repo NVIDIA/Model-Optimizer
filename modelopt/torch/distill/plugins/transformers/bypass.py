@@ -18,6 +18,7 @@
 import importlib
 import inspect
 import weakref
+from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from importlib.metadata import PackageNotFoundError, version
 
@@ -678,7 +679,17 @@ class TransformersBypassAdapter(ModuleBypassAdapter):
             error = f"{type(exc).__name__}: {exc}"
         self._synchronize_error(error)
         slots = _all_rank_max(self.context, len(documents))
-        with bypass_head_context(teacher, units, facts.head, head_paths=facts.head_paths):
+        with ExitStack() as stack:
+            error = None
+            try:
+                stack.enter_context(
+                    bypass_head_context(teacher, units, facts.head, head_paths=facts.head_paths)
+                )
+            except Exception as exc:
+                if self.context is None or self.context.device_mesh.size() == 1:
+                    raise
+                error = f"{type(exc).__name__}: {exc}"
+            self._synchronize_error(error)
             for index in range(slots):
                 document, error = None, None
                 try:
