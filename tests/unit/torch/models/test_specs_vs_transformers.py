@@ -187,6 +187,11 @@ def test_modelopt_moe_blocks_resolve_from_local_port(model_type):
     if _installed_version() < Version(spec.min_transformers_version):
         pytest.skip(f"needs transformers >= {spec.min_transformers_version}")
     port = importlib.import_module(f"modelopt.torch.models.{model_type}")
+    # Internal MoE blocks need not be public exports; resolve inside the local model's modules.
+    modules = {port}
+    for name in port.__all__:
+        obj = getattr(port, name)
+        if isinstance(obj, type):
+            modules.add(importlib.import_module(obj.__module__))
     for name in spec.moe_spec.block_names:
-        cls = getattr(port, name)
-        assert isinstance(cls, type)
+        assert any(isinstance(getattr(module, name, None), type) for module in modules), name
