@@ -24,6 +24,7 @@ import tempfile
 import lief
 import onnx
 import onnx_graphsurgeon as gs
+from onnxruntime.capi._pybind_state import get_all_operator_schema
 
 from modelopt.onnx.logging_config import logger
 from modelopt.onnx.utils import (
@@ -42,6 +43,30 @@ except ImportError:
     TRT_PYTHON_AVAILABLE = False
 
 MAX_IR_VERSION = 10
+
+
+class _TensorRTUnavailableError(RuntimeError):
+    """TensorRT bindings are installed but its builder cannot initialize."""
+
+
+def _has_only_standard_onnx_ops(model: onnx.ModelProto) -> bool:
+    # ORT's native registry is independent of caller-registered ONNX schemas.
+    standard_ops = {
+        (schema.domain, schema.name)
+        for schema in get_all_operator_schema()
+        if schema.domain in ("", "ai.onnx.ml")
+    }
+    graphs = [model.graph]
+    while graphs:
+        for node in graphs.pop().node:
+            if (node.domain, node.op_type) not in standard_ops:
+                return False
+            graphs.extend(
+                attribute.g
+                for attribute in node.attribute
+                if attribute.type == onnx.AttributeProto.GRAPH
+            )
+    return True
 
 
 def _is_static_plugin(plugin_path: str) -> bool:
@@ -144,7 +169,12 @@ def get_custom_layers(
             _load_trt_plugin(plugin, registry)
 
         logger.debug(f"Total registered plugin creators: {len(registry.all_creators)}")
-    builder = trt.Builder(trt_logger)
+    try:
+        builder = trt.Builder(trt_logger)
+    except (TypeError, RuntimeError) as e:
+        raise _TensorRTUnavailableError(
+            "TensorRT custom-layer inspection requires a usable CUDA device and TensorRT runtime."
+        ) from e
     network = (
         builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
         if strongly_typed
@@ -418,9 +448,20 @@ def load_onnx_model(
     if TRT_PYTHON_AVAILABLE and platform.system() != "Windows":
         # Check if there's a custom TensorRT op in the ONNX model. If so, make it ORT compatible by adding
         # `trt.plugins to the ONNX graph.
-        custom_layers, all_tensor_info = get_custom_layers(
-            static_shaped_onnx_path or onnx_path, trt_plugins
-        )
+        try:
+            custom_layers, all_tensor_info = get_custom_layers(
+                static_shaped_onnx_path or onnx_path, trt_plugins
+            )
+        except _TensorRTUnavailableError as e:
+            if trt_plugins:
+                raise
+            if not _has_only_standard_onnx_ops(onnx_model):
+                raise _TensorRTUnavailableError(
+                    "Cannot inspect custom ONNX operators without a usable TensorRT runtime "
+                    "and CUDA device for plugin discovery."
+                ) from e
+            logger.warning("%s Continuing with standard ONNX operators.", e)
+            custom_layers, all_tensor_info = [], {}
         has_custom_op = bool(custom_layers)
 
         if has_custom_op:

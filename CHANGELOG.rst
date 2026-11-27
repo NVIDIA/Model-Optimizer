@@ -60,6 +60,7 @@ Changelog
 - Fix ``--dq_only`` ONNX export producing a model that ONNX Runtime cannot load when the weights are quantized to an unsigned type. Such exports now load and match the source model.
 - Fix blocked INT4 ONNX exports using the wrong dequantization axis for transposed weights, which prevented TensorRT and ONNX Runtime from executing affected models. Re-export affected models.
 - Fix ONNX INT4 AWQ-Lite computing per-block weight scales from the wrong rows, which skewed the scale search. Re-run AWQ-Lite quantization on affected models.
+- ONNX PTQ can use CPU calibration when TensorRT is installed but cannot initialize a CUDA device. Models requiring TensorRT plugins still require a usable TensorRT runtime.
 
 *Speculative Decoding*
 
