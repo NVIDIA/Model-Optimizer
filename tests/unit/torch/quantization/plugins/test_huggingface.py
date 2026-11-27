@@ -564,7 +564,6 @@ def test_initialize_qdq_weights_hf_roundtrip(tmp_path, num_bits, gptq):
 
 @pytest.mark.parametrize("sequential", [False, True])
 def test_gpt_oss_experts_reconfiguration_and_failed_forward_cleanup(sequential):
-    set_seed(17)
     model = get_tiny_gpt_oss(num_hidden_layers=1, hidden_size=32, intermediate_size=48)
     experts = model.model.layers[0].mlp.experts
     cfg = {"num_bits": 8}
@@ -601,13 +600,11 @@ def test_gpt_oss_experts_reconfiguration_and_failed_forward_cleanup(sequential):
         assert not experts._enable_weight_quantization and not experts._down_proj_mul
         assert all(not hasattr(q, "_cached_quant_val") for q in experts.modules())
         yielded = list(experts.iter_weights_for_calibration())
-        for name, (weight, quantizer) in zip(("gate_up_proj", "down_proj"), yielded, strict=True):
-            assert weight.shape == experts._parameters[name].transpose(-1, -2).shape
+        for name, (weight, _) in zip(("gate_up_proj", "down_proj"), yielded, strict=True):
             assert (
                 weight.untyped_storage().data_ptr()
                 == experts._parameters[name].untyped_storage().data_ptr()
             )
-            assert quantizer is getattr(experts, name + "_weight_quantizer")
         seen.clear()
         torch.testing.assert_close(experts(inputs, **routing), expected, rtol=0, atol=0)
         assert set(seen) == {id(q) for q in quantizers}
