@@ -1166,6 +1166,18 @@ def _apply_transpose_perm_to_shape(shape, perm):
     return [shape[i] for i in perm]
 
 
+def _graph_names(graph: gs.Graph) -> set[str]:
+    """Return the tensor and node names used in ``graph`` and in all of its nested subgraphs."""
+    names = set(graph.tensors().keys()) | {node.name for node in graph.nodes if node.name}
+    for node in graph.nodes:
+        for attr in node.attrs.values():
+            subgraphs = attr if isinstance(attr, (list, tuple)) else [attr]
+            for subgraph in subgraphs:
+                if isinstance(subgraph, gs.Graph):
+                    names |= _graph_names(subgraph)
+    return names
+
+
 def insert_transpose_nodes_for_column_major(
     graph: gs.Graph, weight_names: Iterable[str] | None = None
 ):
@@ -1189,8 +1201,9 @@ def insert_transpose_nodes_for_column_major(
     dq_outputs = None if weight_names is None else {_dq_out_name(w) for w in weight_names}
     # One Transpose per DQ output tensor, shared by every MatMul/Gemm(transB=0) that reads it.
     transposed_outputs: dict[str, gs.Variable] = {}
-    # New tensor and node names must not shadow anything already in the graph.
-    used_names = set(graph.tensors().keys()) | {n.name for n in graph.nodes if n.name}
+    # New tensor and node names must not shadow anything already in the graph, including the
+    # subgraphs of If/Loop/Scan nodes, which may not redefine a name from an enclosing graph.
+    used_names = _graph_names(graph)
 
     def _unique_name(base: str) -> str:
         name, i = base, 1

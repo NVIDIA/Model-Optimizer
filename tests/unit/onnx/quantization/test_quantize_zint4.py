@@ -315,6 +315,44 @@ def test_column_major_gemm_no_trans_b(tmp_path, calibration_method, use_zero_poi
     assert np.abs(y - ref).max() / np.abs(ref).max() < 0.1
 
 
+@pytest.mark.parametrize("use_zero_point", [False, True])
+@pytest.mark.parametrize("op", ["Gemm", "MatMul"])
+def test_column_major_awq_lite_graph_input_pre_quant_scale(tmp_path, op, use_zero_point):
+    # When a graph input feeds the MatMul/Gemm directly, AWQ Lite's inverse pre-quant scale (a
+    # Mul on the activation) is matched on the DQ -> MatMul edge, so it has to go in before the
+    # column-major Transpose. Input channels with very different ranges give a nontrivial scale.
+    rng = np.random.default_rng(0)
+    w = rng.standard_normal((32, 48)).astype(np.float32)  # [K, N]
+    x = (rng.standard_normal((16, 32)) * np.logspace(-1, 1, 32)[None, :]).astype(np.float32)
+    gx = gs.Variable("x", dtype=np.float32, shape=x.shape)
+    gy = gs.Variable("y", dtype=np.float32, shape=(16, 48))
+    attrs = {"transB": 0} if op == "Gemm" else {}
+    node = gs.Node(op, "mm", inputs=[gx, gs.Constant("w", w)], outputs=[gy], attrs=attrs)
+    onnx_path = os.path.join(tmp_path, "mm.onnx")
+    save_onnx(gs.export_onnx(gs.Graph([node], inputs=[gx], outputs=[gy], opset=21)), onnx_path)
+
+    outputs = {}
+    for use_column_major in (False, True):
+        model = quantize_int4(
+            onnx_path,
+            "awq_lite",
+            [{"x": x}],
+            block_size=8,
+            use_zero_point=use_zero_point,
+            use_external_data_format=False,
+            use_column_major=use_column_major,
+        )
+        assert any(n.op_type == "Mul" for n in model.graph.node), "expected a pre-quant scale"
+        session = ort.InferenceSession(
+            model.SerializeToString(), providers=["CPUExecutionProvider"]
+        )
+        outputs[use_column_major] = session.run(None, {"x": x})[0].astype(np.float32)
+
+    ref = x @ w
+    assert np.abs(outputs[False] - ref).max() / np.abs(ref).max() < 0.1
+    np.testing.assert_allclose(outputs[True], outputs[False], rtol=1e-3, atol=1e-3)
+
+
 @pytest.mark.parametrize("calibration_method", ["awq_clip", "rtn_dq"])
 @pytest.mark.parametrize("op", ["Gemm", "MatMul"])
 def test_column_major_shared_weight(tmp_path, calibration_method, op):
@@ -641,3 +679,51 @@ def test_column_major_transpose_skips_other_dq_nodes():
     )
     for y, ref in zip(session.run(None, {"x": x}), refs):
         np.testing.assert_allclose(y, ref, rtol=1e-5, atol=1e-5)
+
+
+def test_column_major_transpose_name_avoids_subgraph_names():
+    # A name defined inside an If branch may not be redefined in the enclosing graph (ONNX SSA),
+    # so the new Transpose output must not reuse one.
+    taken = f"{qdq_utils._dq_out_name('w')}_transposed_back"
+    x = gs.Variable("x", dtype=np.float32, shape=(4, 8))
+    cond = gs.Variable("cond", dtype=np.bool_, shape=())
+    w_dq_out = gs.Variable(qdq_utils._dq_out_name("w"), dtype=np.float32, shape=(8, 8))
+    dq = gs.Node(
+        "DequantizeLinear",
+        "",
+        inputs=[
+            gs.Constant("wq", np.eye(8, dtype=np.int8)),
+            gs.Constant("ws", np.array(1, np.float32)),
+        ],
+        outputs=[w_dq_out],
+    )
+    mm_out = gs.Variable("mm_out", dtype=np.float32, shape=(4, 8))
+    mm = gs.Node("MatMul", "mm", inputs=[x, w_dq_out], outputs=[mm_out])
+
+    def branch(name):
+        local = gs.Variable(taken, dtype=np.float32, shape=(4, 8))
+        out = gs.Variable(f"{name}_out", dtype=np.float32, shape=(4, 8))
+        nodes = [
+            gs.Node("Identity", f"{name}_id", inputs=[mm_out], outputs=[local]),
+            gs.Node("Identity", f"{name}_out_id", inputs=[local], outputs=[out]),
+        ]
+        return gs.Graph(nodes, inputs=[], outputs=[out], name=name)
+
+    y = gs.Variable("y", dtype=np.float32, shape=(4, 8))
+    if_node = gs.Node(
+        "If",
+        "if",
+        inputs=[cond],
+        outputs=[y],
+        attrs={"then_branch": branch("then"), "else_branch": branch("else")},
+    )
+    graph = gs.Graph([dq, mm, if_node], inputs=[x, cond], outputs=[y], opset=21)
+
+    qdq_utils.insert_transpose_nodes_for_column_major(graph, ["w"])
+
+    transposes = [node for node in graph.nodes if node.op == "Transpose"]
+    assert len(transposes) == 1
+    assert transposes[0].outputs[0].name != taken
+    model = gs.export_onnx(graph)
+    model.ir_version = 10
+    onnx.checker.check_model(model, full_check=True)

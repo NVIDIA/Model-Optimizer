@@ -1442,9 +1442,6 @@ def _quantize_awq_lite(
             transposed_weights=transposed_weights,
             column_major=use_column_major,
         )
-        # Add transpose nodes for column-major if needed
-        if use_column_major:
-            qdq.insert_transpose_nodes_for_column_major(graph_gs, gemm_weights_quantized)
         if gather_w_map is not None:
             assert gather_s_map is not None, "scale-map not found for quantizable gather nodes"
             assert not use_zero_point or gather_zp_map, (
@@ -1464,6 +1461,10 @@ def _quantize_awq_lite(
             )
         if pre_quant_scale:
             qdq.insert_pre_quant_scale_nodes(graph_gs, input_tensors, pre_quant_scale)
+        # The pre-quant scale Muls are matched on the DQ -> MatMul/Gemm edge, so the column-major
+        # Transpose goes in only after them.
+        if use_column_major:
+            qdq.insert_transpose_nodes_for_column_major(graph_gs, gemm_weights_quantized)
 
         logger.info(f"Inserting nodes took {time.time() - t} seconds")
 
