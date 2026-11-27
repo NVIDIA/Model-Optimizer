@@ -150,6 +150,7 @@ class GraphSanitizer:
                 in custom_layer_names
             }
 
+            inputs = list(self.model.graph.input)
             # Set TensorRT plugin domain info in the graph for ORT compatibility
             if self.trt_plugin_ops:
                 self.model = set_trt_plugin_domain(self.model, self.trt_plugin_ops)
@@ -158,12 +159,19 @@ class GraphSanitizer:
             self.model = infer_types_shapes_tensorrt(
                 self.model, self.trt_plugins, all_tensor_info=all_tensor_info
             )
+            self.model.graph.ClearField("input")
+            self.model.graph.input.extend(inputs)
 
     def remove_disconnected_outputs(self) -> None:
         """Remove disconnected outputs from the model."""
+        source_names = {
+            value.name for value in (*self.model.graph.input, *self.model.graph.initializer)
+        }
         tensors_to_remove = []
         for tensor in self.model.graph.output:
-            if not onnx_utils.get_producer_nodes(self.model, tensor.name):
+            if tensor.name not in source_names and not onnx_utils.get_producer_nodes(
+                self.model, tensor.name
+            ):
                 tensors_to_remove.append(tensor)
                 logger.debug(f"Found disconnected output: {tensor.name}")
 
@@ -639,9 +647,13 @@ class GraphSanitizer:
 
     def cleanup_model(self) -> None:
         """Use GraphSurgeon to cleanup unused nodes, tensors and initializers."""
+        inputs = list(self.model.graph.input)
         gs_graph = gs.import_onnx(self.model)
         gs_graph.cleanup()
         self.model = onnx_utils.export_onnx(gs_graph)
+        # GraphSurgeon omits initializer-backed inputs, which remain runtime-overridable.
+        self.model.graph.ClearField("input")
+        self.model.graph.input.extend(inputs)
 
     def replace_custom_domain_nodes(self):
         """Replace custom domain nodes with standard ONNX nodes."""

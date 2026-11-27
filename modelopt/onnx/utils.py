@@ -604,11 +604,16 @@ def duplicate_shared_constants(onnx_model: onnx.ModelProto) -> tuple[onnx.ModelP
     """Duplicate constant tensors if they are shared."""
     graph = onnx_model.graph
     initializers = {initializer.name: initializer for initializer in graph.initializer}
-    use_counts = dict.fromkeys(initializers, 0)
+    # Initializers exposed as inputs are runtime-overridable, not constants.
+    graph_inputs = {value.name for value in graph.input}
+    use_counts = dict.fromkeys(initializers.keys() - graph_inputs, 0)
     for node in graph.node:
         for input_name in node.input:
             if input_name in use_counts:
                 use_counts[input_name] += 1
+    for output in graph.output:
+        if output.name in use_counts:
+            use_counts[output.name] += 1
 
     shared_names = {name for name, count in use_counts.items() if count > 1}
     if not shared_names:

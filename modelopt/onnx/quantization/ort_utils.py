@@ -63,6 +63,33 @@ def _run_trtexec_command(
         ) from e
 
 
+def _parse_trtexec_version(version_str: str) -> str | None:
+    """Extract a major.minor[.patch] TensorRT version string from ``trtexec`` output."""
+    match = re.search(
+        r"TensorRT(?:\s+version)?\s*[:=]\s*(\d+(?:\.\d+)+)",
+        version_str,
+        flags=re.IGNORECASE,
+    )
+    if match:
+        return match.group(1)
+
+    match = re.search(r"\[TensorRT v(\d{6,8})\]", version_str)
+    if match and len(vnum := match.group(1)) >= 4:
+        return f"{int(vnum[0:2])}.{int(vnum[2:4])}"
+    return None
+
+
+def _get_trtexec_version() -> str | None:
+    """Return the TensorRT version reported by ``trtexec`` in ``PATH``, or ``None`` if unavailable."""
+    if shutil.which("trtexec") is None:
+        return None
+    try:
+        result = _run_trtexec_command(["--help"], timeout=5)
+    except (subprocess.SubprocessError, FileNotFoundError):
+        return None
+    return _parse_trtexec_version(result.stdout + result.stderr)
+
+
 def _check_for_trtexec(min_version: str = "10.0") -> str:
     """Check if the `trtexec` CLI tool is available in PATH and is >= min_version.
 
@@ -75,29 +102,6 @@ def _check_for_trtexec(min_version: str = "10.0") -> str:
     Raises:
         ImportError: If `trtexec` is not found or the version is too low.
     """
-
-    def _parse_version_from_string(version_str: str) -> str | None:
-        # Try canonical TensorRT x.x.x.x strings first
-        match = re.search(
-            r"TensorRT(?:\s+version)?\s*[:=]\s*(\d+(?:\.\d+)+)",
-            version_str,
-            flags=re.IGNORECASE,
-        )
-        if match:
-            return match.group(1)
-
-        # Fallback: look for "[TensorRT v101502]" pattern and convert to "10.15"
-        match = re.search(r"\[TensorRT v(\d{6,8})\]", version_str)
-        if match:
-            vnum = match.group(1)
-            # Use only major and minor, e.g., v101502 -> 10.15
-            if len(vnum) >= 4:
-                major = int(vnum[0:2])
-                minor = int(vnum[2:4])
-                return f"{major}.{minor}"
-            return None
-        return None
-
     trtexec_path = shutil.which("trtexec")
     if trtexec_path is None:
         logger.error("trtexec executable not found in PATH.")
@@ -108,7 +112,7 @@ def _check_for_trtexec(min_version: str = "10.0") -> str:
     try:
         result = _run_trtexec_command(timeout=5)
         banner_output = result.stdout + result.stderr
-        parsed_version = _parse_version_from_string(banner_output)
+        parsed_version = _parse_trtexec_version(banner_output)
 
         if not parsed_version:
             raise ValueError("Could not parse version from trtexec output.")

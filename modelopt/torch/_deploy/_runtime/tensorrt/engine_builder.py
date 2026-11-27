@@ -20,6 +20,13 @@ import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory, mkdtemp
 
+import onnx
+import tensorrt as trt
+
+from modelopt.onnx.autocast.convert import convert_to_f16
+from modelopt.onnx.quantization.ort_utils import _get_trtexec_version
+from modelopt.onnx.utils import check_model_uses_external_data, save_onnx
+
 from ..._runtime.common import read_bytes, timeit, write_bytes, write_string
 from ..._runtime.tensorrt.layerwise_profiling import process_layerwise_result
 from ...utils import OnnxBytes
@@ -147,6 +154,27 @@ def _default_artifact_dir() -> Path:
     return Path(mkdtemp(prefix="modelopt_trt_"))
 
 
+@functools.cache
+def _trtexec_major_version() -> int | None:
+    version_str = _get_trtexec_version()
+    return int(version_str.split(".", maxsplit=1)[0]) if version_str else None
+
+
+def _resolve_trt11_mode(plugin_config: dict | None = None) -> bool:
+    py_major = int(trt.__version__.split(".", maxsplit=1)[0])
+    cli_major = _trtexec_major_version()
+    has_plugins = bool(
+        plugin_config
+        and (plugin_config.get("staticPlugins") or plugin_config.get("dynamicPlugins"))
+    )
+    if has_plugins and cli_major is not None and cli_major != py_major:
+        raise ValueError(
+            f"Mismatched TensorRT major versions for plugin build: Python tensorrt is "
+            f"{py_major}.x ({trt.__version__}) while 'trtexec' in PATH is {cli_major}.x."
+        )
+    return (cli_major if cli_major is not None else py_major) >= 11
+
+
 def _artifact_dir(output_dir: Path | None) -> Path:
     """Return ``output_dir`` (created if missing), or this process's private temporary directory."""
     if not output_dir:
@@ -208,11 +236,31 @@ def build_engine(
             use, not removed at exit).
         verbose: Set trtexec command to verbose or not.
 
+    For TensorRT 11, FP16/BF16 precision is encoded in the graph while preserving I/O types.
+    Quantized graphs must be prepared offline and built with ``stronglyTyped``.
+
+    Raises:
+        ValueError: TensorRT 11 is given an implicit quantization mode or a calibration cache.
+
     Returns:
         The generated engine file data.
         The stdout log produced by trtexec tool. \
             [If there is subprocess.CalledProcessError, this byte variable is transferred to str]
     """
+
+    trt11 = _resolve_trt11_mode(plugin_config)
+    mode_flags = TRT_MODE_FLAGS[trt_mode]
+    if trt11:
+        if (
+            trt_mode
+            not in [TRTMode.FLOAT32, TRTMode.FLOAT16, TRTMode.BFLOAT16, TRTMode.STRONGLY_TYPED]
+            or calib_cache is not None
+        ):
+            raise ValueError(
+                "TensorRT 11 requires explicit ONNX precision. Quantize the model offline "
+                "and use precision='stronglyTyped' without a calibration cache."
+            )
+        mode_flags = []
 
     def _build_command(
         onnx_path: Path,
@@ -221,7 +269,7 @@ def build_engine(
         timing_cache_path: Path | None = None,
     ) -> list[str]:
         cmd = [f"--onnx={onnx_path}"]
-        cmd.extend(TRT_MODE_FLAGS[trt_mode])
+        cmd.extend(mode_flags)
 
         if trt_mode == TRTMode.INT8 and calib_cache and calib_cache_path:
             write_string(calib_cache, calib_cache_path)
@@ -251,6 +299,19 @@ def build_engine(
         tmp_onnx_dir = tmp_dir_path / "onnx"
         onnx_bytes.write_to_disk(str(tmp_onnx_dir))
         onnx_path = tmp_onnx_dir / f"{onnx_bytes.model_name}.onnx"
+        if trt11 and trt_mode in [TRTMode.FLOAT16, TRTMode.BFLOAT16]:
+            # TRT 11 takes precision from the graph, while callers still expect unchanged I/O types.
+            plugins = plugin_config or {}
+            model = onnx.load(str(onnx_path), load_external_data=False)
+            external_data = check_model_uses_external_data(model)
+            onnx.external_data_helper.load_external_data_for_model(model, str(tmp_onnx_dir))
+            model = convert_to_f16(
+                model,
+                low_precision_type=trt_mode,
+                keep_io_types=True,
+                trt_plugins=plugins.get("staticPlugins", []) + plugins.get("dynamicPlugins", []),
+            )
+            save_onnx(model, str(onnx_path), save_as_external_data=external_data)
 
         final_output_dir = _artifact_dir(output_dir)
         engine_path = (

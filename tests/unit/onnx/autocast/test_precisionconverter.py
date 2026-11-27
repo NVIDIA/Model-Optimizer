@@ -258,13 +258,18 @@ def test_unsupported_precision_type(simple_model, low_precision_type):
         )
 
 
+@pytest.mark.parametrize("overridable", [False, True])
 @pytest.mark.parametrize("keep_io_types", [True, False])
 @pytest.mark.parametrize("low_precision_type", ["fp16", "bf16"])
 @pytest.mark.parametrize("use_standalone_type_inference", [True, False])
 def test_convert_no_disabled_nodes(
-    simple_model, keep_io_types, low_precision_type, use_standalone_type_inference
+    simple_model, keep_io_types, low_precision_type, use_standalone_type_inference, overridable
 ):
     model, value_info_map, initializer_map, node_to_init_map = simple_model
+    if overridable:
+        model.graph.input.append(
+            helper.make_tensor_value_info("gemm_init", TensorProto.FLOAT, [5, 3])
+        )
     converter = PrecisionConverter(
         model,
         value_info_map,
@@ -286,10 +291,17 @@ def test_convert_no_disabled_nodes(
     )
     assert converted_model.graph.input[0].type.tensor_type.elem_type == expected_io_type
     assert converted_model.graph.output[0].type.tensor_type.elem_type == expected_io_type
+    if overridable:
+        assert converted_model.graph.input[1].name == "gemm_init"
+        assert converted_model.graph.input[1].type.tensor_type.elem_type == expected_io_type
+        assert (
+            next(t for t in converted_model.graph.initializer if t.name == "gemm_init").data_type
+            == expected_io_type
+        )
 
     # Verify cast nodes were added only for keep_io_types=True
     cast_nodes = [n for n in converted_model.graph.node if n.op_type == "Cast"]
-    expected_cast_nodes = 2 if keep_io_types else 0
+    expected_cast_nodes = 2 + int(overridable) if keep_io_types else 0
     assert len(cast_nodes) == expected_cast_nodes
 
     # Verify that the model is valid
