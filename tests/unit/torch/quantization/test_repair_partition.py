@@ -32,6 +32,7 @@ from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.quantization.qtensor import FP8QTensor, NVFP4QTensor
 from modelopt.torch.quantization.repair_partition import (
     NativeWeightPartition,
+    activation_partition,
     native_tp_weight_view,
     native_weight_partition,
     validate_native_weight_partition,
@@ -458,7 +459,8 @@ def test_native_tp_view_respects_physical_weight_ownership(
 
 @pytest.mark.parametrize("rank", [0, 1])
 @pytest.mark.parametrize("quantizing", [False, True])
-def test_colwise_output_refuses_rank_local_calibration(rank, quantizing):
+@pytest.mark.parametrize("style", ["colwise_output", "rowwise_input"])
+def test_tp_refuses_rank_local_calibration(rank, quantizing, style):
     quantizer = TensorQuantizer(QuantizerAttributeConfig(num_bits=8, axis=None))
     quantizer.amax = torch.tensor(8.0)
     if not quantizing:
@@ -469,8 +471,9 @@ def test_colwise_output_refuses_rank_local_calibration(rank, quantizing):
     quantizer(torch.tensor([1.0 if rank == 0 else 8.0]))
     quantizer.load_calib_amax()
     assert quantizer.amax.item() == (1.0 if rank == 0 else 8.0)
-    view = NativeWeightPartition((4, 16), 0, rank, 2)
+    view = NativeWeightPartition((4, 16), int(style == "rowwise_input"), rank, 2)
+    validate = validate_tp_output_quantizer if style == "colwise_output" else activation_partition
     with pytest.raises(ValueError, match=r"calibration.*disabled"):
-        validate_tp_output_quantizer(quantizer, view)
+        validate(quantizer, view)
     quantizer.disable_calib()
-    validate_tp_output_quantizer(quantizer, view)
+    validate(quantizer, view)

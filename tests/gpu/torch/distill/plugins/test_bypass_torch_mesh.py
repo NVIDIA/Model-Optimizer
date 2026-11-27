@@ -1042,3 +1042,30 @@ def _activation_state_resume_worker(rank, size, static):
 def test_activation_runtime_state_resume(bypass_cpu_workers, static):
     pytest.importorskip("transformers", minversion="5.23")
     bypass_cpu_workers.run(_activation_state_resume_worker, static)
+
+
+def _singleton_mesh_adoption_worker(rank, size):
+    # Transformers is optional and workers import this module before the test's skip check.
+    from modelopt.torch.distill.plugins.transformers import TransformersBypassAdapter
+
+    groups = [dist.new_group([i], timeout=timedelta(seconds=10)) for i in range(size)]
+    mesh = DeviceMesh.from_group(groups[rank], "cpu", mesh_dim_names=("tp",))
+    other = DeviceMesh.from_group(groups[rank], "cpu", mesh_dim_names=("tp",))
+    assert mesh is not other
+    adapter, different = TransformersBypassAdapter(mesh), TransformersBypassAdapter(other)
+    model = torch.nn.Linear(2, 2)
+    expected = model(torch.ones(1, 2)).detach()
+    assert different.adopt(model) is None
+    assert not hasattr(model, "_modelopt_bypass_torch_mesh")
+    adapter.parallelize(model)
+    assert adapter.adopt(model) is None
+    with pytest.raises(ValueError, match="exact caller-owned mesh"):
+        different.adopt(model)
+    assert model._modelopt_bypass_torch_mesh is mesh
+    torch.testing.assert_close(model(torch.ones(1, 2)), expected, rtol=0, atol=0)
+
+
+@pytest.mark.timeout(60)
+def test_singleton_mesh_adoption_requires_exact_prepared_mesh(bypass_cpu_workers):
+    pytest.importorskip("transformers", minversion="5.23")
+    bypass_cpu_workers.run(_singleton_mesh_adoption_worker)

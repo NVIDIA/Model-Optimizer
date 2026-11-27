@@ -166,9 +166,8 @@ class TransformersBypassAdapter(ModuleBypassAdapter):
         if self.context.mesh_manager is not None:
             if not getattr(model, "_mesh_manager", None) and self.context.device_mesh.size() > 1:
                 error = "Prepare IQ placement with TransformersBypassAdapter.parallelize first"
-        elif (
-            getattr(model, "_modelopt_bypass_torch_mesh", None) is not self.device_mesh
-            and self.context.device_mesh.size() > 1
+        elif getattr(model, "_modelopt_bypass_torch_mesh", None) is not self.device_mesh and (
+            hasattr(model, "_modelopt_bypass_torch_mesh") or self.context.device_mesh.size() > 1
         ):
             error = "Already placed Torch models must use their exact caller-owned mesh"
         _synchronize_validation(self.context, error)
