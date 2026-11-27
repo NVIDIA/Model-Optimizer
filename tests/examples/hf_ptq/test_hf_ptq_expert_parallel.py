@@ -295,11 +295,11 @@ def test_a_tensorrt_llm_checkpoint_export_needs_a_single_process(
     ],
     ids=["weights", "then_kv_cache"],
 )
-def test_an_auto_quantize_recipe_runs_on_the_routes_this_script_adds(
+def test_an_auto_quantize_recipe_is_admitted_on_the_routes_this_script_adds(
     hf_ptq, monkeypatch, torchrun, world_size, env, use_fsdp2, recipe
 ):
     """Every rank scores its own calibration shard and AutoQuantize sums the scores over the ranks,
-    so an AutoQuantize recipe, with a KV-cache search or without, runs on every route."""
+    so every route admits an AutoQuantize recipe, with a KV-cache search or without."""
     for name, value in env.items():
         monkeypatch.setenv(name, value)
     _serve(monkeypatch, hf_ptq, _deepseek_v3(n_routed_experts=8))
