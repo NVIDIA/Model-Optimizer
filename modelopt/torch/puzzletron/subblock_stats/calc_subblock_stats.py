@@ -39,6 +39,7 @@ from ..block_config import AttentionConfig, BlockConfig, FFNConfig, SubblockConf
 from ..replacement_library.replacement_utils import parse_layer_replacement
 from ..tools.checkpoint_utils import load_model_config
 from ..tools.logger import mprint
+from ..utils.misc import get_attention_head_dim
 from ..utils.parsing import format_global_config
 from .calc_subblock_params_and_memory import (
     calc_subblock_active_params,
@@ -132,6 +133,7 @@ def calculate_subblock_stats(
             prefill_seq_len=prefill_seq_len,
             generation_seq_len=generation_seq_len,
             batch_size=batch_size,
+            head_dim=get_attention_head_dim(descriptor.get_language_model_config(model_config)),
         )
 
     sorted_subblock_config = sorted(
