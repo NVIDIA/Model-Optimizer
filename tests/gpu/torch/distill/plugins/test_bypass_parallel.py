@@ -1155,7 +1155,8 @@ def _validation_refusal_worker(rank, size, problem):
     group = dist.new_group(timeout=timedelta(seconds=10))
 
     class CollectiveTeacher(torch.nn.Sequential):
-        def forward(self, inputs):
+        def forward(self, inputs=None, hidden_states=None):
+            inputs = hidden_states if inputs is None else inputs
             inputs = inputs.clone()
             dist.all_reduce(inputs, group=group)
             return super().forward(inputs / size)
@@ -1187,13 +1188,13 @@ def _validation_refusal_worker(rank, size, problem):
     axis = "dp" if problem == "global_batch" else "cp"
     mesh = (
         _runtime_mesh(axis)
-        if problem == "finalization_format"
+        if problem in ("finalization_format", "train_mask", "validation_mask")
         else init_device_mesh("cpu", (size,), mesh_dim_names=(axis,))
     )
     recipe = {"num_steps": 1, "global_batch_size": 2, "sequence_length": 4}
     if problem == "global_batch" and rank == 0:
         recipe["global_batch_size"] = 1
-    if problem in ("iterator", "length", "advance", "microbatches"):
+    if problem in ("iterator", "length", "advance", "microbatches", "validation_mask"):
         reference = copy.deepcopy(student)
         mtd.bypass(reference, copy.deepcopy(teacher), [batch], recipe, device_mesh=mesh)
         before = copy.deepcopy(reference.state_dict())
@@ -1210,7 +1211,10 @@ def _validation_refusal_worker(rank, size, problem):
             return self.read()
 
         def read(self):
-            yield batch[:1] if problem == "microbatches" and rank == 1 else batch
+            if problem == "validation_mask" and rank == 1:
+                yield {"hidden_states": batch, "valid_mask": torch.ones(1, 4, dtype=torch.bool)}
+            else:
+                yield batch[:1] if problem == "microbatches" and rank == 1 else batch
             if problem == "advance" and rank == 1:
                 raise OSError("validation reader failure")
             if problem != "length" or rank == 0:
@@ -1220,7 +1224,10 @@ def _validation_refusal_worker(rank, size, problem):
         def __iter__(self):
             if problem == "train_advance" and rank == 1:
                 raise RuntimeError()
-            yield batch
+            if problem == "train_mask" and rank == 1:
+                yield {"hidden_states": batch, "valid_mask": torch.ones(1, 4, dtype=torch.bool)}
+            else:
+                yield batch
 
     validation = None if problem == "presence" and rank == 1 else Validation()
     try:
@@ -1233,7 +1240,7 @@ def _validation_refusal_worker(rank, size, problem):
                 validation_dataloader=validation,
                 device_mesh=mesh,
             )
-        if problem in ("global_batch", "finalization_format"):
+        if problem in ("global_batch", "finalization_format", "train_mask", "validation_mask"):
             errors = [None] * size
             dist.all_gather_object(errors, str(refusal.value), group=group)
             assert len(set(errors)) == 1
@@ -1256,6 +1263,8 @@ def _validation_refusal_worker(rank, size, problem):
         "resolve",
         "global_batch",
         "finalization_format",
+        "train_mask",
+        "validation_mask",
     ],
 )
 def test_distributed_bypass_refuses_unequal_validation(bypass_cpu_workers, problem):
