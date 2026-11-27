@@ -49,6 +49,110 @@ from modelopt.torch.quantization.qtensor import FP8QTensor, QTensorWrapper
 from modelopt.torch.quantization.utils.native_weight import pin_native_weight
 
 
+class _Gain(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.register_buffer("gain", torch.tensor(1.0), persistent=False)
+
+    def forward(self, value):
+        return value * self.gain
+
+
+def test_checkpoint_refuses_changed_nonpersistent_execution_buffer(tmp_path):
+    student, teacher, batches = bypass_problem(activation_factory=_Gain)
+    config = mtd.BypassConfig(
+        num_steps=1, global_batch_size=2, sequence_length=3, checkpoint_dir=str(tmp_path)
+    )
+    checkpoint = BypassCheckpoint(student, teacher, config, dataloader=batches, devices=[])
+    checkpoint.save(1, fields={}, optimizers={}, data_position={}, rng_state=_rng_state([]))
+    assert checkpoint.load(str(tmp_path))[0] == 1
+    teacher.activation.gain.fill_(2)
+    changed = BypassCheckpoint(student, teacher, config, dataloader=batches, devices=[])
+    with pytest.raises(ValueError, match="identity"):
+        changed.load(str(tmp_path))
+
+
+@pytest.mark.parametrize("pointer", ["", ".."])
+def test_checkpoint_refuses_reserved_latest_pointer(tmp_path, pointer):
+    student, teacher, batches = bypass_problem()
+    config = mtd.BypassConfig(
+        num_steps=1, global_batch_size=2, sequence_length=3, checkpoint_dir=str(tmp_path)
+    )
+    checkpoint = BypassCheckpoint(student, teacher, config, dataloader=batches, devices=[])
+    (tmp_path / "latest").write_text(pointer)
+    with pytest.raises(ValueError, match=r"Invalid Bypass.*pointer"):
+        checkpoint.save(1, fields={}, optimizers={}, data_position={}, rng_state=_rng_state([]))
+    with pytest.raises(ValueError, match=r"Invalid Bypass.*pointer"):
+        checkpoint.load(str(tmp_path))
+
+
+def test_checkpoint_requires_directory_sync_before_training(tmp_path, monkeypatch):
+    student, teacher, batches = bypass_problem()
+    monkeypatch.delattr(os, "O_DIRECTORY", raising=False)
+    with (
+        mock.patch.object(
+            ModuleBypassAdapter, "teacher_microbatch", side_effect=AssertionError("teacher ran")
+        ),
+        pytest.raises(ValueError, match="directory sync"),
+    ):
+        mtd.bypass(
+            student,
+            teacher,
+            batches,
+            {
+                "num_steps": 1,
+                "global_batch_size": 2,
+                "sequence_length": 3,
+                "checkpoint_dir": str(tmp_path),
+            },
+        )
+    assert not list(tmp_path.iterdir())
+
+
+def test_checkpoint_first_save_syncs_new_ancestor_entries(tmp_path):
+    from modelopt.torch.distill import _bypass_checkpoint as checkpoint_module
+
+    student, teacher, batches = bypass_problem()
+    root = tmp_path / "new-parent" / "checkpoints"
+    config = mtd.BypassConfig(
+        num_steps=1, global_batch_size=2, sequence_length=3, checkpoint_dir=str(root)
+    )
+    checkpoint = BypassCheckpoint(student, teacher, config, dataloader=batches, devices=[])
+    with mock.patch.object(
+        checkpoint_module, "_sync_directory", wraps=checkpoint_module._sync_directory
+    ) as sync:
+        checkpoint.save(1, fields={}, optimizers={}, data_position={}, rng_state=_rng_state([]))
+    paths = [call.args[0] for call in sync.call_args_list]
+    assert tmp_path in paths and root.parent in paths
+    assert checkpoint.load(str(root))[0] == 1
+
+
+def test_checkpoint_refuses_unsafe_initial_loader_cursor(tmp_path):
+    class UnsafeCursor(_StatefulCursor):
+        def state_dict(self):
+            return {"position": self.position, "permutation": np.arange(len(self.batches))}
+
+    student, teacher, batches = bypass_problem()
+    with (
+        mock.patch.object(
+            ModuleBypassAdapter, "teacher_microbatch", side_effect=AssertionError("teacher ran")
+        ),
+        pytest.raises(ValueError, match=r"[Ww]eights only|[Ww]eights-only"),
+    ):
+        mtd.bypass(
+            student,
+            teacher,
+            UnsafeCursor(batches),
+            {
+                "num_steps": 1,
+                "global_batch_size": 2,
+                "sequence_length": 3,
+                "checkpoint_dir": str(tmp_path),
+            },
+        )
+    assert not list(tmp_path.iterdir())
+
+
 def test_checkpoint_refuses_changed_cuda_rng_scope(tmp_path):
     student, teacher, batches = bypass_problem()
     config = mtd.BypassConfig(
@@ -78,13 +182,19 @@ def test_non_distributed_resume_refuses_cuda_device_move(tmp_path):
     target = copy.deepcopy(teacher).to("cuda:1")
     before = copy.deepcopy(moved.state_dict())
     caller_rng = _rng_state([0, 1])
-    with pytest.raises(ValueError, match="identity"):
+    with (
+        mock.patch("modelopt.torch.distill._bypass_runner.tree_map") as priming_transfer,
+        mock.patch("modelopt.torch.distill._bypass_runner._restore_rng_state") as restore_rng,
+        pytest.raises(ValueError, match="identity"),
+    ):
         mtd.bypass(
             moved,
             target,
             [batches[0].to("cuda:1")],
             {**config, "resume_from": str(tmp_path)},
         )
+    priming_transfer.assert_not_called()
+    restore_rng.assert_not_called()
     _equal(moved.state_dict(), before)
     _equal(_rng_state([0, 1]), caller_rng)
 
@@ -351,6 +461,16 @@ def test_bypass_resume_matches_uninterrupted(tmp_path, monkeypatch, caplog, stat
                         {**recipe, "resume_from": str(root), "checkpoint_dir": str(root)},
                     )
             current, committed = _committed(root)
+            reader = BypassCheckpoint(
+                fresh_student(),
+                copy.deepcopy(teacher),
+                mtd.BypassConfig(**recipe, resume_from=str(root)),
+                dataloader=cursor(batches),
+                devices=[],
+            )
+            verified_step, verified = reader.load(str(root))
+            assert verified_step == (4 if phase in ("after_latest", "retirement") else 2)
+            _equal(verified, committed)
             assert foreign.read_text() == "untouched"
             assert (root / incomplete.name).exists()
             assert not list(root.glob(".pending-step-*"))
@@ -828,6 +948,65 @@ def _native_resume_worker(rank, size, directory):
     assert peak <= 10 * 1024**2  # Existing 8-MiB hash chunks plus 2 MiB allocator slack.
     del probe
     gc.collect()
+    recipe = {
+        "num_steps": 2,
+        "global_batch_size": 8,
+        "sequence_length": 8,
+        "warmup_fraction": 0.5,
+        "checkpoint_interval": 1,
+    }
+    reference, teacher, local, mesh = _native_checkpoint_problem(rank, size)
+    mtd.bypass(
+        reference,
+        teacher,
+        local,
+        {**recipe, "checkpoint_dir": str(root / "reference")},
+        device_mesh=mesh,
+    )
+    student, teacher, local, mesh = _native_checkpoint_problem(rank, size)
+    with pytest.raises(ValueError):
+        mtd.bypass(
+            student,
+            teacher,
+            _NativeInterrupted(local, 4) if rank == 1 else local,
+            {**recipe, "checkpoint_dir": str(root / "resumed")},
+            device_mesh=mesh,
+        )
+    student, teacher, local, mesh = _native_checkpoint_problem(rank, size)
+
+    def frozen_down_projections():
+        return {
+            name: (value.to_local() if hasattr(value, "to_local") else value).detach().clone()
+            for name, value in student.state_dict().items()
+            if "experts.down_proj" in name and isinstance(value, torch.Tensor)
+        }
+
+    frozen = frozen_down_projections()
+    assert frozen and any("quantizer" in name for name in frozen)
+    assert any("quantizer" not in name for name in frozen)
+    mtd.bypass(
+        student,
+        teacher,
+        local,
+        {**recipe, "checkpoint_dir": str(root / "resumed"), "resume_from": str(root / "resumed")},
+        device_mesh=mesh,
+    )
+    _equal(frozen_down_projections(), frozen)
+    _, expected = _committed(root / "reference", size=size, rank=rank)
+    _, actual = _committed(root / "resumed", size=size, rank=rank)
+    assert expected["fields"]
+    assert any(value.count_nonzero() for value in expected["fields"].values())
+    for key in ("fields", "optimizers", "rng_state", "data_position"):
+        _equal(actual[key], expected[key])
+    for name, module in student.named_modules():
+        if getattr(module, "backend", None) == "ggml":
+            reference_module = reference.get_submodule(name)
+            _equal(module.state_dict(), reference_module.state_dict())
+
+
+def _native_pair_identity_worker(rank, size, directory):
+    root = Path(directory)
+    torch.cuda.set_device(rank)
     # Real 2.147B-parameter frozen pair, assembled one layer at a time so the
     # constructor stages one BF16 matrix rather than an uncompressed student.
     construction_started = time.perf_counter()
@@ -876,8 +1055,8 @@ def _native_resume_worker(rank, size, directory):
             "hash_length": len(identity),
         }
         assert peak <= 10 * 1024**2
-    measurement_path = root / f"native-identity-{rank}.json"
-    measurements = json.loads(measurement_path.read_text())
+    measurement_path = root / f"native-pair-identity-{rank}.json"
+    measurements = {}
     measurements["native_checkpoint_pair_identity"] = {
         "rank": rank,
         "layers_per_model": 64,
@@ -896,48 +1075,16 @@ def _native_resume_worker(rank, size, directory):
     measurement_path.write_text(json.dumps(measurements))
     del pair, layer, model
     gc.collect()
-    recipe = {
-        "num_steps": 2,
-        "global_batch_size": 8,
-        "sequence_length": 8,
-        "warmup_fraction": 0.5,
-        "checkpoint_interval": 1,
-    }
-    reference, teacher, local, mesh = _native_checkpoint_problem(rank, size)
-    mtd.bypass(
-        reference,
-        teacher,
-        local,
-        {**recipe, "checkpoint_dir": str(root / "reference")},
-        device_mesh=mesh,
-    )
-    student, teacher, local, mesh = _native_checkpoint_problem(rank, size)
-    with pytest.raises(ValueError):
-        mtd.bypass(
-            student,
-            teacher,
-            _NativeInterrupted(local, 4) if rank == 1 else local,
-            {**recipe, "checkpoint_dir": str(root / "resumed")},
-            device_mesh=mesh,
-        )
-    student, teacher, local, mesh = _native_checkpoint_problem(rank, size)
-    mtd.bypass(
-        student,
-        teacher,
-        local,
-        {**recipe, "checkpoint_dir": str(root / "resumed"), "resume_from": str(root / "resumed")},
-        device_mesh=mesh,
-    )
-    _, expected = _committed(root / "reference", size=size, rank=rank)
-    _, actual = _committed(root / "resumed", size=size, rank=rank)
-    assert expected["fields"]
-    assert any(value.count_nonzero() for value in expected["fields"].values())
-    for key in ("fields", "optimizers", "rng_state", "data_position"):
-        _equal(actual[key], expected[key])
-    for name, module in student.named_modules():
-        if getattr(module, "backend", None) == "ggml":
-            reference_module = reference.get_submodule(name)
-            _equal(module.state_dict(), reference_module.state_dict())
+
+
+@pytest.mark.manual
+@pytest.mark.parametrize("native_workers", [2, 4], indirect=True, ids=["fsdp2", "fsdp2_tp2_ep4"])
+@pytest.mark.timeout(300)
+def test_large_native_checkpoint_identity_measurement(native_workers, tmp_path, capsys):
+    native_workers.run(_native_pair_identity_worker, str(tmp_path))
+    with capsys.disabled():
+        for rank in range(native_workers.world_size):
+            print((tmp_path / f"native-pair-identity-{rank}.json").read_text(), flush=True)
 
 
 @pytest.mark.parametrize("native_workers", [2, 4], indirect=True, ids=["fsdp2", "fsdp2_tp2_ep4"])
