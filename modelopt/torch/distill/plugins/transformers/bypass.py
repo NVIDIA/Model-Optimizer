@@ -680,7 +680,14 @@ class TransformersBypassAdapter(ModuleBypassAdapter):
         slots = _all_rank_max(self.context, len(documents))
         with bypass_head_context(teacher, units, facts.head, head_paths=facts.head_paths):
             for index in range(slots):
-                document = (
-                    documents[index] if index < len(documents) else empty_document_batch(batch)
-                )
+                document, error = None, None
+                try:
+                    document = (
+                        documents[index] if index < len(documents) else empty_document_batch(batch)
+                    )
+                except Exception as exc:
+                    if self.context is None or self.context.device_mesh.size() == 1:
+                        raise
+                    error = f"{type(exc).__name__}: {exc}"
+                self._synchronize_error(error)
                 self._document_teacher(teacher, units, document, consume)

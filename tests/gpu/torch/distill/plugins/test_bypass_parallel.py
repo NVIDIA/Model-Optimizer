@@ -869,7 +869,7 @@ class _DocumentTeacher(torch.nn.Module):
         return self.mlp(hidden)
 
 
-def _unequal_documents_worker(rank, size):
+def _unequal_documents_worker(rank, size, padding_failure=False):
     # Optional Transformers integration must not gate the generic Torch workers.
     from modelopt.torch.distill.plugins.transformers import TransformersBypassAdapter
 
@@ -954,6 +954,24 @@ def _unequal_documents_worker(rank, size):
         teacher.seen.clear()
         runtime = DistributedBypassRuntime(adapter.context, config)
         local = {key: value[rank : rank + 1] for key, value in batch.items()}
+        if padding_failure:
+            original_zeros = torch.zeros_like
+
+            def fail_padding(value, *args, **kwargs):
+                if rank == 1 and value.shape == (1, 1) and value.dtype == tokens.dtype:
+                    raise torch.OutOfMemoryError("Simulated padded document allocation failure")
+                return original_zeros(value, *args, **kwargs)
+
+            with (
+                bounded_collectives(10),
+                patch.object(torch, "zeros_like", fail_padding),
+                pytest.raises(ValueError, match="padded document allocation") as refusal,
+            ):
+                adapter.teacher_microbatch(teacher, units, local, lambda *_: None)
+            errors = [None] * size
+            dist.all_gather_object(errors, str(refusal.value), group=mesh.get_group())
+            assert len(set(errors)) == 1 and len(teacher.seen) == 1
+            return
         objects = []
         original_gather = dist.all_gather_object
 
@@ -987,9 +1005,10 @@ def _unequal_documents_worker(rank, size):
 
 
 @pytest.mark.timeout(180)
-def test_unequal_document_slots_have_zero_contribution(bypass_cpu_workers):
+@pytest.mark.parametrize("padding_failure", [False, True])
+def test_unequal_document_slots_have_zero_contribution(bypass_cpu_workers, padding_failure):
     pytest.importorskip("transformers", minversion="5.23")
-    bypass_cpu_workers.run(_unequal_documents_worker)
+    bypass_cpu_workers.run(_unequal_documents_worker, padding_failure)
 
 
 def _asymmetric_gradient_schedule_worker(rank, size, mismatch):
