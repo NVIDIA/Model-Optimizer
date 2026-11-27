@@ -50,6 +50,7 @@ def test_offline_dflash_context_parallel(tiny_llama_path, tmp_path, num_gpus):
             "training.training_seq_len=128",
             "training.answer_only_loss=false",
             "training.cp_size=2",
+            "training.tf32=false",  # the recipe's tf32 needs Ampere or newer
             "dflash.dflash_mask_token_id=0",
             "dflash.dflash_architecture_config.num_hidden_layers=1",
         ],
