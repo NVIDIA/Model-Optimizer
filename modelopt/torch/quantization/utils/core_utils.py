@@ -547,6 +547,7 @@ _FSDP2_OWNED_PARAMS: "weakref.WeakKeyDictionary[nn.Module, dict[int, weakref.ref
 _FSDP2_OWNED_MODULES: "weakref.WeakKeyDictionary[nn.Module, weakref.WeakSet[nn.Module]]" = (
     weakref.WeakKeyDictionary()
 )
+_FSDP2_ACTIVE_PARAMS: list[dict[int, weakref.ref]] = []
 
 
 def _fsdp2_owned_modules(fsdp_module: FSDPModule, groups=None):
@@ -615,9 +616,11 @@ def fsdp2_weight_access_and_writeback_context(
     parameters FSDP2 manages are gathered: a DTensor it does not own (an
     expert-parallel weight ``fully_shard`` was told to ignore, say) stays sharded.
 
-    If TP is implemented with DTensor, weights are local tensors of the TP DTensor in this scope.
-    Default writable windows with owned parameters coordinate entry, body failures, each publication,
-    and final registration restoration. Failed bodies make every rank fail and skip writeback.
+    Gathered TP weights expose their local tensors in this scope; retained native-full TP views
+    remain DTensors on the TP mesh.
+    Default writable windows with owned parameters coordinate entry, final preparation, body failures,
+    each publication, and final registration restoration. Failed bodies make every rank fail and skip
+    writeback.
     Publication failures stop later parameters on every rank; callers restore any values already
     published before failure and repair any registration whose restoration failed.
     Default windows without owned parameters skip coordination. Aliased values may already have
@@ -628,8 +631,8 @@ def fsdp2_weight_access_and_writeback_context(
     gather, and writeback preparation must finish on every rank before each scatter.
     Registration-metadata initialization, coordination-resource allocation, and backend collective
     failures require job termination.
-    Default access avoids per-parameter gather staging consensus. A rank-local gather/staging failure
-    can leave peers blocked until the backend timeout; terminate the job rather than retry locally.
+    Default access coordinates preparation only after the final gather. An earlier rank-local
+    gather/staging failure can leave peers blocked until backend timeout; terminate rather than retry.
     No undo callback is yielded; callers own restoration of values published before a later failure.
 
     Writable access rejects temporary post-forward shards in both modes; call ``reshard()`` then
@@ -645,6 +648,14 @@ def fsdp2_weight_access_and_writeback_context(
     Writable windows require matching sharding groups for all managed parameters;
     open separate windows for nested units with different rank memberships. This is
     checked and coordinated before gathering so consensus covers every gather participant.
+    Writable rollback rejects overlap with an active writable window; disjoint nesting is supported.
+    Callers must externally serialize entry/exit and use the same window order on every rank. The
+    local guard protects temporary registrations and active-window metadata; it detects thread
+    contention only. Rank-divergent concurrent calls can block peers until backend timeout and
+    require job termination.
+
+    Raises:
+        RuntimeError: Another thread holds the process-local weight-access guard.
     """
     with (
         _weight_access_guard(),
@@ -708,6 +719,16 @@ def _fsdp2_weight_access_and_writeback_context(module, root_model, writeback, na
     gather_params = []
     preflight_error = None
     try:
+        if (
+            rollback
+            and _FSDP2_ACTIVE_PARAMS
+            and any(
+                _fsdp2_owns(active, parameter)
+                for parameter in module.parameters()
+                for active in _FSDP2_ACTIVE_PARAMS
+            )
+        ):
+            raise ValueError("Writable FSDP2 rollback cannot overlap an active writable window")
         # Recognize new registrations, including native full and post-forward views.
         owned = _fsdp2_owned_params(fsdp_module, refresh=rollback)
         if not rollback and any(
@@ -785,8 +806,11 @@ def _fsdp2_weight_access_and_writeback_context(module, root_model, writeback, na
     entry_mesh = fully_shard.state(fsdp_module)._fsdp_param_group.mesh_info.mesh
     synchronize_staging_error(preflight_error, coordinate=coordinate_window, mesh=entry_mesh)
 
+    active = {id(parameter): weakref.ref(parameter) for _, parameter in owned_params}
+    if active:
+        _FSDP2_ACTIVE_PARAMS.append(active)
     try:
-        for name, param in gather_params:
+        for index, (name, param) in enumerate(gather_params):
             original_placements = param.placements
             original_device_mesh = param.device_mesh
             if fsdp_dim != original_device_mesh.ndim:
@@ -824,12 +848,15 @@ def _fsdp2_weight_access_and_writeback_context(module, root_model, writeback, na
                     cpu_writeback_tensor,
                     gpu_tensor,
                 )
-                _set_parameter(
-                    module, name, nn.Parameter(gpu_tensor, requires_grad=param.requires_grad)
-                )
+                staged_param = nn.Parameter(gpu_tensor, requires_grad=param.requires_grad)
+                active[id(staged_param)] = weakref.ref(staged_param)
+                _set_parameter(module, name, staged_param)
             except BaseException as exc:
                 staging_error = exc
-            synchronize_staging_error(staging_error)
+            synchronize_staging_error(
+                staging_error,
+                coordinate=rollback or (index == len(gather_params) - 1 and coordinate_window),
+            )
         ready = True
         yield
     except BaseException as exc:
@@ -886,8 +913,11 @@ def _fsdp2_weight_access_and_writeback_context(module, root_model, writeback, na
             synchronize_staging_error(error, coordinate=coordinate_window)
         except BaseException as exc:
             record_error(exc)
+        if active:
+            _FSDP2_ACTIVE_PARAMS.pop()
         originals.clear()
-        original = unsharded_dtensor = unsharded_tensor = cpu_writeback_tensor = gpu_tensor = None
+        original = staged_param = unsharded_dtensor = unsharded_tensor = None
+        cpu_writeback_tensor = gpu_tensor = None
         shard = None
         if error is not None and not propagating:
             raise error

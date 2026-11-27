@@ -577,21 +577,60 @@ def test_fsdp2_owns_its_parameters_in_every_shard_state(cpu_dist_workers, asymme
         cpu_dist_workers.job_timeout, cpu_dist_workers.failure_grace = timeout, grace
 
 
-def _window_leaves_what_fsdp2_does_not_own_job(rank, size, failure_stage):
+@mock.patch.object(torch.cuda, "is_available", return_value=False)
+def _window_leaves_what_fsdp2_does_not_own_job(rank, size, failure_stage, _cuda_available):
     ep_mesh = init_device_mesh("cpu", (size,), mesh_dim_names=("ep",))
     dp_mesh = (
         init_device_mesh("cpu", (size, 1), mesh_dim_names=("replicate", "dp"))["dp"]
-        if failure_stage in ("singleton_body", "singleton_default")
+        if failure_stage
+        in ("singleton_body", "singleton_default", "nested_same", "nested_disjoint")
         else init_device_mesh("cpu", (size,), mesh_dim_names=("dp",))
     )
     layer = torch.nn.Module()
     layer.dense = torch.nn.Linear(8, 8)
+    if failure_stage.startswith("nested_"):
+        layer.other = torch.nn.Linear(8, 8)
     layer.experts = torch.nn.Module()
     for name in ("gate_up_proj", "down_proj"):
         weight = distribute_tensor(torch.randn(2 * size, 8), ep_mesh, [Shard(0)])
         layer.experts.register_parameter(name, torch.nn.Parameter(weight))
     layer.requires_grad_(False)
     fully_shard(layer, mesh=dp_mesh, ignored_params=set(layer.experts.parameters()))
+    if failure_stage.startswith("nested_"):
+        parameters = dict(layer.named_parameters())
+        before = {name: value.to_local().detach().clone() for name, value in parameters.items()}
+        same = failure_stage == "nested_same"
+        try:
+            with fsdp2_weight_access_and_writeback_context(layer.dense, layer), torch.no_grad():
+                outer_weight = layer.dense.weight
+                if same:
+                    entered = False
+                    with (
+                        pytest.raises(ValueError, match="overlap"),
+                        fsdp2_weight_access_and_writeback_context(
+                            layer.dense, layer, rollback=True
+                        ),
+                    ):
+                        entered = True
+                        layer.dense.weight.add_(1)
+                        raise RuntimeError("nested body modified the outer alias")
+                    assert not entered
+                else:
+                    with fsdp2_weight_access_and_writeback_context(
+                        layer.other, layer, rollback=True
+                    ):
+                        layer.other.weight.add_(2)
+                assert layer.dense.weight is outer_weight
+        finally:
+            for name, parameter in parameters.items():
+                assert layer.get_parameter(name) is parameter
+                delta = 2 if not same and name == "other.weight" else 0
+                torch.testing.assert_close(
+                    parameter.to_local(), before[name] + delta, rtol=0, atol=0
+                )
+        with fsdp2_weight_access_and_writeback_context(layer.dense, layer, rollback=True):
+            pass
+        return
     if failure_stage == "ignored_only":
         originals = dict(layer.experts.named_parameters())
         before = {name: parameter.to_local().clone() for name, parameter in originals.items()}
@@ -694,6 +733,7 @@ def _window_leaves_what_fsdp2_does_not_own_job(rank, size, failure_stage):
             return set_parameter(owner, name, value)
 
         error = None
+        entered = False
         try:
             with (
                 mock.patch.object(core_utils, "_fsdp2_owned_params", discover_once),
@@ -704,11 +744,16 @@ def _window_leaves_what_fsdp2_does_not_own_job(rank, size, failure_stage):
                 ),
                 torch.no_grad(),
             ):
+                entered = True
+                if failure_stage == "rank0_last_prepare_default":
+                    torch.distributed.barrier()
                 layer.dense.weight.add_(1)
                 layer.dense.bias.add_(2)
         except RuntimeError as exc:
             error = exc
         assert error is not None, "A rank-local failure must fail every participating rank"
+        if failure_stage == "rank0_last_prepare_default":
+            assert not entered, "Final preparation must fail every rank before the body"
         if rank == 0:
             assert error is failure
         if failure_stage == "rank0_restore" and rank == 0:
@@ -826,6 +871,8 @@ def _window_leaves_what_fsdp2_does_not_own_job(rank, size, failure_stage):
         "rank0_body_default",
         "singleton_body",
         "singleton_default",
+        "nested_same",
+        "nested_disjoint",
         "rank0_entry",
         "rank0_discovery",
         "rank0_first_copy_default",
