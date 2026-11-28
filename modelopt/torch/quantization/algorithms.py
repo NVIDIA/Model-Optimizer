@@ -1191,8 +1191,9 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                     "with the same ones, or use a new checkpoint path."
                 )
             # Everything restored but the solved result, which the search solves again, the writer's
-            # rank, checked above, and the calibrated quantizer states, each rank's own, by format.
-            return _comparable(
+            # rank, checked above, and the calibrated quantizer states, each rank's own, by format;
+            # as a digest, since the ranks compare it only for equality.
+            restored = _comparable(
                 {
                     **{
                         key: value
@@ -1204,6 +1205,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                     ),
                 }
             )
+            return hashlib.sha256(repr(restored).encode()).hexdigest()
 
         if is_distributed_run():
             # In one collective, so a file failing to load or a rank at another point (every rank
