@@ -426,3 +426,25 @@ def test_train_eval_mode_switch(distillation_model):
     assert distillation_model._intermediate_output is not None
     distillation_model.train()
     assert distillation_model._intermediate_output is None
+
+
+@pytest.mark.parametrize("apply_threshold_to_all", [False, True])
+def test_mft_loss_ignores_negative_padding_labels(apply_threshold_to_all):
+    torch.manual_seed(0)
+    criterion = mtd.MFTLoss(threshold=0.2)
+    logits_s = torch.randn(2, 4, 8, requires_grad=True)
+    logits_t = torch.randn(2, 4, 8)
+    labels = torch.tensor([[1, 2, -100, -100], [0, -100, 3, -100]])
+
+    loss = criterion(logits_s, logits_t, labels=labels)
+    assert torch.isfinite(loss)
+    loss.backward()
+    assert logits_s.grad is not None and torch.isfinite(logits_s.grad).all()
+
+    # Masked (-100) token positions keep the unmodified teacher softmax distribution
+    flat_t = logits_t.view(-1, 8)
+    modified = criterion._prepare_corrected_distributions(
+        flat_t, labels.view(-1), threshold=0.2, apply_threshold_to_all=apply_threshold_to_all
+    )
+    ignore_idx = (labels.view(-1) < 0).nonzero(as_tuple=True)[0]
+    torch.testing.assert_close(modified[ignore_idx], torch.softmax(flat_t[ignore_idx], dim=-1))
