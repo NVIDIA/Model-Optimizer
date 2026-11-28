@@ -15,8 +15,8 @@ PATH:
 
 ```bash
 "$SKILL_DIR/scripts/nel-gym.sh" --version  # must report nemo_evaluator_launcher: 0.2.6
-"$SKILL_DIR/scripts/nel-gym.sh" run --config <gym-config.yaml> --dry-run
-"$SKILL_DIR/scripts/nel-gym.sh" run --config <gym-config.yaml>
+NEMO_EVALUATOR_TRUST_PRE_CMD=0 "$SKILL_DIR/scripts/nel-gym.sh" run --config <gym-config.yaml> --dry-run
+NEMO_EVALUATOR_TRUST_PRE_CMD=<0|1> "$SKILL_DIR/scripts/nel-gym.sh" run --config <gym-config.yaml>  # see launcher-workflow.md Step 8
 ```
 
 Using the wrapper with a validated pin is a correctness and reproducibility
@@ -112,12 +112,11 @@ Two editing rules for these blocks:
 | `DUMMY_API_KEY` | lit:dummy | self-deployed vLLM policy key |
 | `NEL_INVOCATION_ID` | runtime | stable run id assigned by the validated launcher; do not use `SLURM_JOB_ID` |
 
-Two launcher-level trust flags gate every gym submission, both set in `.env`:
+Two launcher-level trust flags gate every gym submission:
 
-- `NEMO_EVALUATOR_TRUST_PRE_CMD=1` — the gym configs carry a `pre_cmd`; prepare fails
-  without it.
-- `NEMO_EVALUATOR_TRUST_UNLISTED_TASKS=1` — `nemo_gym` is not in the FDF mapping, so
-  submission is refused without it.
+- `NEMO_EVALUATOR_TRUST_PRE_CMD`: review the Gym `pre_cmd` per `launcher-workflow.md` Step 8.
+- `NEMO_EVALUATOR_TRUST_UNLISTED_TASKS=1` (in `.env`) — `nemo_gym` is not in the FDF
+  mapping, so submission is refused without it.
 
 No currently supported gym task is judge-scored, so `INFERENCE_API_KEY` /
 `INFERENCE_JUDGE_URL` are not part of this path. If you add one that is, follow the
@@ -181,5 +180,5 @@ report `pass@1`. **Do not change repeat counts when aligning to a golden.**
   auto-resumes from the response cache (`resume_from_cache=true`); `CANCELLED by
   <uid>` (preemption) does not, and its chained job exits in ~20s
   (`…finished with 'CANCELLED…' state. EXIT!`), which is expected, not a bug. Resume
-  by hand: `cd <run>/nemo_gym.0 && sbatch run.sub`. Progress is cumulative — check the
+  by hand, per `launcher-workflow.md` Step 8's **Hook trust**: `cd <run>/nemo_gym.0 && sbatch run.sub`. Progress is cumulative — check the
   rollout count before assuming loss.

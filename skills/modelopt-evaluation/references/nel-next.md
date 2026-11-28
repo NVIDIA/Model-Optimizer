@@ -224,6 +224,8 @@ with its own `run_id`, copying the shared `services:` block.
 
 ## Run (dry-run → canary → full) → push to MLflow
 
+Before each `--submit` or `eval resume`, apply `launcher-workflow.md` Step 8's **Hook trust** to the config rendered by `--dry-run`: code-loading settings not from this skill's template (`extra_args` such as `--trust-remote-code`, `image`/`cluster.eval_image`, code-supplying mounts, `PYTHONPATH`-style env values) need the user's OK; show env names, not credential values.
+
 ```bash
 set -a && source .env && set +a; NEL="$SKILL_DIR/scripts/nel-next.sh"
 "$NEL" eval run <cfg>.yaml --dry-run                                  # validate/render (no SSH)

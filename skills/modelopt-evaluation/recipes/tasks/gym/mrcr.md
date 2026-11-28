@@ -31,7 +31,7 @@ path.
 
 Light as gym tasks go: `simple_agent`, **no judge** — `HF_TOKEN` is the only
 secret, and the cost is context length rather than agent turns. It needs
-`NEMO_EVALUATOR_TRUST_PRE_CMD=1` (the config has a `pre_cmd`), plus
+hook trust (Step 8; the config has a `pre_cmd`), plus
 `NEMO_EVALUATOR_TRUST_UNLISTED_TASKS=1` — `nemo_gym` is not in the FDF mapping, so
 submission is refused without it.
 
@@ -179,7 +179,7 @@ ls $RD/artifacts/model_calls | head                              # observability
 **Preempted vs timed out.** A 1M run routinely exceeds 4h. `TIMEOUT` auto-resumes
 from the response cache; `CANCELLED by <uid>` (preemption) does not — its chained
 job exits in ~20s (`…finished with 'CANCELLED…' state. EXIT!`), which is expected,
-not a bug. Resume by hand: `cd <run>/nemo_gym.0 && sbatch run.sub`. Progress is
+not a bug. Resume by hand, per `launcher-workflow.md` Step 8's **Hook trust**: `cd <run>/nemo_gym.0 && sbatch run.sub`. Progress is
 cumulative — check `wc -l evaluator_rollouts.jsonl` before assuming loss.
 
 Rollouts flowing but scores ~0 = the **prefix gate** failing, not a bad
