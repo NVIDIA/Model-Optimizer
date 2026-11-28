@@ -64,6 +64,19 @@ class _ReplayScales(torch.autograd.Function):
         return None, result.reshape(shape[:-1]), None
 
 
+def _native_scale_kernels(tensor):
+    if not tensor.is_cuda:
+        return None
+    try:
+        # Triton is optional for the materialized replay fallback.
+        from modelopt.torch.kernels.quantization import repair
+    except ImportError as exc:
+        if not (exc.name or "").startswith("triton"):
+            raise
+        return None
+    return repair
+
+
 class IQScaleState(nn.Module):
     """FP32 native scale masters at an existing valid IQ PTQ boundary."""
 
@@ -130,9 +143,18 @@ class IQScaleState(nn.Module):
 
     def forward(self, inputs):
         """Replay native fields; inputs supplies only metadata such as shape and dtype."""
-        with torch.no_grad():
-            levels, _ = self.format.decode_int8(self.packed, torch.tensor(self.codec_shape))
         steps = self.projected_steps()
+        # Kernel pointers come from state, independent of the metadata tensor's device.
+        kernels = _native_scale_kernels(self.packed) if self.packed.device == steps.device else None
+        if kernels is not None and self.name not in kernels.SUPPORTED_FORMATS:
+            kernels = None
+        with torch.no_grad():
+            if kernels is not None:
+                levels = kernels.decode_iq_levels(self.packed, self.name, self.codec_shape)
+            else:
+                levels, _ = self.format.decode_int8(self.packed, torch.tensor(self.codec_shape))
+        if kernels is not None:
+            return kernels.apply_block_scales(levels, steps, inputs.dtype).reshape(inputs.shape)
         levels = levels.reshape(-1, steps.shape[-1], self.format.int8_group_size)
         return _ReplayScales.apply(levels, steps, inputs.dtype).reshape(inputs.shape)
 

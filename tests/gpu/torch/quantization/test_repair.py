@@ -46,6 +46,166 @@ def _iq(path, name):
     return {"quantizer_name": path, "cfg": {"num_bits": name, "backend": "ggml"}}
 
 
+@pytest.mark.parametrize("name", sorted(IQ_FORMAT_REGISTRY))
+@pytest.mark.parametrize("input_grad", [False, True])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("off_device", [False, True])
+@pytest.mark.timeout(180)
+def test_packed_iq_linear_matches_native_vjp(name, input_grad, dtype, capsys, off_device):
+    # Packed kernels require optional Triton; materialized replay also supports CPU.
+    pytest.importorskip("triton")
+    from modelopt.torch.kernels.quantization.iq_gemm import iq_linear
+    from modelopt.torch.kernels.quantization.repair import apply_block_scales, decode_iq_levels
+
+    if not torch.cuda.is_available():
+        pytest.skip("Packed IQ projection math requires CUDA")
+    if off_device and torch.cuda.device_count() < 2:
+        pytest.skip("Noncurrent-device IQ repair requires two CUDA devices")
+    caller_device = torch.cuda.current_device()
+    device = torch.device(
+        "cuda", (caller_device + 1) % torch.cuda.device_count() if off_device else caller_device
+    )
+    torch.manual_seed(103)
+    shapes = [(13, 512)]
+    if not off_device and input_grad and dtype == torch.bfloat16 and name in ("iq1_m", "iq2_xxs"):
+        shapes.append((2048, 4096))
+    for shape in shapes:
+        model = nn.Linear(shape[1], shape[0], bias=False).to(device=device, dtype=dtype)
+        mtq.quantize(
+            model,
+            _config([_iq("*weight_quantizer", name)]),
+            lambda m: m(torch.randn(1, shape[1], device=device, dtype=dtype)),
+        )
+        policy = IQRepairPolicy()
+        try:
+            policy.prepare(model)
+            state = model.weight_quantizer._local_repair_state
+            fmt = IQ_FORMAT_REGISTRY[name]
+            native = fmt.dequantize(state.native_payload(), torch.tensor(shape), dtype=dtype)
+            levels, _ = fmt.decode_int8(state.packed, torch.tensor(shape))
+            fused_levels = decode_iq_levels(state.packed, name, shape)
+            torch.testing.assert_close(fused_levels, levels.reshape(shape), rtol=0, atol=0)
+            measure = shape == (2048, 4096)
+            for tokens in (8, 1024) if measure else (7, 0):
+                x = torch.randn(tokens, shape[1] * 2, device=device, dtype=dtype)[:, ::2]
+                if measure and tokens == 1024:
+                    x = x.contiguous()
+                x = x.detach().requires_grad_(input_grad)
+                bias = torch.randn(shape[0], device=device, dtype=dtype, requires_grad=True)
+                steps = state.projected_steps().detach().requires_grad_(True)
+                if not measure and tokens == 7:
+                    for wrong_shape in (steps.t(), steps.reshape(shape[0], -1)):
+                        with pytest.raises(ValueError):
+                            iq_linear(x, state.packed, wrong_shape, name, shape, bias)
+                    for wrong_dtype in (torch.float16, torch.bfloat16):
+                        with pytest.raises(ValueError):
+                            iq_linear(x, state.packed, steps.to(wrong_dtype), name, shape, bias)
+                upstream = torch.randn(tokens, shape[0], device=device, dtype=dtype)
+                parameters = [steps, bias, *([x] if input_grad else [])]
+                saved = []
+
+                def observe(value):
+                    saved.append((value.shape, value.dtype))
+                    return value
+
+                if measure:
+                    warmup = iq_linear(x, state.packed, steps, name, shape, bias)
+                    warmup_grad = torch.autograd.grad(warmup, parameters, upstream)
+                    del warmup, warmup_grad
+                    torch.cuda.synchronize(device)
+                    baseline = torch.cuda.memory_allocated(device)
+                    torch.cuda.reset_peak_memory_stats(device)
+                    started = time.perf_counter()
+                with torch.autograd.graph.saved_tensors_hooks(observe, lambda value: value):
+                    actual = iq_linear(x, state.packed, steps, name, shape, bias)
+                actual_grad = torch.autograd.grad(actual, parameters, upstream)
+                if measure:
+                    torch.cuda.synchronize(device)
+                    seconds = time.perf_counter() - started
+                    peak = torch.cuda.max_memory_allocated(device)
+                    incremental = peak - baseline
+                    with capsys.disabled():
+                        print(
+                            json.dumps(
+                                {
+                                    "format": name,
+                                    "dtype": str(dtype),
+                                    "shape": shape,
+                                    "tokens": tokens,
+                                    "input_contiguous": x.is_contiguous(),
+                                    "packed_bytes": state.packed.numel()
+                                    * state.packed.element_size(),
+                                    "baseline_bytes": baseline,
+                                    "peak_bytes": peak,
+                                    "incremental_bytes": incremental,
+                                    "seconds": seconds,
+                                },
+                                separators=(",", ":"),
+                            ),
+                            flush=True,
+                        )
+                    assert incremental < 16777216
+                reference_weight = native.detach().requires_grad_(True)
+                reference_x = x.detach().requires_grad_(input_grad)
+                reference_bias = bias.detach().requires_grad_(True)
+                expected = F.linear(reference_x, reference_weight, reference_bias)
+                torch.testing.assert_close(actual, expected, rtol=0.01, atol=0.015)
+                reference_grad = torch.autograd.grad(
+                    expected,
+                    [reference_weight, reference_bias, *([reference_x] if input_grad else [])],
+                    upstream,
+                )
+                group = fmt.int8_group_size
+                groups = (-1, steps.shape[-1], group)
+                expected_scale = (
+                    (reference_grad[0].reshape(groups).float() * levels.reshape(groups).float())
+                    .sum(-1, keepdim=True)
+                    .reshape_as(steps)
+                )
+                torch.testing.assert_close(actual_grad[0], expected_scale, rtol=5e-4, atol=2e-3)
+                fused_steps = steps.detach().requires_grad_(True)
+                fused_weight = apply_block_scales(fused_levels, fused_steps, dtype)
+                torch.testing.assert_close(fused_weight, native, rtol=0, atol=0)
+                fused_gradient = torch.autograd.grad(fused_weight, fused_steps, reference_grad[0])[
+                    0
+                ]
+                torch.testing.assert_close(fused_gradient, expected_scale, rtol=0, atol=0)
+                torch.testing.assert_close(actual_grad[1], reference_grad[1], rtol=0, atol=0)
+                if input_grad:
+                    torch.testing.assert_close(
+                        actual_grad[2], reference_grad[2], rtol=0.01, atol=0.015
+                    )
+                assert torch.cuda.current_device() == caller_device
+                assert (torch.Size(shape), dtype) not in saved
+                frozen_x = x.detach().requires_grad_(input_grad)
+                frozen_bias = bias.detach().requires_grad_(True)
+                saved.clear()
+                with torch.autograd.graph.saved_tensors_hooks(observe, lambda value: value):
+                    frozen = iq_linear(
+                        frozen_x, state.packed, steps.detach(), name, shape, frozen_bias
+                    )
+                assert (frozen_x.shape, dtype) not in saved
+                frozen_grad = torch.autograd.grad(
+                    frozen, [frozen_bias, *([frozen_x] if input_grad else [])], upstream
+                )
+                torch.testing.assert_close(frozen, expected, rtol=0.01, atol=0.015)
+                torch.testing.assert_close(frozen_grad[0], reference_grad[1], rtol=0, atol=0)
+                if input_grad:
+                    torch.testing.assert_close(
+                        frozen_grad[1], reference_grad[2], rtol=0.01, atol=0.015
+                    )
+            if not measure:
+                # Inputs supplies metadata only, including when repair state is offloaded.
+                cpu_metadata = torch.empty(shape, dtype=dtype)
+                torch.testing.assert_close(state(cpu_metadata), native, rtol=0, atol=0)
+                state.cpu()
+                torch.testing.assert_close(
+                    state(model._parameters["weight"]), native.cpu(), rtol=0, atol=0
+                )
+        finally:
+            policy.close()
+
+
 class _Expert(nn.Module):
     def __init__(self):
         super().__init__()
