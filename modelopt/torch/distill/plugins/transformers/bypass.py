@@ -76,9 +76,19 @@ class _ReplayFacts:
 class TransformersBypassAdapter(ModuleBypassAdapter):
     """Adopt native text decoders and caller-owned placement, without a family registry."""
 
-    def __init__(self):
+    def __init__(self, device_mesh=None):
         """Require the tested integration version only when this adapter is used."""
         _require_transformers()
+        self.device_mesh = device_mesh
+        self.context = None
+        if device_mesh is not None:
+            from .parallel import native_mesh_context, torch_mesh_context
+
+            self.context = (
+                native_mesh_context(device_mesh)
+                if callable(getattr(device_mesh, "get_mesh", None))
+                else torch_mesh_context(device_mesh)
+            )
         self.student = None
         self._providers = weakref.WeakKeyDictionary()
         self._model_facts = weakref.WeakKeyDictionary()
@@ -103,6 +113,66 @@ class TransformersBypassAdapter(ModuleBypassAdapter):
             )
             self._model_facts[model] = facts
         return facts
+
+    def parallelize(self, model, *, initialize=None):
+        """Stage native fields before caller-owned HF TP/EP/FSDP, or validate adoption."""
+        self._model_facts.pop(model, None)
+        if self.context is None:
+            raise ValueError("parallelize requires the caller's actual device_mesh")
+        if self.context.mesh_manager is not None:
+            from .parallel import parallelize_native_transformers
+
+            parallelize_native_transformers(model, self.context, initialize=initialize)
+            return model
+        from ..._bypass_parallel import _size, prepare_quantizer_partitions
+        from .parallel import (
+            _synchronize_placement_state,
+            _synchronize_validation,
+            apply_hf_tensor_parallelism,
+            validate_hf_tensor_parallelism,
+        )
+
+        prepared = hasattr(model, "_modelopt_bypass_torch_mesh")
+        _synchronize_placement_state(self.context, prepared)
+        error = None
+        try:
+            if initialize is not None:
+                raise ValueError("Native initialization callbacks require TransformersDeviceMesh")
+            if prepared and model._modelopt_bypass_torch_mesh is not self.device_mesh:
+                raise ValueError("Prepared Torch models must use their exact caller-owned mesh")
+            if _size(self.context.pipeline_mesh) > 1:
+                raise ValueError("Native PP requires a validated family transport")
+            if _size(self.context.tensor_mesh) > 1 and not prepared:
+                validate_hf_tensor_parallelism(model, self.context.tensor_mesh)
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
+        _synchronize_validation(self.context, error)
+        if _size(self.context.tensor_mesh) > 1 and not prepared:
+            from modelopt.torch.quantization.repair_partition import prepare_packed_weights_for_tp
+
+            prepare_packed_weights_for_tp(model)
+            apply_hf_tensor_parallelism(model, self.context.tensor_mesh)
+            prepare_quantizer_partitions(model, self.context)
+        model._modelopt_bypass_torch_mesh = self.device_mesh
+        return model
+
+    def adopt(self, model):
+        """Collectively validate realized placement without installing another set of hooks."""
+        if self.context is None:
+            return
+        from .parallel import _synchronize_validation
+
+        error = None
+        if self.context.mesh_manager is not None:
+            if not getattr(model, "_mesh_manager", None) and self.context.device_mesh.size() > 1:
+                error = "Prepare IQ placement with TransformersBypassAdapter.parallelize first"
+        elif getattr(model, "_modelopt_bypass_torch_mesh", None) is not self.device_mesh and (
+            hasattr(model, "_modelopt_bypass_torch_mesh") or self.context.device_mesh.size() > 1
+        ):
+            error = "Already placed Torch models must use their exact caller-owned mesh"
+        _synchronize_validation(self.context, error)
+        if self.context.mesh_manager is not None:
+            self.parallelize(model)
 
     def _provider(self, model):
         spec = _model_spec(model)

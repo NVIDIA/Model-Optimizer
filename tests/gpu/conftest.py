@@ -55,3 +55,15 @@ def calib_jsonl(tmp_path_factory):
     path = write_calib_jsonl(calib_dir / "calib.jsonl")
     with assert_unmodified_tree(calib_dir):
         yield path
+
+
+@pytest.fixture
+def bypass_cpu_workers(request, _dist_pools):
+    size = getattr(request, "param", 2)
+    return get_live_pool(
+        _dist_pools,
+        ("bypass_cpu", size),
+        lambda: DistributedWorkerPool(
+            world_size=size, backend="gloo", teardown_fn=default_worker_teardown
+        ),
+    )
