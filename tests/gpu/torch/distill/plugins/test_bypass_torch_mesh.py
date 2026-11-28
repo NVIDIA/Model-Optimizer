@@ -150,6 +150,7 @@ def _snapshot(model):
         containers,
         native_meta,
         activation_state,
+        dict(model.named_modules(remove_duplicate=False)),
     )
 
 
@@ -164,7 +165,11 @@ def _assert_unchanged(model, snapshot):
         containers,
         native_meta,
         activation_state,
+        modules,
     ) = snapshot
+    current_modules = dict(model.named_modules(remove_duplicate=False))
+    assert current_modules.keys() == modules.keys()
+    assert all(current_modules[name] is module for name, module in modules.items())
     for module, state in activation_state:
         for name, (present, value) in state.items():
             assert hasattr(module, name) == present
@@ -366,6 +371,11 @@ def _torch_mesh_state_worker(rank, size, route, state):
             adapter.adopt(model)
         assert str(retry.value) == errors[rank][1]
         _assert_unchanged(model, snapshot)
+        for mapping, previous in context_state:
+            assert mapping.keys() == previous.keys()
+            assert all(mapping[key] is value for key, value in previous.items())
+        assert adapter.context.parallel_metadata is context_state[0][0]
+        assert adapter.context.tp_quantizer_layouts is context_state[1][0]
         quantizer._native_weight_meta = valid_metadata
         with bounded_collectives(10):
             adapter.adopt(model)
@@ -597,6 +607,7 @@ def _input_alias_case(rank, size, route, sharing, mesh):
                 del module.input_quantizer._native_tp_activation_fields
         else:
             assert not isinstance(model.lm_head.weight, DTensor)
+            original_head_input = model.lm_head.input_quantizer
             model.lm_head.input_quantizer = first.input_quantizer
         del model._modelopt_bypass_placement
     original_scale = getattr(first.input_quantizer, "pre_quant_scale", None)
@@ -631,6 +642,9 @@ def _input_alias_case(rank, size, route, sharing, mesh):
             assert all(module.forward == forward for module, forward in snapshot[3])
             assert not hasattr(first.input_quantizer, "_native_tp_activation_fields")
         if compatible:
+            for module in (first, second):
+                assert isinstance(module.weight, DTensor)
+                assert tuple(module.weight.to_local().shape) == (module.weight.shape[0], 16)
             assert first.input_quantizer.pre_quant_scale is second.input_quantizer.pre_quant_scale
             torch.testing.assert_close(
                 first.input_quantizer.pre_quant_scale,
@@ -650,6 +664,14 @@ def _input_alias_case(rank, size, route, sharing, mesh):
             assert getattr(adapter.context, name) is mapping
             assert mapping.keys() == previous.keys()
             assert all(mapping[key] is value for key, value in previous.items())
+        if sharing == "input_prepared_unplanned":
+            model.lm_head.input_quantizer = original_head_input
+            assert first.input_quantizer is second.input_quantizer
+            with bounded_collectives(10):
+                adapter.adopt(model)
+            assert first.input_quantizer is second.input_quantizer
+            with torch.no_grad():
+                assert model(tokens).logits.shape == (1, 4, 32)
 
 
 def _torch_mesh_alias_worker(rank, size, route, sharing):

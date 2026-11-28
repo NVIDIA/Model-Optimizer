@@ -567,3 +567,18 @@ def test_tp_refuses_rank_local_calibration(rank, quantizing, style):
         validate(quantizer, view)
     quantizer.disable_calib()
     validate(quantizer, view)
+
+
+@pytest.mark.parametrize("field", ["_amax", "_global_amax", "_pre_quant_scale", "_bias_value"])
+def test_rowwise_activation_partition_refuses_tied_fields(field):
+    quantizer = TensorQuantizer(QuantizerAttributeConfig(num_bits=8, axis=-1))
+    quantizer.amax = torch.ones(1, 1, 16)
+    original = torch.arange(1.0, 17.0).reshape(1, 1, 16)
+    quantizer._set_buffer(field, original)
+    quantizer.__dict__["_shared_quant_tied_attrs"] = {field}
+    before = dict(quantizer._buffers)
+    with pytest.raises(ValueError, match="tied shared quantizer field"):
+        activation_partition(quantizer, NativeWeightPartition((4, 16), 1, 0, 2))
+    assert quantizer._buffers.keys() == before.keys()
+    assert all(quantizer._buffers[name] is value for name, value in before.items())
+    assert not hasattr(quantizer, "_native_tp_activation_layout")

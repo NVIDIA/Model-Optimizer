@@ -444,9 +444,13 @@ def validate_native_weight_partition(quantizer, view):
     # Real packed staging will supply a logical master, without changing the native field shapes.
     probe._fake_quant = True
     # Source proof belongs to actual planning; this probe checks pin geometry below.
-    probe.__dict__.pop("_native_weight_meta", None)
+    meta = probe.__dict__.pop("_native_weight_meta", None)
+    if meta is not None:
+        # This disposable metadata probe never runs a forward. Skip the threshold
+        # requirement only for a pin whose format/code geometry is validated below;
+        # actual planning must still validate its source before accepting native scales.
+        probe._use_constant_amax = True
     native_weight_partition(probe, view)
-    meta = getattr(quantizer, "_native_weight_meta", None)
     if meta is None:
         return
     if _format_key(quantizer, meta["source_shape"]) != _canonical(meta["format"]):
@@ -666,6 +670,9 @@ def activation_partition(quantizer, view):
             raise ValueError(
                 "Calibrated TP activation fields do not match the input-channel shard."
             )
+    for name in quantizer.__dict__.get("_shared_quant_tied_attrs", ()):
+        if name in fields and fields[name] is not getattr(quantizer, name, None):
+            raise ValueError(f"Native TP cannot partition tied shared quantizer field {name}.")
     if fields:
         fields["_native_tp_activation_checkpoint"] = {
             "layout": (view.shape[-1], view.size, view.split_factor),
