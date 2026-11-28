@@ -49,6 +49,8 @@ from modelopt.torch.quantization.algorithms import (
     _get_kl_div_loss,
     _get_log_prob,
     _module_search_space_signature,
+    _refuse_unlike_layouts,
+    _weight_layouts_by_group,
     _whole_over,
     estimate_quant_compression,
 )
@@ -59,6 +61,7 @@ from modelopt.torch.utils.distributed import (
     DistributedProcessGroup,
     DistributionPlan,
     ParallelState,
+    all_reduce,
     set_distribution_plan,
 )
 from modelopt.torch.utils.moe import register_torch_a2a
@@ -1789,21 +1792,30 @@ def test_expert_parallel_weight_search_resumes_from_its_checkpoint(
     )
     if files == "in_one_process":
         # One process takes rank 0's file, whose calibration holds rank 0's experts alone: refused
-        # before it is restored into the whole model.
+        # before the model is converted, also with no plan recorded, as Megatron records none.
+        path = tmp_path / "rank0.pth"
+        safe_save({**safe_load(path), "distribution_plan": None}, path)
+        model = _tiny_qwen3_moe("grouped_mm")
         input_ids = torch.randint(0, 64, (2, 8))
         with pytest.raises(ValueError, match="get_auto_quantize_config"):
-            _weight_search(
-                _tiny_qwen3_moe("grouped_mm"),
-                [{"input_ids": input_ids, "labels": input_ids}],
-                tmp_path,
-            )
+            _weight_search(model, [{"input_ids": input_ids, "labels": input_ids}], tmp_path)
+        assert not any(isinstance(module, TensorQuantizer) for module in model.modules())
 
 
-def _test_search_without_its_mesh_on_one_rank(rank, size, method):
+def _test_search_refused_on_one_rank(rank, size, method, fault):
     register_torch_a2a()
     model = _sharded_like_the_expert_parallel_load(_tiny_qwen3_moe("torch_a2a"), size)
-    if rank == 0:  # handed the model without the mesh its experts are sharded over
+    # Rank 0 alone handed the model without the mesh its experts are sharded over, or with its
+    # experts naming a group of rank 0 alone as their expert-parallel group.
+    own_group = torch.distributed.new_group(ranks=[0]) if fault == "own_ep_group" else None
+    if rank == 0 and fault == "no_mesh":
         del model._device_mesh
+    elif rank == 0:
+        model.model.layers[
+            0
+        ].mlp.experts._parallel_state.expert_model_parallel_group = DistributedProcessGroup(
+            own_group
+        )
     if method == "kl_div":
         search, forward_step, constraints = _kv_cache_search()
     else:
@@ -1813,35 +1825,70 @@ def _test_search_without_its_mesh_on_one_rank(rank, size, method):
         }
         forward_step, constraints = (lambda model, batch: model(**batch)), {"effective_bits": 8.0}
     input_ids = torch.randint(0, 64, (2, 8), generator=torch.Generator().manual_seed(rank))
-    error, match = (
-        (RuntimeError, "carries no device mesh")
-        if rank == 0
-        else (RuntimeError, "rank 0 failed to compute")
-    )
-    with bounded_collectives(), pytest.raises(error, match=match):
-        mtq.auto_quantize(
-            model,
-            constraints=constraints,
-            data_loader=[{"input_ids": input_ids, "labels": input_ids}],
-            forward_step=forward_step,
-            num_calib_steps=1,
-            num_score_steps=1,
-            method=method,
-            **search,
+    if rank == 1:
+        error, match = RuntimeError, "rank 0 failed to compute"
+    elif fault == "no_mesh":
+        error, match = RuntimeError, "carries no device mesh"
+    else:  # the experts' groups, or for the KV-cache search their DTensors, refused as TP's
+        error, match = (
+            NotImplementedError,
+            "ParallelState to name" if method == "gradient" else "not TP",
         )
+    try:
+        with bounded_collectives(), pytest.raises(error, match=match):
+            mtq.auto_quantize(
+                model,
+                constraints=constraints,
+                data_loader=[{"input_ids": input_ids, "labels": input_ids}],
+                forward_step=forward_step,
+                num_calib_steps=1,
+                num_score_steps=1,
+                method=method,
+                **search,
+            )
+    finally:
+        if own_group is not None and rank == 0:
+            torch.distributed.destroy_process_group(own_group)
     assert not any(isinstance(module, TensorQuantizer) for module in model.modules())
 
 
+@pytest.mark.parametrize("fault", ["no_mesh", "own_ep_group"])
 @pytest.mark.parametrize("method", ["gradient", "kl_div"])
-def test_expert_parallel_search_without_its_mesh_on_one_rank_raises_on_every_rank(
-    cpu_dist_workers, method
+def test_expert_parallel_search_refused_on_one_rank_raises_on_every_rank(
+    cpu_dist_workers, method, fault
 ):
-    """A rank whose model lacks the mesh its experts are sharded over fails the weight and the
-    KV-cache search on every rank, before any rank converts its model."""
+    """A rank whose model lacks the mesh its experts are sharded over, or whose experts name other
+    groups, fails the weight and the KV-cache search on every rank before any converts its model."""
     transformers = pytest.importorskip("transformers")
     if Version(transformers.__version__) < Version("5.16"):
         pytest.skip("transformers' expert-parallel load shards the experts as DTensors from 5.16")
-    cpu_dist_workers.run(_test_search_without_its_mesh_on_one_rank, method=method)
+    cpu_dist_workers.run(_test_search_refused_on_one_rank, method=method, fault=fault)
+
+
+def _test_weight_layouts_of_modules_in_another_order(rank, size):
+    # Two projections of different sizes, plain shards summed over a group of every rank, which
+    # rank 1 alone registers in the other order.
+    modules = [mtq.quantize(torch.nn.Linear(n, n), mtq.INT8_DEFAULT_CFG) for n in (4, 8)]
+    for module in modules:
+        module.parallel_state = ParallelState(-1, expert_model_parallel_group=None)
+    hparam = QuantRecipeHparam(
+        [QuantRecipe(mtq.INT8_DEFAULT_CFG)], quant_modules=modules if rank == 0 else modules[::-1]
+    )
+    names = {id(module): f"proj{i}" for i, module in enumerate(modules)}
+    with bounded_collectives(), pytest.raises(ValueError, match="out of step"):
+        all_reduce(
+            "AutoQuantize weight layouts",
+            lambda: _weight_layouts_by_group([hparam], names),
+            _refuse_unlike_layouts,
+        )
+
+
+def test_weight_layouts_of_modules_in_another_order_on_one_rank_raise_on_every_rank(
+    cpu_dist_workers,
+):
+    """Ranks that would sum the same groups for different modules, here two modules of different
+    sizes registered in the other order on one rank, fail the cost's preflight on every rank."""
+    cpu_dist_workers.run(_test_weight_layouts_of_modules_in_another_order)
 
 
 def _test_kv_resume_with_one_stale_expert_shard(rank, size, directory):

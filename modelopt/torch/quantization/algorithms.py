@@ -952,15 +952,17 @@ def _whole_over(mesh_ranks: set[int], group_ranks: set[int]) -> bool:
     return shared == group_ranks
 
 
-def _weight_layouts_by_group(hparams: Sequence["QuantRecipeHparam"]) -> dict[tuple, str]:
+def _weight_layouts_by_group(
+    hparams: Sequence["QuantRecipeHparam"], module_names: dict[int, str]
+) -> dict[tuple, str]:
     """What every rank of each group the cost sums over must hold alike, by its ranks and name.
 
-    A digest of the modules the cost sums over the group, in order, with the groups each of their
-    weights is summed over.
+    A digest of the modules the cost sums over the group, by name and in order, with the groups
+    each of their weights is summed over.
     """
     by_group: dict[tuple, list] = defaultdict(list)
-    for h, hparam in enumerate(hparams):
-        for m, (parallel_state, weights) in enumerate(hparam.weight_layouts()):
+    for hparam in hparams:
+        for module, (parallel_state, weights) in zip(hparam.quant_modules, hparam.weight_layouts()):
             if parallel_state is None:
                 continue
             kinds = {
@@ -974,7 +976,9 @@ def _weight_layouts_by_group(hparams: Sequence["QuantRecipeHparam"]) -> dict[tup
             )
             for kind, group in kinds.items():
                 if group.is_initialized():
-                    by_group[_group_ranks(group), _group_name(group)].append((h, m, kind, layout))
+                    by_group[_group_ranks(group), _group_name(group)].append(
+                        (module_names.get(id(module)), kind, layout)
+                    )
     return {
         ranks: hashlib.sha256(repr(modules).encode()).hexdigest()
         for ranks, modules in by_group.items()
@@ -1157,12 +1161,25 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             loaded = self.load_search_checkpoint()
             state = self.state_dict()
             # On several ranks, a file another rank wrote holds other quantizer states, such as other
-            # experts'. (One process may still re-solve a file rank 0 of a distributed run wrote.)
+            # experts'.
             if is_distributed_run() and state["checkpoint_rank"] not in (None, rank()):
                 raise ValueError(
                     f"Rank {rank()}'s AutoQuantize checkpoint was written by rank "
                     f"{state['checkpoint_rank']}. Restore each rank's own file from the same search, "
                     "or use a new checkpoint path."
+                )
+            # A run of another size wrote its files for its own ranks, e.g. each with its own
+            # experts, also with no plan recorded (Megatron records none): one process too refuses
+            # them before converting the model. Files that do not record it resume as before.
+            world_size = torch.distributed.get_world_size() if is_distributed_run() else 1
+            if (state["quantizer_states"] or state["candidate_stats"]) and state[
+                "checkpoint_world_size"
+            ] not in (None, world_size):
+                raise ValueError(
+                    "The AutoQuantize checkpoint was written by a run of "
+                    f"{state['checkpoint_world_size']} ranks, not {world_size}. Resume with the "
+                    "same world size, or use a new checkpoint path. To re-solve its scores in one "
+                    "process, pass its search state to get_auto_quantize_config()."
                 )
             # Everything restored but the solved result, which the search solves again, the writer's
             # rank, checked above, and the calibrated quantizer states, each rank's own, by format.
@@ -1787,31 +1804,21 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         mismatch = self.scoring_mismatch(self.state_dict()) if self.candidate_stats else None
         if mismatch:
             raise ValueError(f"{mismatch} Use a different checkpoint path.")
-        # Another plan gives a rank other experts, and another world size other data, also on a
-        # model with no plan recorded. Every rank restored the same (checked in
-        # validate_search_input) and runs under the same, so every rank refuses alike; a checkpoint
-        # that records neither resumes as before.
+        # Another plan gives a rank other experts; validate_search_input refused another world
+        # size. Every rank restored the same plan (checked there) and runs under the same one, so
+        # every rank refuses alike.
         restored_plan, plan = getattr(self, "distribution_plan", None), _plan_signature(self.model)
-        restored_world_size = getattr(self, "checkpoint_world_size", None)
         world_size = torch.distributed.get_world_size() if is_distributed_run() else 1
-        if self.quantizer_states or self.candidate_stats:
-            # One process resumes a file one process wrote, or one with no plan recorded, as on
-            # main; a rank's file of a run under a plan holds that rank's share, e.g. its experts.
-            if restored_plan not in (None, plan) and (
-                is_distributed_run() or restored_world_size not in (None, 1)
-            ):
-                raise ValueError(
-                    f"The AutoQuantize checkpoint was written under {restored_plan}, not {plan}. "
-                    "Resume with the same world size and expert-parallel degree, or use a new "
-                    "checkpoint path. To re-solve its scores in one process, pass its search state "
-                    "to get_auto_quantize_config()."
-                )
-            if is_distributed_run() and restored_world_size not in (None, world_size):
-                raise ValueError(
-                    f"The AutoQuantize checkpoint was written by a run of {restored_world_size} "
-                    f"ranks, not {world_size}. Resume with the same world size, or use a new "
-                    "checkpoint path."
-                )
+        if (
+            is_distributed_run()
+            and (self.quantizer_states or self.candidate_stats)
+            and restored_plan not in (None, plan)
+        ):
+            raise ValueError(
+                f"The AutoQuantize checkpoint was written under {restored_plan}, not {plan}. "
+                "Resume with the same world size and expert-parallel degree, or use a new "
+                "checkpoint path."
+            )
         self.method = self.method_name
         self.scoring_config = self.scoring_config_from(self.config)
         self.cost_model = self.config["cost_model"]
@@ -1904,9 +1911,10 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             # A layout the cost refuses on some ranks alone, or ranks of a group laying a weight out
             # unlike each other, would leave some ranks in a sum or pair it with another: every rank
             # tells its own in one collective first, so all of them raise.
+            module_names = {id(module): name for name, module in self.model.named_modules()}
             all_reduce(
                 "AutoQuantize weight layouts",
-                lambda: _weight_layouts_by_group(quant_recipe_hparams),
+                lambda: _weight_layouts_by_group(quant_recipe_hparams, module_names),
                 _refuse_unlike_layouts,
             )
         self._verify_resolved_constraint(quant_recipe_hparams)

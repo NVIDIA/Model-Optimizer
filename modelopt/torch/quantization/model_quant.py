@@ -1277,22 +1277,6 @@ def auto_quantize(
             fixed_quantization_config=fixed_quantization_config,
         )
 
-    plan = dist.recorded_distribution_plan(model)
-    ep_mesh = None
-
-    def find_ep_mesh() -> None:
-        nonlocal ep_mesh
-        ep_mesh = (
-            expert_parallel_mesh(model) if plan is not None and plan.is_expert_parallel else None
-        )
-
-    # Before anything converts the model: an expert-parallel plan without its mesh raises here, on
-    # every rank, as a rank raising alone would leave the others waiting in the search.
-    if dist.is_distributed_run():
-        dist.all_reduce("AutoQuantize expert-parallel mesh", find_ep_mesh, lambda _: None)
-    else:
-        find_ep_mesh()
-
     method_name = method_name or "gradient"
 
     (
@@ -1313,20 +1297,37 @@ def auto_quantize(
     rewrites_weights = any(
         _rewrites_weights(QuantRecipe(cfg, name=name)) for cfg, name in all_processed_formats
     )
-    for quant_cfg, name in all_processed_formats:
-        recipe = QuantRecipe(quant_cfg, name=name)
-        algo = recipe.config.algorithm
-        if unsupported := _algorithm_methods(algo) - _AUTO_QUANTIZE_SUPPORTED_ALGORITHMS:
-            algo_method = ", ".join(sorted(map(str, unsupported)))
-            raise ValueError(
-                f"Algorithm '{algo_method}' in '{name}' is not supported by auto_quantize yet. "
-                "Please run auto_quantize with 'max' or 'mse' calibration and use "
-                "get_auto_quantize_config() to obtain a config for mtq.quantize()."
-            )
-        # Every candidate, before the search calibrates any: calibrate() would refuse mid-search.
-        _refuse_awq_on_a_sharded_fsdp2_model(model, algo, candidate=name)
-        _refuse_unsupported_distributed_calibration(model, algo)
-        _refuse_layerwise_dirs(recipe, rewrites_weights)
+    plan = dist.recorded_distribution_plan(model)
+    ep_mesh = None
+
+    def check_setup() -> None:
+        nonlocal ep_mesh
+        # Before anything converts the model: an expert-parallel plan without its mesh raises here.
+        ep_mesh = (
+            expert_parallel_mesh(model) if plan is not None and plan.is_expert_parallel else None
+        )
+        for quant_cfg, name in all_processed_formats:
+            recipe = QuantRecipe(quant_cfg, name=name)
+            algo = recipe.config.algorithm
+            if unsupported := _algorithm_methods(algo) - _AUTO_QUANTIZE_SUPPORTED_ALGORITHMS:
+                algo_method = ", ".join(sorted(map(str, unsupported)))
+                raise ValueError(
+                    f"Algorithm '{algo_method}' in '{name}' is not supported by auto_quantize yet. "
+                    "Please run auto_quantize with 'max' or 'mse' calibration and use "
+                    "get_auto_quantize_config() to obtain a config for mtq.quantize()."
+                )
+            # Every candidate, before the search calibrates any: calibrate() would refuse it
+            # mid-search.
+            _refuse_awq_on_a_sharded_fsdp2_model(model, algo, candidate=name)
+            _refuse_unsupported_distributed_calibration(model, algo)
+            _refuse_layerwise_dirs(recipe, rewrites_weights)
+
+    # Each rank checks its own model in one collective: a rank refusing alone, e.g. one missing the
+    # mesh or naming other experts' groups, would leave the others waiting in the search.
+    if dist.is_distributed_run():
+        dist.all_reduce("AutoQuantize setup", check_setup, lambda _: None)
+    else:
+        check_setup()
 
     # Select the appropriate searcher based on method
     if method_name not in AUTO_QUANTIZE_SEARCHERS:
