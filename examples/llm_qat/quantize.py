@@ -32,7 +32,7 @@ import os
 import torch
 import transformers
 from arguments import get_quantize_args
-from utils import make_supervised_data_module
+from utils import load_model, make_supervised_data_module
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
@@ -71,7 +71,7 @@ def quantize():
     model_kwargs = {}
     if model_args.attn_implementation:
         model_kwargs["attn_implementation"] = model_args.attn_implementation
-    model = transformers.AutoModelForCausalLM.from_pretrained(
+    model = load_model(
         model_args.model_name_or_path,
         dtype=torch.bfloat16,
         device_map="auto",

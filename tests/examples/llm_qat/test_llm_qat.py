@@ -26,6 +26,12 @@ from _test_utils.fs_utils import assert_unmodified_tree
 from _test_utils.torch.transformers_models import create_tiny_qwen3_dir
 from datasets import load_from_disk
 from safetensors.torch import load_file
+from transformers import AutoModelForCausalLM, AutoTokenizer, Mxfp4Config
+
+import modelopt.torch.quantization as mtq
+from modelopt.recipe import load_recipe
+from modelopt.torch.export import export_hf_checkpoint
+from modelopt.torch.quantization.qtensor import MXFP4QTensor
 
 REPO = Path(__file__).resolve().parents[3]
 README = REPO / "examples/llm_qat/README.md"
@@ -356,3 +362,87 @@ def test_qwen3_qlora_nvfp4(tiny_qwen3_path, dataset_cache_dir, tmp_path):
         assert f"{prefix}.weight_scale" in base_weights
         assert f"{prefix}.weight_scale_2" in base_weights
     assert not any("base_layer" in k or "lora" in k for k in base_weights)
+
+
+@pytest.fixture(scope="module")
+def mxfp4_gpt_oss_path(tiny_gpt_oss_path, tmp_path_factory):
+    """A tiny GPT-OSS with MXFP4 experts, stored as openai/gpt-oss-* store theirs."""
+    model = AutoModelForCausalLM.from_pretrained(tiny_gpt_oss_path)
+    mtq.quantize(model, load_recipe("general/ptq/mxfp4_mlp_weight_only").quantize)
+    path = tmp_path_factory.mktemp("mxfp4_gpt_oss")
+    export_hf_checkpoint(model, export_dir=path)
+    AutoTokenizer.from_pretrained(tiny_gpt_oss_path).save_pretrained(path)
+    with assert_unmodified_tree(path) as path:
+        yield str(path)
+
+
+def _mxfp4_experts(path, layer=0):
+    """The experts' weights an MXFP4 checkpoint stores, as transformers dequantizes them."""
+    model = AutoModelForCausalLM.from_pretrained(
+        path, quantization_config=Mxfp4Config(dequantize=True)
+    )
+    experts = model.model.layers[layer].mlp.experts
+    return {name: getattr(experts, name).detach() for name in ("gate_up_proj", "down_proj")}
+
+
+def test_gpt_oss_qat_mxfp4(mxfp4_gpt_oss_path, dataset_cache_dir, tmp_path):
+    """QAT of GPT-OSS from its MXFP4 release to an export that deploys the same way."""
+    ptq_dir, qat_dir, export_dir = tmp_path / "ptq", tmp_path / "qat", tmp_path / "export"
+    data_args = _fast_data_args(dataset_cache_dir)
+    run_example_command(
+        readme_command(
+            README,
+            "llm-qat-gpt-oss",
+            "quantize.py",
+            overrides={
+                **data_args,
+                "model_name_or_path": mxfp4_gpt_oss_path,
+                "calib_size": "16",
+                "output_dir": str(ptq_dir),
+            },
+        ),
+        "llm_qat",
+    )
+    # The quantized checkpoint holds the release's experts, dequantized, under their own names.
+    ptq_weights = load_file(str(ptq_dir / "model.safetensors"))
+    for name, weight in _mxfp4_experts(mxfp4_gpt_oss_path).items():
+        assert torch.equal(ptq_weights[f"model.layers.0.mlp.experts.{name}"], weight.cpu()), name
+
+    run_example_command(
+        readme_command(
+            README,
+            "llm-qat-gpt-oss",
+            "train.py",
+            overrides={
+                "config-file": BACKEND_CONFIGS["fsdp2"],
+                **data_args,
+                **FAST_TRAIN_ARGS,
+                "model_name_or_path": str(ptq_dir),
+                "output_dir": str(qat_dir),
+            },
+        ),
+        "llm_qat",
+        setup_free_port=True,
+    )
+    _assert_training_progress(qat_dir)
+
+    run_example_command(
+        readme_command(
+            README,
+            "llm-qat-gpt-oss",
+            "export.py",
+            overrides={"pyt_ckpt_path": str(qat_dir), "export_path": str(export_dir)},
+        ),
+        "llm_qat",
+    )
+    assert not (export_dir / "hf_quant_config.json").exists()
+    config = json.loads((export_dir / "config.json").read_text())
+    assert config["quantization_config"]["quant_method"] == "mxfp4"
+    # The export holds the trained experts in MXFP4, blocked along their input dim: the bf16 cast
+    # of the fp32 master weights FSDP2 saves, as QAT's forward quantized them.
+    qat_weights = load_file(str(qat_dir / "model.safetensors"))
+    for name, weight in _mxfp4_experts(export_dir).items():
+        trained = qat_weights[f"model.layers.0.mlp.experts.{name}"].transpose(-1, -2)
+        codes, scales = MXFP4QTensor.quantize(trained.to(torch.bfloat16).contiguous(), 32)
+        expected = codes.dequantize(scale=scales, block_sizes={-1: 32}).transpose(-1, -2)
+        assert torch.equal(weight.cpu(), expected.to(weight.dtype)), name

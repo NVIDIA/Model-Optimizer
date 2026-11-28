@@ -42,7 +42,7 @@ When to Use QAT vs QAD
    * - When to use
      - The model is already quantized and you want to fine-tune it for a
        **new task** (e.g., fine-tuning a `GPT-OSS
-       <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/gpt-oss>`_
+       <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_qat#gpt-oss>`_
        quantized checkpoint)
      - You want the **best possible accuracy recovery** after quantization
    * - Recommended workflow

@@ -150,8 +150,7 @@ def test_local_hessian_layerwise_is_scoped_to_the_model_recipe():
     ],
 )
 def test_mlp_weight_only_recipe_matches_its_mtq_cfg(recipe_name, cfg_name):
-    # examples/gpt-oss migrated from --quant_cfg <CFG> to --recipe <recipe>; pin the
-    # equality so the recipe and the mtq constant cannot drift apart silently.
+    # Pin the equality so the recipe and the mtq constant cannot drift apart silently.
     recipe_cfg = load_recipe(recipe_name).quantize.model_dump(exclude_unset=True)
     mtq_cfg = QuantizeConfig(**getattr(mtq, cfg_name)).model_dump(exclude_unset=True)
     assert recipe_cfg == mtq_cfg

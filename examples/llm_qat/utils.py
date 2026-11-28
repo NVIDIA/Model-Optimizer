@@ -19,6 +19,35 @@ from peft import LoraConfig, TaskType
 from transformers import default_data_collator
 
 
+def load_model(model_name_or_path: str, **kwargs) -> transformers.PreTrainedModel:
+    """Load a causal LM to quantize or train, an MXFP4 checkpoint dequantized to BF16.
+
+    Transformers loads an MXFP4 checkpoint (``openai/gpt-oss-*``) packed wherever the ``kernels``
+    package is installed, and ModelOpt can neither quantize nor train packed experts.
+    """
+    config = transformers.AutoConfig.from_pretrained(model_name_or_path)
+    quantization_config = getattr(config, "quantization_config", None) or {}
+    if quantization_config.get("quant_method") != "mxfp4":
+        return transformers.AutoModelForCausalLM.from_pretrained(model_name_or_path, **kwargs)
+
+    from transformers.integrations.mxfp4 import Mxfp4Dequantize
+
+    kwargs["quantization_config"] = transformers.Mxfp4Config(dequantize=True)
+    if kwargs.get("device_map") == "auto":
+        # Dequantizing across a balanced multi-GPU split trips an illegal memory access.
+        kwargs["device_map"] = "sequential"
+    model = transformers.AutoModelForCausalLM.from_pretrained(model_name_or_path, **kwargs)
+    # Saving reverses the loading converters, and transformers 5.5 to 5.18 reverse the dequantizing
+    # ones into keys named by their patterns (``gate_up_proj$``), every layer's experts under one.
+    # Without them the model saves as the BF16 checkpoint it now is.
+    model._weight_conversions = [
+        conversion
+        for conversion in getattr(model, "_weight_conversions", None) or []
+        if not any(isinstance(op, Mxfp4Dequantize) for op in getattr(conversion, "operations", []))
+    ]
+    return model
+
+
 def make_supervised_data_module(
     data_args,
     tokenizer: transformers.PreTrainedTokenizer,

@@ -54,7 +54,7 @@ runs:
         fi
 
         # Installed right before this example's tests, not up front for all examples of the job: an example
-        # that pins or upgrades packages (e.g. gpt-oss upgrades datasets, torch_trt downgrades torch) must not
+        # that pins or upgrades packages (e.g. llm_distill pins trl, torch_trt downgrades torch) must not
         # change the environment of the examples that run before it.
         packages_before="${RUNNER_TEMP:-/tmp}/packages-before-${{ inputs.example }}.txt"
         python3 -m pip freeze 2>/dev/null > "$packages_before" || true

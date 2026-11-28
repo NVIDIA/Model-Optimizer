@@ -15,6 +15,7 @@ For an experimental native NeMo AutoModel expert integration, see the [NVFP4 ada
 | Arguments | Full CLI/YAML argument reference | \[[Link](ARGUMENTS.md)\] |
 | Support Matrix | Supported models, quantization formats, and backends | \[[Link](#support-matrix)\] |
 | QLoRA | Model training with reduced GPU memory | \[[Link](#qlora-real-quantization)\] |
+| GPT-OSS | QAT of the MXFP4 GPT-OSS models, deployed like the originals | \[[Link](#gpt-oss)\] |
 | Advanced Topics | Trainer APIs, FSDP2 config, YAML options | \[[Link](#advanced-topics)\] |
 | Results | Accuracy benchmarks | \[[Link](#results)\] |
 | Resources | Extra links and references | \[[Link](#resources)\] |
@@ -211,6 +212,34 @@ vllm serve qwen3-8b-fp4-qlora-hf/base_model --enable-lora \
 
 > QLoRA export is not currently supported with FSDP2.
 
+## GPT-OSS
+
+[GPT-OSS](https://huggingface.co/openai/gpt-oss-20b) ships with MXFP4 experts, and QAT keeps them in MXFP4: `quantize.py` loads the checkpoint dequantized to BF16 and quantizes the experts back to MXFP4, `train.py` fine-tunes them through MXFP4 fake quantization, and `export.py` writes them as `openai/gpt-oss-*` store them, so the result deploys on TensorRT-LLM, vLLM or SGLang just as the original does. GPT-OSS needs eager attention, which supports its attention sinks, and its own decoder layer class for FSDP2:
+
+<!-- modelopt-snippet: llm-qat-gpt-oss -->
+```sh
+# 1. Quantize
+python quantize.py \
+  --model_name_or_path openai/gpt-oss-20b \
+  --dataset_config configs/dataset/blend.yaml \
+  --recipe general/ptq/mxfp4_mlp_weight_only \
+  --attn_implementation eager \
+  --output_dir gpt-oss-20b-quantized
+
+# 2. Train
+accelerate launch --config-file configs/accelerate/fsdp2.yaml \
+  --fsdp_transformer_layer_cls_to_wrap GptOssDecoderLayer \
+  train.py --config configs/train/qat_nvfp4.yaml \
+  --attn_implementation eager \
+  --model_name_or_path gpt-oss-20b-quantized \
+  --output_dir gpt-oss-20b-qat
+
+# 3. Export
+python export.py --pyt_ckpt_path gpt-oss-20b-qat --export_path gpt-oss-20b-qat-mxfp4
+```
+
+The training config supplies hyperparameters only; the quantization is the one `quantize.py` saved. Full-parameter QAT of gpt-oss-20b needs one node with 8 x 80 GB GPUs. The export can describe only the MXFP4 experts as quantized, so quantize nothing else, such as the KV cache.
+
 ## Advanced Topics
 
 ### Quantize and Fine-Tune with Python
@@ -307,6 +336,7 @@ Common layer class names:
 |---|---|
 | Qwen2, Qwen2.5, Qwen3 | `Qwen3DecoderLayer` (or `Qwen2DecoderLayer`) |
 | Llama 2, 3, 3.1 | `LlamaDecoderLayer` |
+| GPT-OSS | `GptOssDecoderLayer` |
 
 </details>
 

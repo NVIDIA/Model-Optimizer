@@ -20,6 +20,8 @@ Changelog
 
 *Quantization - QAT / QAD*
 
+- ``examples/llm_qat`` runs QAT and QAD of GPT-OSS: it loads ``openai/gpt-oss-*`` dequantized from MXFP4, and its export writes the MXFP4 experts as those checkpoints store them, to deploy as they do.
+
 *Quantization - Export & Deployment*
 
 - ``examples/hf_ptq/convert_ggml_to_int8.py`` now also converts GGML exports that hold other formats (FP8, NVFP4, KV cache quantization): their GGML layers become ModelOpt ``INT8_PB_WO`` layers beside the rest of the export, which vLLM newer than 0.34.0 serves. Exports with only GGML layers still become compressed-tensors, and fused MoE experts now convert in both.
@@ -39,6 +41,8 @@ Changelog
 - Prefix agent skill names with ``modelopt-``; existing names remain available as forwarding stubs.
 
 **Backward Breaking Changes**
+
+- Remove ``examples/gpt-oss``: GPT-OSS QAT is in ``examples/llm_qat`` (see its GPT-OSS section). LoRA QAT of the experts, which that example showed, is not carried over.
 
 **Deprecations**
 

@@ -85,6 +85,7 @@ EXCLUDED = {
     "llm-qat-quickstart": "Executed by test_llm_qat.py::test_qwen3_qat_nvfp4 through run_example_command.",
     "llm-qad-quickstart": "Executed by test_llm_qat.py::test_qwen3_qad_nvfp4 through run_example_command.",
     "llm-qlora-quickstart": "Executed by test_llm_qat.py::test_qwen3_qlora_nvfp4 through run_example_command.",
+    "llm-qat-gpt-oss": "Executed by test_llm_qat.py::test_gpt_oss_qat_mxfp4 through run_example_command.",
 }
 
 
