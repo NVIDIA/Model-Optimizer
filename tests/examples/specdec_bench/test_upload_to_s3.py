@@ -20,6 +20,7 @@ detection — both flagged by cjluo as missing test coverage.
 """
 
 import importlib.util
+import json
 from pathlib import Path
 
 import pytest
@@ -123,31 +124,53 @@ class TestDiscoverRuns:
 
 
 class TestCheckProvenance:
-    def test_complete(self, tmp_path):
-        run = tmp_path / "r"
-        run.mkdir()
-        (run / "configuration.json").write_text('{"container_image": "vllm/vllm-openai:nightly"}')
-        assert upload_to_s3._check_provenance(run) == []
+    @pytest.fixture
+    def config(self):
+        return {
+            "container_image": "vllm/vllm-openai:nightly",
+            "model_dir": "Qwen/Qwen3-8B",
+            "engine": "VLLM",
+            "engine_version": "0.20.0",
+            "timestamp": "2026-11-27T12:00:00+00:00",
+        }
 
-    def test_missing_container_image(self, tmp_path):
-        run = tmp_path / "r"
-        run.mkdir()
-        (run / "configuration.json").write_text('{"container_image": null}')
-        assert upload_to_s3._check_provenance(run) == ["container_image"]
+    def test_complete(self, tmp_path, config):
+        (tmp_path / "configuration.json").write_text(json.dumps(config))
+        assert upload_to_s3._check_provenance(tmp_path) == []
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("container_image", None),
+            ("container_image", ""),
+            ("model_dir", " "),
+            ("model_dir", ["model"]),
+            ("engine", 123),
+            ("engine", ""),
+            ("engine_version", None),
+            ("timestamp", "not a date"),
+            ("timestamp", "2026-11-27"),
+            ("timestamp", "2026-11-27T12:00:00"),
+        ],
+    )
+    def test_invalid_field(self, tmp_path, config, field, value):
+        config[field] = value
+        (tmp_path / "configuration.json").write_text(json.dumps(config))
+        assert upload_to_s3._check_provenance(tmp_path) == [field]
+
+    def test_medusa_has_no_package_version(self, tmp_path, config):
+        config.update(engine="SPECBENCH_MEDUSA", engine_version=None)
+        (tmp_path / "configuration.json").write_text(json.dumps(config))
+        assert upload_to_s3._check_provenance(tmp_path) == []
 
     def test_no_configuration_json(self, tmp_path):
-        run = tmp_path / "r"
-        run.mkdir()
-        assert upload_to_s3._check_provenance(run) == list(upload_to_s3._REQUIRED_PROVENANCE_FIELDS)
+        assert upload_to_s3._check_provenance(tmp_path) == list(
+            upload_to_s3._REQUIRED_PROVENANCE_FIELDS
+        )
 
-    def test_malformed_configuration_json(self, tmp_path):
-        run = tmp_path / "r"
-        run.mkdir()
-        (run / "configuration.json").write_text("{ not valid json")
-        assert upload_to_s3._check_provenance(run) == list(upload_to_s3._REQUIRED_PROVENANCE_FIELDS)
-
-    def test_empty_string_is_missing(self, tmp_path):
-        run = tmp_path / "r"
-        run.mkdir()
-        (run / "configuration.json").write_text('{"container_image": ""}')
-        assert upload_to_s3._check_provenance(run) == ["container_image"]
+    @pytest.mark.parametrize("contents", ["{ not valid json", "[]", "null"])
+    def test_malformed_configuration_json(self, tmp_path, contents):
+        (tmp_path / "configuration.json").write_text(contents)
+        assert upload_to_s3._check_provenance(tmp_path) == list(
+            upload_to_s3._REQUIRED_PROVENANCE_FIELDS
+        )
