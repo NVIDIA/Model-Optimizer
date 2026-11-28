@@ -1431,3 +1431,48 @@ def test_an_expert_parallel_export_it_cannot_write_is_refused_before_folding(
     assert after.keys() == before.keys()
     assert all(torch.equal(after[k], v) for k, v in before.items())
     assert not (tmp_path / "export").exists()
+
+
+def test_disabled_svdquant_restores_weight_and_compiled_model_unwraps_on_export(tmp_path):
+    """Disabled QuantLinear folds back SVDQuant/pre_quant_scale compensation, and OptimizedModule unwraps."""
+    from safetensors.torch import load_file
+    from transformers import Qwen2Config, Qwen2ForCausalLM
+
+    torch.manual_seed(0)
+    cfg = Qwen2Config(
+        vocab_size=64,
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+    )
+    base = Qwen2ForCausalLM(cfg).eval()
+    orig_w = base.model.layers[0].self_attn.q_proj.weight.detach().clone()
+
+    from modelopt.torch.quantization.nn.modules.quant_linear import SVDQuantTensorQuantizer
+
+    model = deepcopy(base)
+    mtq.quantize(model, mtq.FP8_DEFAULT_CFG, lambda m: m(input_ids=torch.randint(0, 64, (1, 4))))
+    q_proj = model.model.layers[0].self_attn.q_proj
+    q_proj.weight_quantizer.__class__ = SVDQuantTensorQuantizer
+    pqs = torch.linspace(0.5, 2.0, 32)
+    lora_a = torch.randn(4, 32) * 0.1
+    lora_b = torch.randn(32, 4) * 0.1
+    with torch.no_grad():
+        q_proj.weight.copy_(orig_w / pqs.view(1, -1) - lora_b @ lora_a)
+    q_proj.input_quantizer.pre_quant_scale = pqs
+    q_proj.weight_quantizer.svdquant_lora_a = lora_a
+    q_proj.weight_quantizer.svdquant_lora_b = lora_b
+    mtq.disable_quantizer(model, lambda name: "q_proj" in name)
+
+    # Wrap in a stand-in OptimizedModule (_orig_mod) to exercise torch.compile unwrapping cleanly on CPU
+    compiled_wrapper = SimpleNamespace(_orig_mod=model)
+    export_dir = tmp_path / "ckpt"
+    export_hf_checkpoint(compiled_wrapper, dtype=torch.float32, export_dir=export_dir)
+
+    exported_sd = load_file(export_dir / "model.safetensors")
+    assert not any("_orig_mod" in k for k in exported_sd)
+    torch.testing.assert_close(
+        exported_sd["model.layers.0.self_attn.q_proj.weight"], orig_w, atol=1e-5, rtol=1e-5
+    )
