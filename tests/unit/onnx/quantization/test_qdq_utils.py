@@ -266,27 +266,30 @@ def create_test_model_with_mxfp8_dq():
     return model
 
 
-def create_test_model_with_nvfp4_qdq(with_transpose: bool = False):
+def create_test_model_with_nvfp4_qdq(with_transpose: bool = False, out_features: int = 32):
     """Create a test ONNX model with TRT_FP4QDQ nodes for testing NVFP4.
 
     Args:
         with_transpose: If True, adds a Transpose node between TRT_FP4QDQ and MatMul.
+        out_features: Output channel dimension for the Linear/MatMul weight.
     """
     if with_transpose:
-        # For transpose case, weight shape is (32, 64) to match transpose output
-        weight_data = np.random.uniform(-1.0, 1.0, size=(32, 64)).astype(np.float32)
-        fp4qdq_output_shape = [32, 64]
-        transpose_output_shape = [64, 32]
+        # For transpose case, weight shape is (out_features, 32) -> transposed (32, out_features)
+        weight_data = np.random.uniform(-1.0, 1.0, size=(out_features, 32)).astype(np.float32)
+        fp4qdq_output_shape = [out_features, 32]
+        transpose_output_shape = [32, out_features]
+        in_shape, out_shape = [4, 32], [4, out_features]
     else:
-        # For non-transpose case, weight shape is (64, 32) (FP16 for testing BFloat16 detection)
-        weight_data = np.random.uniform(-1.0, 1.0, size=(64, 32)).astype(np.float16)
-        fp4qdq_output_shape = [64, 32]
+        # For non-transpose case, weight shape is (out_features, 32)
+        weight_data = np.random.uniform(-1.0, 1.0, size=(out_features, 32)).astype(np.float16)
+        fp4qdq_output_shape = [out_features, 32]
         transpose_output_shape = None
+        in_shape, out_shape = [4, out_features], [4, 32]
 
     weight_tensor = numpy_helper.from_array(weight_data, "linear.weight")
 
     # Create input tensor
-    input_tensor = helper.make_tensor_value_info("input", TensorProto.FLOAT, [4, 32])
+    input_tensor = helper.make_tensor_value_info("input", TensorProto.FLOAT, in_shape)
 
     # Create TRT_FP4QDQ node with correct block_size=16 for NVFP4
     fp4qdq_node = helper.make_node(
@@ -340,7 +343,7 @@ def create_test_model_with_nvfp4_qdq(with_transpose: bool = False):
         nodes=nodes,
         name="test_graph",
         inputs=[input_tensor],
-        outputs=[helper.make_tensor_value_info("output", TensorProto.FLOAT, [4, 64])],
+        outputs=[helper.make_tensor_value_info("output", TensorProto.FLOAT, out_shape)],
         initializer=[weight_tensor],
         value_info=value_info,
     )
@@ -482,6 +485,11 @@ class TestCastFunctions:
             (
                 np.array([[0.0], [-0.0]], dtype=np.float32),
                 np.array([[0]], dtype=np.uint8),
+            ),
+            # Odd leading dimension with even last dimension
+            (
+                np.array([[1.0, -1.0], [0.5, -0.5], [2.0, -2.0]], dtype=np.float32),
+                np.array([[162], [145], [196]], dtype=np.uint8),
             ),
         ],
     )
@@ -659,10 +667,13 @@ class TestMXFP8QuantExporter:
 class TestFP4QDQTo2DQ:
     """Test suite for NVFP4QuantExporter."""
 
+    @pytest.mark.parametrize("out_features", [32, 3])
     @pytest.mark.parametrize("with_transpose", [False, True])
-    def test_fp4qdq_conversion(self, with_transpose):
-        """Test FP4QDQ to 2DQ conversion with and without Transpose node."""
-        model = create_test_model_with_nvfp4_qdq(with_transpose=with_transpose)
+    def test_fp4qdq_conversion(self, with_transpose, out_features):
+        """Test FP4QDQ to 2DQ conversion with and without Transpose node, including odd rows."""
+        model = create_test_model_with_nvfp4_qdq(
+            with_transpose=with_transpose, out_features=out_features
+        )
 
         # Run FP4QDQ to 2DQ conversion
         converted_model = NVFP4QuantExporter.process_model(model)
@@ -688,11 +699,12 @@ class TestFP4QDQTo2DQ:
         # Verify original weight initializer is removed
         assert "linear.weight" not in initializer_names
 
-        # Verify FP4 weight tensor has correct data type
+        # Verify FP4 weight tensor has correct data type and preserves logical dims
         fp4_weight = next(
             init for init in converted_model.graph.initializer if init.name == "linear.weight_f4"
         )
         assert fp4_weight.data_type == TensorProto.FLOAT4E2M1
+        assert list(fp4_weight.dims) == [out_features, 32]
 
         # Verify FP8 scale tensor has correct data type
         fp8_scale = next(

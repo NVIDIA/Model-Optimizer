@@ -37,7 +37,7 @@ from .base_exporter import ONNXQuantExporter
 def _cast_fp4(array: np.ndarray) -> np.ndarray:
     """Cast a numpy array to FLOAT4E2M1 using PyTorch.
 
-    Note: The first dimension of the array must be divisible by 2
+    Note: Either the first or the last dimension of the array must be divisible by 2
     as two FP4 values are packed into a single byte.
 
     Also reused by the deprecated ``modelopt.onnx.quantization.qdq_utils.fp4qdq_to_2dq``
@@ -46,8 +46,15 @@ def _cast_fp4(array: np.ndarray) -> np.ndarray:
     """
     array_f32_t = torch.from_numpy(array)
     array_f32_t_shape = array_f32_t.shape
-    assert array_f32_t_shape[0] % 2 == 0, "array_f32_t_shape[0] must be divisible by 2"
-    array_f4_t_shape = (array_f32_t_shape[0] // 2, *array_f32_t_shape[1:])
+    is_first_even = array_f32_t_shape[0] % 2 == 0
+    assert is_first_even or array_f32_t_shape[-1] % 2 == 0, (
+        "array_f32_t_shape[0] or array_f32_t_shape[-1] must be divisible by 2"
+    )
+    array_f4_t_shape = (
+        (array_f32_t_shape[0] // 2, *array_f32_t_shape[1:])
+        if is_first_even
+        else (*array_f32_t_shape[:-1], array_f32_t_shape[-1] // 2)
+    )
     if torch.cuda.is_available():
         array_f32_t = array_f32_t.cuda()
     array_f4_t = NVFP4QTensor._cast_fp4(array_f32_t)
@@ -128,10 +135,11 @@ def _replace_fp4qdq_with_2dq(
     sw_f32_per_tensor_name = sw_f8_per_block_name + "_f32_scale"
 
     # Create TensorProto for initializers
+    w_f4_dims = list(graph.initializer[initializer_indices[weight_name]].dims)
     w_f4_proto = onnx.helper.make_tensor(
         name=w_f4_name,
         data_type=onnx_dtype_map["Float4"],
-        dims=[w_f4.shape[0] * 2, *w_f4.shape[1:]],
+        dims=w_f4_dims,
         vals=w_f4.tobytes(),
         raw=True,
     )
