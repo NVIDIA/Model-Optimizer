@@ -30,10 +30,15 @@ if TYPE_CHECKING:
 __all__ = [
     "INDEXING_RULES",
     "MATRIX_RULES",
+    "RECURRENT_RULES",
     "GatherElementsIndices",
     "GatherIndices",
     "GemmBiasToConv",
     "GemmToConv",
+    "Lstm1",
+    "Lstm2",
+    "Lstm3",
+    "LstmSequenceLayout",
     "MatMulToConv",
     "weight_eligible",
 ]
@@ -283,6 +288,368 @@ def weight_eligible(node: ir.Node, weight: ir.Value) -> bool:
     return True
 
 
+class _LstmRule(_OperatorRule):
+    def __init__(self, graph: DlaGraph, views=None):
+        super().__init__(graph, views)
+        self.name = f"LSTM{self.output_count}"
+
+    def check(self, context, **bindings):
+        if (
+            context.root not in self.graph.batch_nodes
+            or len(context.root.outputs) != self.output_count
+        ):
+            return False
+        _validate_lstm(context.root)
+        return True
+
+    def rewrite(self, op, x, w, r, sequence, **_):
+        node = sequence.producer()
+        _capture_lstm_sequence_layout(node)
+        shape = static_shape(x)
+        assert shape is not None
+        steps, _, features = shape
+        hidden = node.attributes.get_int("hidden_size", 0)
+        direction = node.attributes.get_string("direction", "forward")
+        directions = 2 if direction == "bidirectional" else 1
+        weights, recurrent = constant_array(w), constant_array(r)
+        assert weights is not None and recurrent is not None
+        dtype = weights.dtype
+
+        def constant(array, label):
+            return self.graph.add_initializer(op, np.asarray(array), label)
+
+        def emit(operator, inputs, dims, **attrs):
+            value = operator(*inputs, **attrs)
+            value.type, value.shape = x.type, ir.Shape(dims)
+            return value
+
+        axes = constant(np.array([0], np.int64), "lstm_input_axis")
+        promoted = emit(op.Unsqueeze, [x, axes], [1, steps, 1, features])
+        channels = emit(op.Transpose, [promoted], [1, features, 1, steps], perm=[0, 3, 2, 1])
+        gate_sizes = constant(np.full(4, hidden, np.int64), "lstm_gate_sizes")
+        time_sizes = constant(np.ones(steps, np.int64), "lstm_time_sizes")
+        state_cache = {}
+
+        def state(index, branch):
+            source = _parameter(node, index)
+            array = constant_array(source)
+            if source is None:
+                return np.zeros(hidden, dtype=dtype)
+            if array is not None:
+                return array[branch].reshape(hidden)
+            if index not in state_cache:
+                promoted_state = emit(op.Unsqueeze, [source, axes], [1, directions, 1, hidden])
+                moved = emit(
+                    op.Transpose,
+                    [promoted_state],
+                    [1, hidden, 1, directions],
+                    perm=[0, 3, 2, 1],
+                )
+                if directions == 2:
+                    moved = op.Split(
+                        moved,
+                        constant(np.ones(2, np.int64), "lstm_direction_sizes"),
+                        axis=3,
+                        _outputs=2,
+                    )
+                    for value in moved:
+                        value.type, value.shape = x.type, ir.Shape([1, hidden, 1, 1])
+                else:
+                    moved = [moved]
+                state_cache[index] = moved
+            return state_cache[index][branch]
+
+        outputs = []
+        for branch in range(directions):
+            reverse = direction == "reverse" or (direction == "bidirectional" and branch == 1)
+            projected = emit(
+                op.Conv,
+                [
+                    channels,
+                    constant(weights[branch].reshape(4 * hidden, features, 1, 1), "lstm_weights"),
+                ],
+                [1, 4 * hidden, 1, steps],
+            )
+            bias = np.zeros(8 * hidden, dtype=dtype)
+            if _parameter(node, 3) is not None:
+                bias_array = constant_array(node.inputs[3])
+                assert bias_array is not None
+                bias = bias_array[branch]
+            folded = (bias[: 4 * hidden].astype(np.float64) + bias[4 * hidden :]).astype(dtype)
+            projected = emit(
+                op.Add,
+                [constant(folded.reshape(1, -1, 1, 1), "lstm_bias"), projected],
+                [1, 4 * hidden, 1, steps],
+            )
+            gates = op.Split(projected, gate_sizes, axis=1, _outputs=4)
+            for gate in gates:
+                gate.type, gate.shape = x.type, ir.Shape([1, hidden, 1, steps])
+            slices = [op.Split(gate, time_sizes, axis=3, _outputs=steps) for gate in gates]
+            if steps == 1:
+                slices = [[value] for value in slices]
+            for parts in slices:
+                for value in parts:
+                    value.type, value.shape = x.type, ir.Shape([1, hidden, 1, 1])
+            rec = recurrent[branch].reshape(4, hidden, hidden)
+            rec_weights = [
+                constant(value.reshape(hidden, hidden, 1, 1), "lstm_recurrent_weights")
+                for value in rec
+            ]
+            initial, cell = state(5, branch), state(6, branch)
+            if isinstance(cell, np.ndarray):
+                cell = constant(cell.reshape(1, hidden, 1, 1), "lstm_initial_cell")
+            hidden_value = initial
+            history = []
+            for ordinal, step in enumerate(reversed(range(steps)) if reverse else range(steps)):
+                activated = {}
+                for gate in (0, 2, 1, 3):
+                    if ordinal == 0 and isinstance(initial, np.ndarray):
+                        values = []
+                        for row in rec[gate]:
+                            total = 0.0
+                            for weight, value in zip(row, initial, strict=True):
+                                total += float(weight) * float(value)
+                            values.append(total)
+                        recurrent_value = constant(
+                            np.asarray(values, dtype=dtype).reshape(1, hidden, 1, 1),
+                            "lstm_initial_gate",
+                        )
+                    else:
+                        recurrent_value = emit(
+                            op.Conv, [hidden_value, rec_weights[gate]], [1, hidden, 1, 1]
+                        )
+                    summed = emit(op.Add, [recurrent_value, slices[gate][step]], [1, hidden, 1, 1])
+                    activated[gate] = emit(
+                        op.Tanh if gate == 3 else op.Sigmoid, [summed], [1, hidden, 1, 1]
+                    )
+                forget = emit(op.Mul, [activated[2], cell], [1, hidden, 1, 1])
+                update = emit(op.Mul, [activated[0], activated[3]], [1, hidden, 1, 1])
+                cell = emit(op.Add, [forget, update], [1, hidden, 1, 1])
+                hidden_value = emit(
+                    op.Mul,
+                    [activated[1], emit(op.Tanh, [cell], [1, hidden, 1, 1])],
+                    [1, hidden, 1, 1],
+                )
+                history.append(hidden_value)
+            history = history[::-1] if reverse else history
+            joined = emit(op.Concat, history, [1, hidden, 1, steps], axis=3)
+            outputs.append([joined, hidden_value, cell])
+        results = []
+        for index in range(self.output_count):
+            values = [branch[index] for branch in outputs]
+            merged = (
+                emit(
+                    op.Concat,
+                    values,
+                    [1, hidden, directions, steps if index == 0 else 1],
+                    axis=2,
+                )
+                if directions == 2
+                else values[0]
+            )
+            arranged = emit(
+                op.Transpose,
+                [merged],
+                [steps if index == 0 else 1, directions, 1, hidden],
+                perm=[3, 2, 0, 1],
+            )
+            if index:
+                arranged = emit(
+                    op.Squeeze,
+                    [arranged, constant(np.array([0], np.int64), "lstm_output_axis")],
+                    [directions, 1, hidden],
+                )
+            results.append(arranged)
+        return results[0] if self.output_count == 1 else results
+
+
+class Lstm1(_LstmRule):
+    """Unroll a fixed-length FP32, batch-one LSTM with its sequence output.
+
+    Each time step becomes pointwise Conv gate projections, Sigmoid/Tanh and
+    elementwise state updates. Forward, reverse and bidirectional layout-0 forms
+    support fixed W/R/bias and fixed or runtime native initial states; custom
+    activations, sequence lengths and peepholes require another lowering.
+    """
+
+    output_count = 1
+
+    def pattern(self, op, x, w, r):
+        """Capture the sequence-only LSTM output form."""
+        return op.LSTM(
+            x,
+            w,
+            r,
+            _outputs=["sequence", "hidden", "cell"][: self.output_count],
+            _allow_other_inputs=True,
+        )
+
+
+class Lstm2(_LstmRule):
+    """Unroll a fixed-length LSTM while preserving sequence and final hidden outputs.
+
+    Each time step becomes pointwise Conv gate projections, Sigmoid/Tanh and
+    elementwise state updates. Forward, reverse and bidirectional layout-0 forms
+    support fixed W/R/bias and fixed or runtime native initial states; custom
+    activations, sequence lengths and peepholes require another lowering.
+    """
+
+    output_count = 2
+
+    def pattern(self, op, x, w, r):
+        """Capture the sequence and hidden-state output form."""
+        return op.LSTM(
+            x,
+            w,
+            r,
+            _outputs=["sequence", "hidden", "cell"][: self.output_count],
+            _allow_other_inputs=True,
+        )
+
+
+class Lstm3(_LstmRule):
+    """Unroll a fixed-length LSTM preserving sequence, hidden and cell outputs.
+
+    Each time step becomes pointwise Conv gate projections, Sigmoid/Tanh and
+    elementwise state updates. Forward, reverse and bidirectional layout-0 forms
+    support fixed W/R/bias and fixed or runtime native initial states; custom
+    activations, sequence lengths and peepholes require another lowering.
+    """
+
+    output_count = 3
+
+    def pattern(self, op, x, w, r):
+        """Capture all three LSTM outputs."""
+        return op.LSTM(
+            x,
+            w,
+            r,
+            _outputs=["sequence", "hidden", "cell"][: self.output_count],
+            _allow_other_inputs=True,
+        )
+
+
+class LstmSequenceLayout(_OperatorRule):
+    """Resolve singleton-only sequence permutations after an LSTM is unrolled.
+
+    A native LSTM sequence Transpose -> lower-rank Reshape becomes an identity
+    Transpose -> Reshape with copied dimensions resolved before the old layout
+    disappears. Shared shape controls retain their source metadata for layout.
+    """
+
+    def __init__(self, graph: DlaGraph, views=None):
+        """Bind shared sequence controls and retain the established SDK rule name."""
+        super().__init__(graph, views)
+        self.name = "LSTMSequenceLayout"
+
+    def pattern(self, op, x, shape):
+        """Capture a sequence permutation followed by a Reshape."""
+        middle = op.Transpose(x, _outputs=["middle"])
+        return op.Reshape(middle, shape, _outputs=["result"])
+
+    def check(self, context, **bindings):
+        """Require native consumer metadata saved by LSTM unrolling."""
+        return "dla_lstm_sequence_layout" in context.root.meta
+
+    def rewrite(self, op, x, shape, result, **_):
+        """Resolve native copied dimensions and retain shape-control provenance."""
+        node = result.producer()
+        source, resolved = node.meta["dla_lstm_sequence_layout"]
+        viewed = op.Transpose(x, perm=list(range(len(source))))
+        viewed.type, viewed.shape = x.type, ir.Shape(source)
+        key = shape, resolved
+        if key not in self.views:
+            self.views[key] = self.graph.add_initializer(
+                op, np.array(resolved, np.int64), "lstm_sequence_shape"
+            )
+            # Retain shared shape ownership for later layout views; IR metadata is not serialized.
+            self.views[key].meta["dla_shape_source"] = shape
+        value = op.Reshape(viewed, self.views[key], **dict(node.attributes))
+        value.type, value.shape = result.type, result.shape
+        return value
+
+
+def _parameter(node, index):
+    return node.inputs[index] if index < len(node.inputs) else None
+
+
+def _validate_lstm(node):
+    dims = static_shape(node.inputs[0])
+    if dims is None or len(dims) != 3 or any(dim <= 0 for dim in dims) or dims[1] != 1:
+        raise ValueError("TODO: support dynamic or multi-batch LSTM inputs")
+    if node.inputs[0].dtype != ir.DataType.FLOAT:
+        raise ValueError("TODO: support non-FP32 LSTM inputs before strong typing")
+    if (
+        node.attributes.get_int("layout", 0) != 0
+        or node.attributes.get_int("input_forget", 0)
+        or node.attributes.get_string("direction", "forward")
+        not in {"forward", "reverse", "bidirectional"}
+        or any(
+            key in node.attributes
+            for key in ("clip", "activations", "activation_alpha", "activation_beta")
+        )
+        or _parameter(node, 4) is not None
+        or _parameter(node, 7) is not None
+    ):
+        raise ValueError(
+            "TODO: support LSTM sequence lengths, peepholes and custom activation options"
+        )
+    directions = 2 if node.attributes.get_string("direction", "forward") == "bidirectional" else 1
+    hidden = node.attributes.get_int("hidden_size", 0)
+    expected = [(directions, 4 * hidden, dims[2]), (directions, 4 * hidden, hidden)]
+    for index, shape in zip((1, 2), expected, strict=True):
+        value = constant_array(_parameter(node, index))
+        if value is None or value.shape != shape or hidden <= 0:
+            raise ValueError(
+                "TODO: support runtime LSTM weights; static weights must match hidden_size"
+            )
+    bias = _parameter(node, 3)
+    if bias is not None and (
+        constant_array(bias) is None or static_shape(bias) != (directions, 8 * hidden)
+    ):
+        raise ValueError("TODO: support runtime LSTM bias")
+    for index in (5, 6):
+        state = _parameter(node, index)
+        if state is not None and static_shape(state) != (directions, 1, hidden):
+            raise ValueError(
+                "LSTM initial states must match direction, batch and hidden dimensions"
+            )
+
+
+def _capture_lstm_sequence_layout(lstm):
+    source = static_shape(lstm.outputs[0])
+    if source is None:
+        return
+    for transpose, port in lstm.outputs[0].uses():
+        if transpose.op_type != "Transpose" or transpose.domain or port != 0:
+            continue
+        perm = transpose.attributes.get_ints("perm", ())
+        if sorted(perm) != list(range(len(source))) or [
+            axis for axis in perm if source[axis] != 1
+        ] != [axis for axis, dim in enumerate(source) if dim != 1]:
+            continue
+        moved = tuple(source[axis] for axis in perm)
+        for reshape, port in transpose.outputs[0].uses():
+            if reshape.op_type != "Reshape" or reshape.domain or port != 0:
+                continue
+            control_values = constant_array(reshape.inputs[1])
+            output = static_shape(reshape.outputs[0])
+            if (
+                control_values is None
+                or control_values.ndim != 1
+                or output is None
+                or len(output) >= 4
+                or reshape.attributes.get_int("allowzero", 0)
+            ):
+                continue
+            resolved = tuple(
+                moved[index] if dim == 0 else int(dim) for index, dim in enumerate(control_values)
+            )
+            reshape.meta["dla_lstm_sequence_layout"] = source, resolved
+
+
 INDEXING_RULES = (GatherIndices, GatherElementsIndices)
+
+RECURRENT_RULES = (Lstm1, Lstm2, Lstm3, LstmSequenceLayout)
 
 MATRIX_RULES = (MatMulToConv, GemmToConv, GemmBiasToConv)
