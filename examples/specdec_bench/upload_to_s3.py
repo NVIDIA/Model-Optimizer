@@ -38,6 +38,7 @@ Usage examples:
 """
 
 import argparse
+import datetime
 import json
 import os
 import sys
@@ -50,11 +51,17 @@ _RUN_SENTINELS = ("configuration.json", "timing.json", "acceptance_rate.json")
 # reproducible from S3. `container_image` carries the torch / CUDA / NCCL
 # versions which dump_env can't otherwise see; without it the row in the
 # visualizer has no path back to the binary environment.
-_REQUIRED_PROVENANCE_FIELDS = ("container_image",)
+_REQUIRED_PROVENANCE_FIELDS = (
+    "container_image",
+    "model_dir",
+    "engine",
+    "engine_version",
+    "timestamp",
+)
 
 
 def _check_provenance(run_dir: Path) -> list[str]:
-    """Return a list of missing required provenance fields in run_dir/configuration.json.
+    """Return missing or malformed provenance fields in run_dir/configuration.json.
 
     Empty list means the run is acceptable for upload. A run with no
     configuration.json at all is reported as missing every field.
@@ -67,7 +74,24 @@ def _check_provenance(run_dir: Path) -> list[str]:
             cfg = json.load(f)
     except (OSError, json.JSONDecodeError):
         return list(_REQUIRED_PROVENANCE_FIELDS)
-    return [k for k in _REQUIRED_PROVENANCE_FIELDS if not cfg.get(k)]
+    if not isinstance(cfg, dict):
+        return list(_REQUIRED_PROVENANCE_FIELDS)
+
+    invalid = []
+    for field in _REQUIRED_PROVENANCE_FIELDS:
+        # The Medusa wrapper has no separate serving-engine package version.
+        if field == "engine_version" and cfg.get("engine") == "SPECBENCH_MEDUSA":
+            continue
+        value = cfg.get(field)
+        if not isinstance(value, str) or not value.strip():
+            invalid.append(field)
+        elif field == "timestamp":
+            try:
+                if datetime.datetime.fromisoformat(value).tzinfo is None:
+                    invalid.append(field)
+            except ValueError:
+                invalid.append(field)
+    return invalid
 
 
 # ── S3 helpers ────────────────────────────────────────────────────────────────
@@ -205,8 +229,8 @@ def main():
         "--allow-incomplete-provenance",
         action="store_true",
         help=(
-            "Allow uploading runs whose configuration.json is missing required "
-            "provenance fields (container_image). Without this flag, such runs "
+            "Allow uploading runs with missing or invalid configuration.json provenance. "
+            "Without this flag, such runs "
             "are rejected because they cannot be strictly reproduced from S3."
         ),
     )
@@ -232,16 +256,16 @@ def main():
     incomplete = [(d, missing) for d, missing in incomplete if missing]
     if incomplete:
         for d, missing in incomplete:
-            print(f"  {d}: missing {missing}", file=sys.stderr)
+            print(f"  {d}: missing or invalid {missing}", file=sys.stderr)
         if not args.allow_incomplete_provenance:
             sys.exit(
-                f"Error: {len(incomplete)} run(s) are missing required provenance "
-                f"fields. Set CONTAINER_IMAGE before running, or pass "
+                f"Error: {len(incomplete)} run(s) have missing or invalid provenance "
+                f"fields. Regenerate configuration.json with valid provenance, or pass "
                 f"--allow-incomplete-provenance to upload anyway."
             )
         print(
             f"Warning: --allow-incomplete-provenance — uploading {len(incomplete)} "
-            f"run(s) with missing provenance.",
+            f"run(s) with missing or invalid provenance.",
             file=sys.stderr,
         )
 
