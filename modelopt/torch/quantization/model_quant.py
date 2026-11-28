@@ -787,11 +787,15 @@ def _auto_quantize_kv_cache(
     fixed_quantization_config: dict[str, Any] | str | None,
 ):
     """Run the KV-cache-specific AutoQuantize validation and search lifecycle."""
-    # Before anything converts the model: an expert-parallel plan without its mesh raises here.
     plan = dist.recorded_distribution_plan(model)
-    ep_mesh = expert_parallel_mesh(model) if plan is not None and plan.is_expert_parallel else None
+    ep_mesh = None
 
     def check_layout() -> None:
+        nonlocal ep_mesh
+        # Before anything converts the model: an expert-parallel plan without its mesh raises here.
+        ep_mesh = (
+            expert_parallel_mesh(model) if plan is not None and plan.is_expert_parallel else None
+        )
         # From transformers 5.16 the expert-parallel load leaves the routed experts' weights
         # DTensors: only theirs, on the layout the load gives them, and FSDP2's own are exempt, so a
         # dense layer a caller shards with tensor parallelism stays refused, as does an expert
@@ -808,8 +812,8 @@ def _auto_quantize_kv_cache(
         _validate_parallel_state(model)
 
     if dist.is_distributed_run():
-        # Each rank checks its own shards in one collective: one refusing alone would leave the
-        # others waiting in the search's first collective.
+        # Each rank checks its own mesh and shards in one collective: one refusing alone would
+        # leave the others waiting in the search's first collective.
         dist.all_reduce("KV-cache AutoQuantize layout", check_layout, lambda _: None)
     else:
         check_layout()
@@ -1273,9 +1277,21 @@ def auto_quantize(
             fixed_quantization_config=fixed_quantization_config,
         )
 
-    # Before anything converts the model: an expert-parallel plan without its mesh raises here.
     plan = dist.recorded_distribution_plan(model)
-    ep_mesh = expert_parallel_mesh(model) if plan is not None and plan.is_expert_parallel else None
+    ep_mesh = None
+
+    def find_ep_mesh() -> None:
+        nonlocal ep_mesh
+        ep_mesh = (
+            expert_parallel_mesh(model) if plan is not None and plan.is_expert_parallel else None
+        )
+
+    # Before anything converts the model: an expert-parallel plan without its mesh raises here, on
+    # every rank, as a rank raising alone would leave the others waiting in the search.
+    if dist.is_distributed_run():
+        dist.all_reduce("AutoQuantize expert-parallel mesh", find_ep_mesh, lambda _: None)
+    else:
+        find_ep_mesh()
 
     method_name = method_name or "gradient"
 

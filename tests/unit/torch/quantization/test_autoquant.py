@@ -1671,10 +1671,12 @@ def _test_weight_layout_on_one_rank(rank, size, layout):
     input_ids = torch.randint(0, 64, (2, 8), generator=torch.Generator().manual_seed(rank))
     model = _sharded_like_the_expert_parallel_load(_tiny_qwen3_moe("torch_a2a"), size)
     experts = model.model.layers[0].mlp.experts
-    # The experts' sums give up in seconds too, not at the pool's timeout, should a rank be left in one.
-    ep_group = torch.distributed.new_group(timeout=timedelta(seconds=10))
-    torch.distributed.barrier(group=ep_group)
-    experts._parallel_state.expert_model_parallel_group = DistributedProcessGroup(ep_group)
+    # Two groups of every rank for the experts, whose sums then give up in seconds too, not at the
+    # pool's timeout, should a rank be left in one.
+    groups = [torch.distributed.new_group(timeout=timedelta(seconds=10)) for _ in range(2)]
+    for group in groups:
+        torch.distributed.barrier(group=group)
+    experts._parallel_state.expert_model_parallel_group = DistributedProcessGroup(groups[0])
     try:
         with pytest.MonkeyPatch.context() as patch:
             if layout == "refused":
@@ -1689,10 +1691,17 @@ def _test_weight_layout_on_one_rank(rank, size, layout):
                     if rank == 0
                     else (RuntimeError, "rank 0 failed to compute AutoQuantize weight layouts")
                 )
-            else:  # rank 1 holds a plain shard of a projection rank 0 holds whole, as a DTensor
-                if rank == 1:
+            else:
+                # A plain shard of a projection, summed over the experts' group: on rank 1 alone,
+                # rank 0 holding it whole, as a DTensor; or on both, rank 0 summing it over the
+                # other group of the same ranks.
+                if layout == "over_another_group" or rank == 1:
                     experts.down_proj = torch.nn.Parameter(experts.down_proj.to_local())
-                error, match = ValueError, "lay out the weights AutoQuantize counts differently"
+                if layout == "over_another_group" and rank == 0:
+                    experts._parallel_state.expert_model_parallel_group = DistributedProcessGroup(
+                        groups[1]
+                    )
+                error, match = ValueError, "out of step"
             with bounded_collectives(), pytest.raises(error, match=match):
                 mtq.auto_quantize(
                     model,
@@ -1708,17 +1717,33 @@ def _test_weight_layout_on_one_rank(rank, size, layout):
                     num_score_steps=1,
                 )
     finally:
-        torch.distributed.destroy_process_group(ep_group)
+        for group in groups:
+            torch.distributed.destroy_process_group(group)
 
 
-@pytest.mark.parametrize("layout", ["refused", "unlike_the_other_ranks"])
+@pytest.mark.parametrize("layout", ["refused", "unlike_the_other_ranks", "over_another_group"])
 def test_expert_parallel_weight_layout_on_one_rank_raises_on_every_rank(cpu_dist_workers, layout):
     """A layout the cost refuses on some ranks alone, or one rank laying out a projection unlike
-    the others of its group, fails the search on every rank before any enters the cost's sums."""
+    the others of its group or summing it over another process group of the same ranks, fails the
+    search on every rank before any enters the cost's sums."""
     transformers = pytest.importorskip("transformers")
     if Version(transformers.__version__) < Version("5.16"):
         pytest.skip("transformers' expert-parallel load shards the experts as DTensors from 5.16")
     cpu_dist_workers.run(_test_weight_layout_on_one_rank, layout=layout)
+
+
+def _weight_search(model, data_loader, directory):
+    return mtq.auto_quantize(
+        model,
+        constraints={"effective_bits": 6.0},
+        quantization_formats=[mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG, mtq.INT8_DEFAULT_CFG],
+        data_loader=data_loader,
+        forward_step=lambda model, batch: model(**batch),
+        loss_func=lambda output, _: output.loss,
+        num_calib_steps=1,
+        num_score_steps=1,
+        checkpoint=str(directory),
+    )[1]
 
 
 def _test_expert_parallel_weight_search_resumes(rank, size, directory, files):
@@ -1731,19 +1756,11 @@ def _test_expert_parallel_weight_search_resumes(rank, size, directory, files):
 
     def search():
         model = _sharded_like_the_expert_parallel_load(_tiny_qwen3_moe("torch_a2a"), size)
-        return mtq.auto_quantize(
-            model,
-            constraints={"effective_bits": 6.0},
-            quantization_formats=[mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG, mtq.INT8_DEFAULT_CFG],
-            data_loader=batches[rank::size],
-            forward_step=lambda model, batch: model(**batch),
-            loss_func=lambda output, _: output.loss,
-            num_calib_steps=1,
-            num_score_steps=1,
-            checkpoint=str(directory),
-        )[1]
+        return _weight_search(model, batches[rank::size], directory)
 
     searched = search()
+    if files == "in_one_process":  # resumed by the test's own process
+        return
     if files == "swapped" and rank == 0:  # bounded_collectives waits for it
         first, second, spare = (directory / f"{name}.pth" for name in ("rank0", "rank1", "spare"))
         first.rename(spare)
@@ -1760,7 +1777,7 @@ def _test_expert_parallel_weight_search_resumes(rank, size, directory, files):
     assert resumed["candidate_stats"] == searched["candidate_stats"]
 
 
-@pytest.mark.parametrize("files", ["own", "swapped"])
+@pytest.mark.parametrize("files", ["own", "swapped", "in_one_process"])
 def test_expert_parallel_weight_search_resumes_from_its_checkpoint(
     cpu_dist_workers, tmp_path, files
 ):
@@ -1770,6 +1787,61 @@ def test_expert_parallel_weight_search_resumes_from_its_checkpoint(
     cpu_dist_workers.run(
         _test_expert_parallel_weight_search_resumes, directory=tmp_path, files=files
     )
+    if files == "in_one_process":
+        # One process takes rank 0's file, whose calibration holds rank 0's experts alone: refused
+        # before it is restored into the whole model.
+        input_ids = torch.randint(0, 64, (2, 8))
+        with pytest.raises(ValueError, match="get_auto_quantize_config"):
+            _weight_search(
+                _tiny_qwen3_moe("grouped_mm"),
+                [{"input_ids": input_ids, "labels": input_ids}],
+                tmp_path,
+            )
+
+
+def _test_search_without_its_mesh_on_one_rank(rank, size, method):
+    register_torch_a2a()
+    model = _sharded_like_the_expert_parallel_load(_tiny_qwen3_moe("torch_a2a"), size)
+    if rank == 0:  # handed the model without the mesh its experts are sharded over
+        del model._device_mesh
+    if method == "kl_div":
+        search, forward_step, constraints = _kv_cache_search()
+    else:
+        search = {
+            "quantization_formats": [mtq.INT8_DEFAULT_CFG],
+            "loss_func": lambda output, _: output.loss,
+        }
+        forward_step, constraints = (lambda model, batch: model(**batch)), {"effective_bits": 8.0}
+    input_ids = torch.randint(0, 64, (2, 8), generator=torch.Generator().manual_seed(rank))
+    error, match = (
+        (RuntimeError, "carries no device mesh")
+        if rank == 0
+        else (RuntimeError, "rank 0 failed to compute")
+    )
+    with bounded_collectives(), pytest.raises(error, match=match):
+        mtq.auto_quantize(
+            model,
+            constraints=constraints,
+            data_loader=[{"input_ids": input_ids, "labels": input_ids}],
+            forward_step=forward_step,
+            num_calib_steps=1,
+            num_score_steps=1,
+            method=method,
+            **search,
+        )
+    assert not any(isinstance(module, TensorQuantizer) for module in model.modules())
+
+
+@pytest.mark.parametrize("method", ["gradient", "kl_div"])
+def test_expert_parallel_search_without_its_mesh_on_one_rank_raises_on_every_rank(
+    cpu_dist_workers, method
+):
+    """A rank whose model lacks the mesh its experts are sharded over fails the weight and the
+    KV-cache search on every rank, before any rank converts its model."""
+    transformers = pytest.importorskip("transformers")
+    if Version(transformers.__version__) < Version("5.16"):
+        pytest.skip("transformers' expert-parallel load shards the experts as DTensors from 5.16")
+    cpu_dist_workers.run(_test_search_without_its_mesh_on_one_rank, method=method)
 
 
 def _test_kv_resume_with_one_stale_expert_shard(rank, size, directory):

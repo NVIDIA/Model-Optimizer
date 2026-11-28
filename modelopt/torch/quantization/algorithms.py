@@ -28,7 +28,7 @@ from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Callable, Sequence
 from contextlib import ExitStack, nullcontext
-from typing import Any
+from typing import Any, cast
 
 import regex as re
 import torch
@@ -924,6 +924,12 @@ def _group_ranks(group: DistributedProcessGroup) -> tuple[int, ...]:
     )
 
 
+def _group_name(group: DistributedProcessGroup) -> str:
+    """The name of an initialized ``group``'s communicator, which torch gives alike on its ranks."""
+    process_group = group.group or torch.distributed.group.WORLD
+    return cast("torch.distributed.ProcessGroup", process_group).group_name
+
+
 def _mesh_spans(weight: torch.Tensor, group: DistributedProcessGroup) -> bool:
     """Whether ``weight`` is a DTensor whose mesh holds every rank of ``group``: whole over it."""
     if not isinstance(weight, DTensor):
@@ -947,7 +953,7 @@ def _whole_over(mesh_ranks: set[int], group_ranks: set[int]) -> bool:
 
 
 def _weight_layouts_by_group(hparams: Sequence["QuantRecipeHparam"]) -> dict[tuple, str]:
-    """What every rank of each group the cost sums over must hold alike, by the group's ranks.
+    """What every rank of each group the cost sums over must hold alike, by its ranks and name.
 
     A digest of the modules the cost sums over the group, in order, with the groups each of their
     weights is summed over.
@@ -968,7 +974,7 @@ def _weight_layouts_by_group(hparams: Sequence["QuantRecipeHparam"]) -> dict[tup
             )
             for kind, group in kinds.items():
                 if group.is_initialized():
-                    by_group[_group_ranks(group)].append((h, m, kind, layout))
+                    by_group[_group_ranks(group), _group_name(group)].append((h, m, kind, layout))
     return {
         ranks: hashlib.sha256(repr(modules).encode()).hexdigest()
         for ranks, modules in by_group.items()
@@ -976,13 +982,14 @@ def _weight_layouts_by_group(hparams: Sequence["QuantRecipeHparam"]) -> dict[tup
 
 
 def _refuse_unlike_layouts(by_group_of_rank: list) -> None:
-    for ranks in sorted({ranks for by_group in by_group_of_rank for ranks in by_group}):
-        if len({by_group_of_rank[other].get(ranks) for other in ranks}) > 1:
+    for group in sorted({group for by_group in by_group_of_rank for group in by_group}):
+        ranks = group[0]
+        if len({by_group_of_rank[other].get(group) for other in ranks}) > 1:
             raise ValueError(
-                f"Ranks {list(ranks)} lay out the weights AutoQuantize counts differently, e.g. one "
-                "a DTensor and another a plain shard of it, so their sums of the weights' sizes "
-                "would go out of step. Lay the model out alike on every rank, as load_pretrained "
-                "loads it."
+                f"Ranks {list(ranks)} would sum the sizes of the weights AutoQuantize counts out "
+                "of step: they lay the weights out differently (e.g. one a DTensor and another a "
+                "plain shard of it), or sum them over different process groups. Lay the model out "
+                "alike on every rank, as load_pretrained loads it."
             )
 
 
@@ -1787,14 +1794,19 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         restored_plan, plan = getattr(self, "distribution_plan", None), _plan_signature(self.model)
         restored_world_size = getattr(self, "checkpoint_world_size", None)
         world_size = torch.distributed.get_world_size() if is_distributed_run() else 1
-        if is_distributed_run() and (self.quantizer_states or self.candidate_stats):
-            if restored_plan not in (None, plan):
+        if self.quantizer_states or self.candidate_stats:
+            # One process resumes a file one process wrote, or one with no plan recorded, as on
+            # main; a rank's file of a run under a plan holds that rank's share, e.g. its experts.
+            if restored_plan not in (None, plan) and (
+                is_distributed_run() or restored_world_size not in (None, 1)
+            ):
                 raise ValueError(
                     f"The AutoQuantize checkpoint was written under {restored_plan}, not {plan}. "
                     "Resume with the same world size and expert-parallel degree, or use a new "
-                    "checkpoint path."
+                    "checkpoint path. To re-solve its scores in one process, pass its search state "
+                    "to get_auto_quantize_config()."
                 )
-            if restored_world_size not in (None, world_size):
+            if is_distributed_run() and restored_world_size not in (None, world_size):
                 raise ValueError(
                     f"The AutoQuantize checkpoint was written by a run of {restored_world_size} "
                     f"ranks, not {world_size}. Resume with the same world size, or use a new "
