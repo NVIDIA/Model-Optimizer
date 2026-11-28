@@ -107,7 +107,9 @@ def experiment(tmp_path_factory):
     return root
 
 
-def _run(root, name, resume=None, ignore_pushes_after=(-1, -1), dropped_memory_rows=(0, 0)):
+def _run(
+    root, name, resume=None, ignore_pushes_after=(-1, -1), dropped_memory_rows=(0, 0), overrides=()
+):
     """One run on fresh servers; returns the exit codes and each node's server log."""
     ports = [[get_free_port() for _ in range(SERVERS)] for _ in range(NODES)]
     servers, trainers, master_port = [], [], get_free_port()
@@ -149,6 +151,7 @@ def _run(root, name, resume=None, ignore_pushes_after=(-1, -1), dropped_memory_r
             f"training.output_dir={root / name}",
             f"onpolicy.server_urls=[{urls}]",
             f"onpolicy.capture_dir={root / f'{name}_capture{node}'}",
+            *overrides,
         ]
         log = open(root / f"{name}_trainer{node}.log", "w")
         trainers.append(subprocess.Popen(list(map(str, cmd)), env=ENV, stdout=log, stderr=log))
@@ -183,10 +186,14 @@ def test_onpolicy_loop_shards_resumes_exactly_and_rejects_stale_records(experime
     assert not list((root / "a_capture0").iterdir())  # records are consumed once
 
     # Resume from checkpoint-2 in a copy of the output, as after a crash before checkpoint-4, on
-    # fresh servers: steps 3-4 replay exactly and replace their metrics.
+    # fresh servers: steps 3-4 replay exactly and replace their metrics. Retention spares
+    # checkpoint-2, whose export the servers were launched from.
     shutil.copytree(root / "a", root / "b", ignore=shutil.ignore_patterns("checkpoint-4"))
-    codes, resumed_logs = _run(root, "b", resume=root / "b" / "checkpoint-2")
+    codes, resumed_logs = _run(
+        root, "b", resume=root / "b" / "checkpoint-2", overrides=["training.save_total_limit=1"]
+    )
     assert codes == [0, 0]
+    assert (root / "b/checkpoint-2/export").is_dir()
     assert all(r["version"] == r["step"] - 1 for log in resumed_logs for r in log)
     for node in range(NODES):
         assert [r["prompt"] for r in resumed_logs[node]] == [

@@ -127,6 +127,7 @@ class OnPolicyTrainer:
             cfg.data_dir, tokenizer, cfg.max_prompt_len, seed, self.rank, self.world
         )
         self.start = 0 if resume_from is None else self._load(resume_from)
+        self.launch_ckpt = None if resume_from is None else resume_from.resolve()
         self.out_dir = Path(targs.output_dir)
         self.out_dir.mkdir(parents=True, exist_ok=True)
         if resume_from is not None and self.rank == 0:
@@ -290,7 +291,9 @@ class OnPolicyTrainer:
                     self.out_dir.glob("checkpoint-*[0-9]"), key=lambda p: int(p.name[11:])
                 )
                 for old in done[: -limit if limit else 0]:
-                    shutil.rmtree(old)
+                    # The servers run this checkpoint's export: vLLM's DFlash rereads it on every push.
+                    if old.resolve() != self.launch_ckpt:
+                        shutil.rmtree(old)
 
         # The phases end together, so a failure on one rank (e.g. a full disk) stops every rank.
         for phase in (start, write, publish):
