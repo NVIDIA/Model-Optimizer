@@ -254,8 +254,9 @@ def test_quant_recipe_hparam_cost_weight_and_effective_bits_compose():
     """cost_weight (active_moe) and effective_bits stack multiplicatively in get_cost."""
     model_test = mtq.quantize(torch.nn.Linear(4, 16), mtq.NVFP4_DEFAULT_CFG)
     numel = model_test.weight.numel()
+    override = QuantRecipe({**mtq.NVFP4_DEFAULT_CFG, "effective_bits": 8.0}, name="NVFP4_8B")
     hparam = QuantRecipeHparam(
-        [QuantRecipe(mtq.NVFP4_DEFAULT_CFG)],
+        [QuantRecipe(mtq.NVFP4_DEFAULT_CFG), override],
         quant_modules=[model_test],
         quant_module_names=["layers.0.mlp.experts.0.down_proj"],
         cost_weight=0.03125,
@@ -267,8 +268,60 @@ def test_quant_recipe_hparam_cost_weight_and_effective_bits_compose():
         numel * 0.03125 * (4.5 / 16)
     )
     # A recipe-level effective_bits override (8.0) wins over the library default and still stacks.
-    override = QuantRecipe({**mtq.NVFP4_DEFAULT_CFG, "effective_bits": 8.0}, name="NVFP4_8B")
     assert hparam.get_cost(override) == pytest.approx(numel * 0.03125 * 0.5)
+
+
+@pytest.mark.parametrize(
+    ("weight_pattern", "expected_bits"),
+    [("*weight_quantizer", 8), ("*experts*weight_quantizer", 16)],
+)
+def test_quant_recipe_hparam_cost_uses_resolved_weight_format(weight_pattern, expected_bits):
+    module = mtq.quantize(torch.nn.Linear(32, 32), mtq.INT8_DEFAULT_CFG)
+    recipe = QuantRecipe(
+        {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {"quantizer_name": weight_pattern, "cfg": {"num_bits": 8}},
+                {"quantizer_name": "*input_quantizer", "cfg": {"num_bits": 4}},
+            ],
+        },
+        name="mixed",
+    )
+    hparam = QuantRecipeHparam([recipe], quant_modules=[module])
+    assert hparam.get_cost(recipe) == pytest.approx(module.weight.numel() * expected_bits / 16)
+
+
+def test_quant_recipe_hparam_cost_uses_sequential_weight_format():
+    module = mtq.quantize(torch.nn.Linear(32, 32), mtq.INT8_DEFAULT_CFG)
+    recipe = QuantRecipe(mtq.W4A8_AWQ_BETA_CFG)
+    hparam = QuantRecipeHparam([recipe], quant_modules=[module])
+    assert hparam.get_cost(recipe) == pytest.approx(module.weight.numel() * 4 / 16)
+
+
+def test_quant_recipe_hparam_cost_orders_candidates_by_resolved_cost():
+    model = mtq.quantize(torch.nn.Linear(32, 32), mtq.INT8_DEFAULT_CFG)
+    # The 4-bit activation gives this recipe a lower nominal cost than the
+    # INT8 recipe, but its disabled weight actually costs 16 bits.
+    activation_only = QuantRecipe(
+        {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {"quantizer_name": "*input_quantizer", "cfg": {"num_bits": 4}},
+            ],
+        },
+        name="activation_only",
+    )
+    int8 = QuantRecipe(mtq.INT8_DEFAULT_CFG)
+    hparam = QuantRecipeHparam([activation_only, int8], quant_modules=[model])
+    model._register_hparam("quant_recipe", hparam)
+
+    searcher = AutoQuantizeGradientSearcher()
+    searcher.reset_search()
+    searcher.model = model
+    searcher.initialize_candidate_stats()
+    stats = next(iter(searcher.candidate_stats.values()))
+    assert stats["formats"] == [int8, activation_only, QuantRecipe(None)]
+    assert stats["costs"] == [512.0, 1024.0, 1024.0]
 
 
 def test_auto_quantize_cost_model_excludes_module_name_patterns():

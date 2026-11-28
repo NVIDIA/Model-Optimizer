@@ -778,22 +778,50 @@ class QuantRecipeHparam(Hparam):
             total_score += importance.item()
         return total_score
 
+    def _module_weight_compression(self, recipe: QuantRecipe, module: nn.Module) -> float:
+        """Price a single-weight module using the quantizers resolved for this candidate."""
+        quantizer = self._all_quantizer_choices[recipe][module].get("weight_quantizer")
+        if quantizer is None:
+            # Fused experts require per-projection/per-expert weight accounting.
+            return recipe.compression
+
+        enabled = [q for q in _iter_tensor_quantizers(quantizer) if q.is_enabled]
+        if not enabled:
+            return 1.0
+        if recipe.config.effective_bits is not None:
+            return recipe.config.effective_bits / 16.0
+
+        # Sequential quantizers (e.g. W4A8) encode one weight, not separate weights.
+        bits = []
+        for q in enabled:
+            if (effective_bits := getattr(q, "_effective_bits", None)) is not None:
+                bits.append(effective_bits)
+            elif isinstance(q.num_bits, tuple):
+                bits.append(sum(q.num_bits) + 1)
+            elif isinstance(q.num_bits, int):
+                bits.append(q.num_bits)
+            else:
+                raise ValueError(f"Cannot infer AutoQuantize cost from num_bits={q.num_bits!r}.")
+        return min(bits) / 16.0
+
     def get_cost(self, recipe: QuantRecipe, cost_weight: float | None = None) -> float:
         """Get the cost for a given recipe.
 
-        The cost is the total weight size of the quantizable modules multiplied by
-        the compression ratio of the recipe.
+        The cost is the total weight size of the quantizable modules weighted by
+        the resolved weight compression ratio.
         """
         cost_weight = self.cost_weight if cost_weight is None else cost_weight
         cost = 0
         for quant_module in self.quant_modules:
             weight_size = (
-                _AutoQuantizeBaseSearcher._get_total_weight_size([quant_module]) * cost_weight
+                _AutoQuantizeBaseSearcher._get_total_weight_size([quant_module])
+                * self._module_weight_compression(recipe, quant_module)
+                * cost_weight
             )
             parallel_state = getattr(quant_module, "parallel_state", None)
 
             if parallel_state is None:
-                cost += weight_size * recipe.compression
+                cost += weight_size
                 continue
 
             weight_size = DistributedProcessGroup.get_dist_syncd_obj(
@@ -811,7 +839,7 @@ class QuantRecipeHparam(Hparam):
                 [parallel_state.data_parallel_group],
                 lambda a: a[0],
             )
-            cost += weight_size * recipe.compression
+            cost += weight_size
 
         return cost
 
@@ -1404,6 +1432,10 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                 scored = self._scores_recipe(hparam, recipe)
                 raw_scores.append(hparam.get_score(recipe) if scored else None)
                 costs.append(hparam.get_cost(recipe))
+            # The resolved weight costs can differ from the recipe-wide estimates
+            # used to order solver_choices. Keep the search ladder cost-ordered.
+            ordered = sorted(zip(costs, formats, raw_scores, strict=True), key=lambda row: row[0])
+            costs, formats, raw_scores = map(list, zip(*ordered, strict=True))
             scores = _monotone_scores(raw_scores)
 
             self.candidate_stats[name]["formats"] = formats
