@@ -115,7 +115,8 @@ def _plain_repair_quantizer(quantizer):
     # As in _is_plain_fake_quant: pre-scales/rotation are captured in IQScaleState,
     # but live enablement, calibration, post-transforms and hooks must still run.
     return (
-        quantizer.is_enabled
+        type(quantizer) is TensorQuantizer
+        and quantizer.is_enabled
         and quantizer._if_quant
         and quantizer.fake_quant
         and not quantizer._if_calib
@@ -217,7 +218,12 @@ def repair_grouped_linear(quantizers, inputs, offsets, bias=None, *, is_transpos
     states: list[IQScaleState] = []
     for quantizer in quantizers:
         state = getattr(quantizer, "_local_repair_state", None)
-        if not isinstance(state, IQScaleState) or not _plain_repair_quantizer(quantizer):
+        if (
+            not isinstance(state, IQScaleState)
+            or not _plain_repair_quantizer(quantizer)
+            or state.weight_dtype != inputs.dtype
+            or any(isinstance(value, DTensor) for value in (*state.buffers(), *state.parameters()))
+        ):
             return None
         states.append(state)
     if (
@@ -262,7 +268,9 @@ def repair_grouped_linear(quantizers, inputs, offsets, bias=None, *, is_transpos
             raise
         return None
 
-    key = tuple((p.data_ptr(), p._version) for p in packed)
+    # Byte updates do not alter a pointer table. Inference buffers have no
+    # version counter; device and ordered addresses fully identify this table.
+    key = inputs.device, tuple(p.data_ptr() for p in packed)
     cached = getattr(first, "_grouped_pointers", None)
     if cached is None or cached[0] != key:
         with torch.inference_mode(False):
@@ -296,6 +304,7 @@ class IQScaleState(nn.Module):
         self.name = quantizer.num_bits
         self.format = IQ_FORMAT_REGISTRY[self.name]
         self.weight_shape = tuple(weight_shape)
+        self.weight_dtype = processed_weight.dtype
         self.codec_shape = (
             tuple(quantizer._original_shape)
             if quantizer.is_static_block_quant
@@ -376,7 +385,9 @@ class IQScaleState(nn.Module):
         """Use packed GEMM only in a numerically and empirically qualified regime."""
         if (
             self.codec_shape != self.weight_shape
+            or self.weight_dtype != inputs.dtype
             or isinstance(inputs, DTensor)
+            or any(isinstance(value, DTensor) for value in (*self.buffers(), *self.parameters()))
             or not _packed_projection_qualified(inputs, self.name, self.weight_shape)
         ):
             return None

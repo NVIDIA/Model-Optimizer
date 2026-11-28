@@ -53,6 +53,20 @@ class _QuantLinear(QuantLinearConvBase):
             and not args
             and not kwargs
             and not getattr(quantizer, "rotate_back_is_enabled", False)
+            and self._parameters["weight"].dtype == input.dtype
+            and type(self.input_quantizer) is TensorQuantizer
+            and type(self.output_quantizer) is TensorQuantizer
+            # Activation hooks can observe self.weight. The superclass runs
+            # them inside quantize_weight(), so retain that context when hooked.
+            and not (
+                nn.modules.module._global_forward_hooks
+                or nn.modules.module._global_forward_pre_hooks
+                or any(
+                    child._forward_hooks or child._forward_pre_hooks
+                    for activation in (self.input_quantizer, self.output_quantizer)
+                    for child in activation.modules()
+                )
+            )
         ):
             # Import lazily: repair_formats imports nn.modules, including this module.
             from ...repair_formats import _packed_projection_qualified, repair_linear

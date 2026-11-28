@@ -637,6 +637,7 @@ def test_grouped_iq_projection_matches_uneven_native_experts(name, dtype):
 @pytest.mark.parametrize("name", ["iq1_m", "iq2_xxs"])
 @pytest.mark.timeout(180)
 def test_automatic_packed_projection_matches_native_fields(name, noncurrent, monkeypatch, capsys):
+    pytest.importorskip("triton")
     if noncurrent and torch.cuda.device_count() < 2:
         pytest.skip("Noncurrent dense dispatch requires two CUDA devices")
     if not torch.cuda.is_available():
@@ -846,6 +847,23 @@ def test_automatic_grouped_projection_preserves_native_fields(
         assert pointers.numel() == 4 and not pointers.requires_grad
         for state, original in zip(states, original_codes, strict=True):
             torch.testing.assert_close(state.packed, original, rtol=0, atol=0)
+        # Fresh preparation inside inference mode creates packed buffers without
+        # version counters; pointer-table caching must not inspect those counters.
+        policy.close()
+        with torch.inference_mode():
+            policy.prepare(bank)
+            assert all(torch.is_inference(q._local_repair_state.packed) for q in quantizers)
+            inference_output = repair_grouped_linear(quantizers, x, ends)
+            assert inference_output is not None
+            inference_expected = torch.cat(
+                [
+                    F.linear(x[start:end], q(module.weight))
+                    for start, end, q, module in zip(
+                        (0, 5, 5, 8), (5, 5, 8, 8), quantizers, bank, strict=True
+                    )
+                ]
+            )
+            torch.testing.assert_close(inference_output, inference_expected, rtol=0.01, atol=0.015)
     finally:
         policy.close()
 
