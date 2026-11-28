@@ -44,6 +44,10 @@ Changelog
 
 **Bug Fixes**
 
+*Distillation*
+
+- Fix ``MFTLoss`` raising an out-of-bounds indexing error when ``labels`` contains negative padding ignore indices (such as ``-100``).
+
 *Quantization*
 
 - ``capture_quantized_weight_export_state`` now works on FSDP2-sharded (DTensor) weights; it raised on them, and could pick another weight's quantizer when local shards were empty.

@@ -157,12 +157,14 @@ class MFTLoss(Loss):
         # logits: (batch, channels)
         # labels: (batch)
         distribution = F.softmax(logits, dim=-1)  # (batch, channels)
+        valid_mask = labels >= 0
+        safe_labels = torch.where(valid_mask, labels, torch.zeros_like(labels))
 
         argmax = distribution.argmax(dim=-1)  # (batch,)
-        incorrect_argmax = argmax != labels  # (batch,)
+        incorrect_argmax = (argmax != safe_labels) & valid_mask  # (batch,)
 
         p_argmax = torch.gather(distribution, 1, argmax.unsqueeze(1)).squeeze(1)  # (batch,)
-        p_label = torch.gather(distribution, 1, labels.unsqueeze(1)).squeeze(1)  # (batch,)
+        p_label = torch.gather(distribution, 1, safe_labels.unsqueeze(1)).squeeze(1)  # (batch,)
 
         # correction of the distribution at the tokens where the argmax is incorrect
         mixin_factor = (p_argmax - p_label + threshold) / (
@@ -172,7 +174,7 @@ class MFTLoss(Loss):
             1 - mixin_factor.unsqueeze(1)
         )  # (batch, channels)
         _ = adjusted_incorrect_distribution.scatter_add_(
-            1, labels.unsqueeze(1), mixin_factor.unsqueeze(1)
+            1, safe_labels.unsqueeze(1), mixin_factor.unsqueeze(1)
         )  # (batch, channels)
 
         if apply_threshold_to_all:
@@ -186,16 +188,17 @@ class MFTLoss(Loss):
                 1 - mixin_factor.unsqueeze(1)
             )  # (batch, channels)
             _ = adjusted_correct_distribution.scatter_add_(
-                1, labels.unsqueeze(1), mixin_factor.unsqueeze(1)
+                1, safe_labels.unsqueeze(1), mixin_factor.unsqueeze(1)
             )
         else:
             adjusted_correct_distribution = distribution
 
-        return torch.where(
+        corrected = torch.where(
             incorrect_argmax.unsqueeze(1),
             adjusted_incorrect_distribution,
             adjusted_correct_distribution,
-        )  # (batch, channels)
+        )
+        return torch.where(valid_mask.unsqueeze(1), corrected, distribution)  # (batch, channels)
 
 
 class MGDLoss(Loss):
