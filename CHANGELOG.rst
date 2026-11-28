@@ -22,6 +22,7 @@ Changelog
 
 *Quantization - Export & Deployment*
 
+- ``examples/hf_ptq/hf_ptq.py`` launched by ``torchrun`` without ``--use_fsdp2`` now FSDP2-shards a model whose distribution plan shards it whole, as ``--use_fsdp2`` does, where it used to stop and ask for the flag. Such a plan comes from a model that does not fit one GPU and does not run expert-parallel, or from ``MODELOPT_EP_DEGREE=1`` with ``MODELOPT_FSDP_SIZE=world``.
 - ``examples/hf_ptq/convert_ggml_to_int8.py`` now also converts GGML exports that hold other formats (FP8, NVFP4, KV cache quantization): their GGML layers become ModelOpt ``INT8_PB_WO`` layers beside the rest of the export, which vLLM newer than 0.34.0 serves. Exports with only GGML layers still become compressed-tensors, and fused MoE experts now convert in both.
 
 *Quantization - Recipes*
