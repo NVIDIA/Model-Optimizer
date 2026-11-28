@@ -19,13 +19,16 @@ import copy
 import fnmatch
 import functools
 import gc
+import hashlib
+import numbers
 import types
+import uuid
 import warnings
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Callable, Sequence
 from contextlib import ExitStack, nullcontext
-from typing import Any
+from typing import Any, cast
 
 import regex as re
 import torch
@@ -39,7 +42,16 @@ from modelopt.torch.opt.hparam import CustomHPType, Hparam, HPType
 from modelopt.torch.opt.searcher import LPS, BaseSearcher, SearchConfig, SearchStateDict
 from modelopt.torch.opt.utils import get_hparam, named_hparams
 from modelopt.torch.utils import create_param_grad_clear_hook, print_rank_0, report_memory
-from modelopt.torch.utils.distributed import DistributedProcessGroup, ParallelState, is_master
+from modelopt.torch.utils.distributed import (
+    DistributedProcessGroup,
+    ParallelState,
+    all_reduce,
+    broadcast_from,
+    is_distributed_run,
+    is_master,
+    rank,
+    recorded_distribution_plan,
+)
 
 from . import config as mtq_config
 from . import model_calib
@@ -48,7 +60,7 @@ from ._auto_quantize_cost import (
     AUTO_QUANTIZE_CONSTRAINT_KEYS,
     COST_MODEL_ACTIVE_MOE,
     COST_MODEL_WEIGHT,
-    _get_module_weight_numel,
+    _get_module_weights,
     get_auto_quantize_cost_model,
     normalize_auto_quantize_constraints,
 )
@@ -58,6 +70,7 @@ from .ggml import GGML_FORMAT_REGISTRY
 from .ggml.common import PIN_OVERRIDES_WEIGHT, drop_search_scales
 from .nn import QuantLinearConvBase, QuantModule, SequentialQuantizer, TensorQuantizer
 from .utils import is_quantized_linear
+from .utils.core_utils import _group_ranks
 
 
 def _is_hf_quant_fused_experts_module(module: nn.Module) -> bool:
@@ -268,7 +281,8 @@ def _check_restorable(model: nn.Module, params: dict) -> None:
         if param.is_meta or isinstance(param, DTensor):
             raise NotImplementedError(
                 f"Weight-rewriting AutoQuantize candidates need materialized, unsharded "
-                f"weights; {name}'s are on the meta device (offloaded) or a DTensor (FSDP2)."
+                f"weights; {name}'s are on the meta device (offloaded) or a DTensor (FSDP2, or "
+                "routed experts sharded expert-parallel from transformers 5.16)."
             )
         # GPTQ and imatrix encode the stored values and the selected codes decode into their
         # dtype, so a packed or scaled weight (a native FP8 checkpoint's) is refused.
@@ -778,6 +792,42 @@ class QuantRecipeHparam(Hparam):
             total_score += importance.item()
         return total_score
 
+    def weight_layouts(self) -> list[tuple[ParallelState | None, list[tuple[int, tuple]]]]:
+        """Each quant module's parallel state, and each weight's size with the groups to sum it over.
+
+        A plain tensor is this rank's shard over the TP and EP groups, and a DTensor is whole over its
+        mesh, as for the routed experts transformers shards expert-parallel: a weight is summed over
+        the TP and EP groups its mesh leaves out. Makes no collective call.
+        """
+        layouts = []
+        for quant_module in self.quant_modules:
+            parallel_state = getattr(quant_module, "parallel_state", None)
+            groups = (
+                ()
+                if parallel_state is None
+                else (
+                    parallel_state.tensor_parallel_group,
+                    parallel_state.expert_model_parallel_group,
+                )
+            )
+            weights = (
+                _get_module_weights(quant_module)
+                if _AutoQuantizeBaseSearcher._is_auto_quantize_module(quant_module)
+                else []
+            )
+            summed_over = [
+                tuple(
+                    group
+                    for group in groups
+                    if group.is_initialized() and not _mesh_spans(weight, group)
+                )
+                for weight in weights
+            ]
+            layouts.append(
+                (parallel_state, [(w.numel(), over) for w, over in zip(weights, summed_over)])
+            )
+        return layouts
+
     def get_cost(self, recipe: QuantRecipe, cost_weight: float | None = None) -> float:
         """Get the cost for a given recipe.
 
@@ -786,31 +836,23 @@ class QuantRecipeHparam(Hparam):
         """
         cost_weight = self.cost_weight if cost_weight is None else cost_weight
         cost = 0
-        for quant_module in self.quant_modules:
-            weight_size = (
-                _AutoQuantizeBaseSearcher._get_total_weight_size([quant_module]) * cost_weight
+        for parallel_state, weights in self.weight_layouts():
+            numels: dict[tuple, int] = {}
+            for numel, groups in weights:
+                numels[groups] = numels.get(groups, 0) + numel
+            weight_size = sum(
+                DistributedProcessGroup.get_dist_syncd_obj(numel * cost_weight, list(groups), sum)
+                if groups
+                else numel * cost_weight
+                for groups, numel in numels.items()
             )
-            parallel_state = getattr(quant_module, "parallel_state", None)
-
-            if parallel_state is None:
-                cost += weight_size * recipe.compression
-                continue
-
-            weight_size = DistributedProcessGroup.get_dist_syncd_obj(
-                weight_size,
-                [
-                    parallel_state.tensor_parallel_group,
-                    parallel_state.expert_model_parallel_group,
-                ],
-                sum,
-            )
-
-            # Across data parallel groups, the weight size is the same for all the ranks.
-            weight_size = DistributedProcessGroup.get_dist_syncd_obj(
-                weight_size,
-                [parallel_state.data_parallel_group],
-                lambda a: a[0],
-            )
+            if parallel_state is not None:
+                # Across data parallel groups, the weight size is the same for all the ranks.
+                weight_size = DistributedProcessGroup.get_dist_syncd_obj(
+                    weight_size,
+                    [parallel_state.data_parallel_group],
+                    lambda a: a[0],
+                )
             cost += weight_size * recipe.compression
 
         return cost
@@ -850,6 +892,120 @@ def _module_search_space_signature(module_search_spaces) -> tuple:
 def _quantization_formats_signature(quant_recipes) -> tuple[str, ...]:
     """Return a checkpoint-stable description of the global candidate formats."""
     return tuple(sorted(recipe.checkpoint_signature for recipe in quant_recipes))
+
+
+def _comparable(value: Any) -> Any:
+    """``value`` as lists, strings and integers, a dict as its ordered items and a float as its text.
+
+    So ranks compare what they restored exactly, order included, a NaN they each restored equal to
+    itself, and the result sends with ``weights_only``.
+    """
+    if isinstance(value, torch.Tensor):
+        value = value.tolist()
+    if isinstance(value, QuantRecipe):
+        return value.checkpoint_signature
+    if isinstance(value, dict):
+        return [[_comparable(key), _comparable(item)] for key, item in value.items()]
+    if isinstance(value, (list, tuple)):
+        return [_comparable(item) for item in value]
+    if isinstance(value, (set, frozenset)):
+        return sorted((_comparable(item) for item in value), key=repr)
+    if value is None or isinstance(value, (bool, str)):
+        return value
+    if isinstance(value, numbers.Integral):
+        return int(value)
+    if isinstance(value, numbers.Real):
+        return repr(float(value))
+    return repr(value)
+
+
+def _group_name(group: DistributedProcessGroup) -> str:
+    """The name of an initialized ``group``'s communicator, which torch gives alike on its ranks."""
+    process_group = group.group or torch.distributed.group.WORLD
+    return cast("torch.distributed.ProcessGroup", process_group).group_name
+
+
+def _mesh_spans(weight: torch.Tensor, group: DistributedProcessGroup) -> bool:
+    """Whether ``weight`` is a DTensor whose mesh holds every rank of ``group``: whole over it."""
+    if not isinstance(weight, DTensor):
+        return False
+    return _whole_over(set(weight.device_mesh.mesh.flatten().tolist()), set(_group_ranks(group)))
+
+
+def _whole_over(mesh_ranks: set[int], group_ranks: set[int]) -> bool:
+    """Whether a DTensor on ``mesh_ranks`` is whole over ``group_ranks``, or this rank's part of it.
+
+    A mesh holding some of the group's ranks but not all leaves the tensor a part that other ranks
+    of the group share, which no sum over the group counts once.
+    """
+    shared = mesh_ranks & group_ranks
+    if len(shared) not in (1, len(group_ranks)):
+        raise NotImplementedError(
+            f"AutoQuantize cannot count a DTensor whose mesh holds {len(shared)} of the "
+            f"{len(group_ranks)} ranks of a group its module is sharded over."
+        )
+    return shared == group_ranks
+
+
+def _weight_layouts_by_group(
+    hparams: Sequence["QuantRecipeHparam"], module_names: dict[int, str]
+) -> dict[tuple, str]:
+    """What every rank of each group the cost sums over must hold alike, by its ranks and name.
+
+    A digest of the modules the cost sums over the group, by name and in order, with the groups
+    each of their weights is summed over.
+    """
+    by_group: dict[tuple, list] = defaultdict(list)
+    for hparam in hparams:
+        for module, (parallel_state, weights) in zip(hparam.quant_modules, hparam.weight_layouts()):
+            if parallel_state is None:
+                continue
+            kinds = {
+                "tp": parallel_state.tensor_parallel_group,
+                "ep": parallel_state.expert_model_parallel_group,
+                "dp": parallel_state.data_parallel_group,
+            }
+            layout = tuple(
+                tuple(kind for kind, group in kinds.items() if group in summed_over)
+                for _, summed_over in weights
+            )
+            for kind, group in kinds.items():
+                if group.is_initialized():
+                    by_group[tuple(_group_ranks(group)), _group_name(group)].append(
+                        (module_names.get(id(module)), kind, layout)
+                    )
+    return {
+        ranks: hashlib.sha256(repr(modules).encode()).hexdigest()
+        for ranks, modules in by_group.items()
+    }
+
+
+def _refuse_unlike_layouts(by_group_of_rank: list) -> None:
+    for group in sorted({group for by_group in by_group_of_rank for group in by_group}):
+        ranks = group[0]
+        if len({by_group_of_rank[other].get(group) for other in ranks}) > 1:
+            raise ValueError(
+                f"Ranks {list(ranks)} would sum the sizes of the weights AutoQuantize counts out "
+                "of step: they lay the weights out differently (e.g. one a DTensor and another a "
+                "plain shard of it), or sum them over different process groups. Lay the model out "
+                "alike on every rank, as load_pretrained loads it."
+            )
+
+
+def _plan_signature(model: nn.Module) -> tuple | None:
+    """The world size, expert-parallel degree and dense layout of ``model``'s recorded plan."""
+    plan = recorded_distribution_plan(model)
+    return None if plan is None else (plan.world_size, plan.ep_size, plan.dense)
+
+
+def _resume_together(progresses: list) -> None:
+    if any(progress != progresses[0] for progress in progresses):
+        raise ValueError(
+            "Distributed AutoQuantize requires every rank's checkpoint at the same progress, every "
+            "rank searching the same layers (pipeline-parallel stages, which do not, resume from a "
+            "new checkpoint path). Restore all rank files from the same search, or use a new "
+            "checkpoint path on every rank."
+        )
 
 
 class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
@@ -932,6 +1088,13 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             "num_calib_steps": None,
             "num_score_steps": None,
             "scoring_config": {},
+            # The rank, world size and distribution plan that wrote the checkpoint: its quantizer
+            # states are that rank's own, an expert-parallel rank's those of its own experts.
+            "checkpoint_rank": None,
+            "checkpoint_world_size": None,
+            "distribution_plan": None,
+            # Common to the files of every rank of one search, which calibrated and scored together.
+            "search_id": None,
             "best": {"recipe": {}, "constraints": {}, "score": float("inf"), "is_satisfied": False},
         }
 
@@ -979,7 +1142,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             config["format_shard"] = (index, count)
         return config
 
-    def validate_search_input(self, constraints, config) -> None:
+    def validate_search_input(self, constraints, config, model: nn.Module | None = None) -> None:
         """Validate method-specific inputs before quantizing the model."""
         # Refuse scores of another method or scoring options before the model is converted, so the
         # caller can retry the same model with another checkpoint. The search restores the state
@@ -987,7 +1150,67 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         self.config = config
         self._preloaded_state = None
         self.reset_search()
-        loaded = self.load_search_checkpoint()
+        loaded = False
+
+        def resume_point():
+            nonlocal loaded
+            loaded = self.load_search_checkpoint()
+            state = self.state_dict()
+            # On several ranks, a file another rank wrote holds other quantizer states, such as other
+            # experts'.
+            if is_distributed_run() and state["checkpoint_rank"] not in (None, rank()):
+                raise ValueError(
+                    f"Rank {rank()}'s AutoQuantize checkpoint was written by rank "
+                    f"{state['checkpoint_rank']}. Restore each rank's own file from the same search, "
+                    "or use a new checkpoint path."
+                )
+            # A run of another size wrote its files for its own ranks, e.g. their own experts, plan
+            # or none (Megatron's); one process refuses them too. Older files, unrecorded, resume.
+            world_size = torch.distributed.get_world_size() if is_distributed_run() else 1
+            if (state["quantizer_states"] or state["candidate_stats"]) and state[
+                "checkpoint_world_size"
+            ] not in (None, world_size):
+                raise ValueError(
+                    "The AutoQuantize checkpoint was written by a run of "
+                    f"{state['checkpoint_world_size']} ranks, not {world_size}. Resume with the "
+                    "same world size, or use a new checkpoint path. To re-solve its scores in one "
+                    "process, pass its search state to get_auto_quantize_config()."
+                )
+            # Another plan gives a rank other experts, or another share of the dense part.
+            plan = None if model is None else _plan_signature(model)
+            if (
+                is_distributed_run()
+                and model is not None
+                and (state["quantizer_states"] or state["candidate_stats"])
+                and state["distribution_plan"] not in (None, plan)
+            ):
+                raise ValueError(
+                    "The AutoQuantize checkpoint was written under (world size, expert-parallel "
+                    f"degree, dense layout) {state['distribution_plan']}, not {plan}. Resume "
+                    "with the same ones, or use a new checkpoint path."
+                )
+            # Everything restored but the solved result, the writer's rank and the ranks' own
+            # calibrations (by format), as a digest: the ranks compare it only for equality.
+            restored = _comparable(
+                {
+                    **{
+                        key: value
+                        for key, value in state.items()
+                        if key not in ("best", "checkpoint_rank")
+                    },
+                    "quantizer_states": sorted(
+                        r.checkpoint_signature for r in state["quantizer_states"]
+                    ),
+                }
+            )
+            return hashlib.sha256(repr(restored).encode()).hexdigest()
+
+        if is_distributed_run():
+            # In one collective, so a file failing to load or a rank at another point (every rank
+            # searches the same layers) makes every rank raise before the search's collectives.
+            all_reduce("AutoQuantize checkpoint", resume_point, _resume_together)
+        else:
+            resume_point()
         state = self.state_dict()
         self._preloaded_state = state if loaded else {}
         if not state["candidate_stats"]:
@@ -1419,6 +1642,15 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             # solver-selectable for this hparam. Fixed formats must remain in the cost model.
             self.candidate_stats[name]["uncompressed_cost"] = hparam.get_cost(no_quant_recipe)
 
+    def _recount_candidate_costs(self):
+        """Count the restored candidate stats' costs again, as initialize_candidate_stats does."""
+        no_quant_recipe = QuantRecipe(quant_cfg=None)
+        for name, hparam in named_hparams(self.model, unique=True):
+            if isinstance(hparam, QuantRecipeHparam) and name in self.candidate_stats:
+                stats = self.candidate_stats[name]
+                stats["costs"] = [hparam.get_cost(recipe) for recipe in stats["formats"]]
+                stats["uncompressed_cost"] = hparam.get_cost(no_quant_recipe)
+
     def _run_func(self, func, num_iters=1, desc=""):
         for i, data in tqdm(
             zip(range(num_iters), self.config["data_loader"]),
@@ -1579,6 +1811,9 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         mismatch = self.scoring_mismatch(self.state_dict()) if self.candidate_stats else None
         if mismatch:
             raise ValueError(f"{mismatch} Use a different checkpoint path.")
+        # validate_search_input refused a checkpoint of another world size or plan.
+        plan = _plan_signature(self.model)
+        world_size = torch.distributed.get_world_size() if is_distributed_run() else 1
         self.method = self.method_name
         self.scoring_config = self.scoring_config_from(self.config)
         self.cost_model = self.config["cost_model"]
@@ -1586,6 +1821,17 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         self.active_moe_expert_ratio = self.config["active_moe_expert_ratio"]
         self.disabled_layers = self.config["disabled_layers"]
         self.cost_denominator = getattr(self, "cost_denominator", None)
+        self.checkpoint_rank = rank()
+        self.checkpoint_world_size = world_size
+        self.distribution_plan = plan
+        # Rank and plan say whose shard a file holds, not which run wrote it: a resume keeps the ID
+        # every rank restored alike, and a new search, or files saved without one, takes rank 0's.
+        if self.search_id is None:
+            self.search_id = (
+                broadcast_from("AutoQuantize search ID", lambda: uuid.uuid4().hex)
+                if is_distributed_run()
+                else uuid.uuid4().hex
+            )
 
         module_search_spaces = self._normalize_module_search_spaces(
             self.config["module_search_spaces"]
@@ -1655,6 +1901,15 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                 "checkpoint path."
             )
         self.resolved_search_setup_signature = resolved_search_setup_signature
+        if is_distributed_run():
+            # A layout refused, or laid out unlike a peer's, on some ranks alone would leave the
+            # others in a cost sum or pair it with another: every rank tells its own here first.
+            module_names = {id(module): name for name, module in self.model.named_modules()}
+            all_reduce(
+                "AutoQuantize weight layouts",
+                lambda: _weight_layouts_by_group(quant_recipe_hparams, module_names),
+                _refuse_unlike_layouts,
+            )
         self._verify_resolved_constraint(quant_recipe_hparams)
 
         format_shard = self.config["format_shard"]
@@ -1765,6 +2020,9 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             self.save_search_checkpoint(verbose=self.config["verbose"])
 
         if self.candidate_stats:
+            # A cost is the model's and the format's, not the scores': recount restored ones, so a
+            # search resumed from an earlier release's checkpoint solves against today's costs.
+            self._recount_candidate_costs()
             if self.config["verbose"]:
                 print_rank_0("AutoQuantize: Restored from checkpoint, skipping scoring")
             return
@@ -1780,15 +2038,6 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         effective_bits = (total_cost / total_weight_size) * 16
         print_rank_0(f"{prefix} effective bits: {effective_bits:.2f}")
         return effective_bits
-
-    @staticmethod
-    def _get_total_weight_size(modules):
-        return sum(
-            _get_module_weight_numel(module)
-            if _AutoQuantizeBaseSearcher._is_auto_quantize_module(module)
-            else 0
-            for module in modules
-        )
 
     @staticmethod
     def _get_total_weight_size_from_candidate_stats(candidate_stats):
@@ -1959,6 +2208,10 @@ _SHARD_INVARIANT_STATE = (
     "resolved_search_setup_signature",
     "num_calib_steps",
     "num_score_steps",
+    # Each rank's shards hold that rank's calibration, e.g. its own experts': merged per rank.
+    "checkpoint_rank",
+    "checkpoint_world_size",
+    "distribution_plan",
 )
 
 

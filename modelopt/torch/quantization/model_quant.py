@@ -44,6 +44,7 @@ from modelopt.torch.quantization.conversion import (
     set_quantizer_by_cfg,
 )
 from modelopt.torch.utils import atomic_print, restore_training_modes, safe_load, safe_save
+from modelopt.torch.utils.moe import expert_parallel_mesh
 
 from . import model_calib
 from ._auto_quantize_cost import COST_MODEL_KV_CACHE
@@ -60,6 +61,7 @@ from .config import QuantizeAlgoCfgType
 from .kv_cache_auto_quant import (
     _KV_QUANTIZER_ATTRS,
     AutoQuantizeKVSearcher,
+    _has_tensor_parallel_dtensors,
     _validate_parallel_state,
     get_kv_cache_auto_quantize_config,
 )
@@ -69,7 +71,7 @@ from .mode import QuantizeModeRegistry, _rank_local_calibrations, get_modelike_f
 from .nn import AnyQuantizer, QuantModule, SequentialQuantizer, TensorQuantizer
 from .qtensor import QTensorWrapper
 from .utils import is_quantized, weight_attr_names
-from .utils.core_utils import _get_fsdp2_mesh
+from .utils.core_utils import _get_fsdp2_mesh, _group_ranks
 from .utils.weight_cache import _suspend_weight_cache
 
 __all__ = [
@@ -87,13 +89,6 @@ __all__ = [
     "quantize",
     "temporarily_fold_weights",
 ]
-
-
-def _group_ranks(group: dist.DistributedProcessGroup) -> list[int]:
-    """The ranks ``group`` spans, in its rank order; just this rank for a group not set."""
-    if not group.is_initialized():
-        return [dist.rank()]
-    return torch.distributed.get_process_group_ranks(group.group or torch.distributed.group.WORLD)
 
 
 def _names_the_experts_groups(
@@ -785,9 +780,33 @@ def _auto_quantize_kv_cache(
     fixed_quantization_config: dict[str, Any] | str | None,
 ):
     """Run the KV-cache-specific AutoQuantize validation and search lifecycle."""
-    if dist.size() > 1 and dist.is_dtensor_sharded(model) and not dist.is_fsdp2_model(model):
-        raise NotImplementedError("Distributed KV-cache AutoQuantize supports DP/FSDP2, not TP.")
-    _validate_parallel_state(model)
+    plan = dist.recorded_distribution_plan(model)
+    ep_mesh = None
+
+    def check_layout() -> None:
+        nonlocal ep_mesh
+        # Before anything converts the model: an expert-parallel plan without its mesh raises here.
+        ep_mesh = (
+            expert_parallel_mesh(model) if plan is not None and plan.is_expert_parallel else None
+        )
+        # The routed experts' DTensors on the expert-parallel load's layout and FSDP2's own are
+        # not tensor parallelism; without expert parallelism an FSDP2 model is exempt whole.
+        if (
+            dist.size() > 1
+            and (ep_mesh is not None or not dist.is_fsdp2_model(model))
+            and _has_tensor_parallel_dtensors(model)
+        ):
+            raise NotImplementedError(
+                "Distributed KV-cache AutoQuantize supports DP/FSDP2 and EP, not TP."
+            )
+        _validate_parallel_state(model)
+
+    if dist.is_distributed_run():
+        # Each rank checks its own mesh and shards in one collective: one refusing alone would
+        # leave the others waiting in the search's first collective.
+        dist.all_reduce("KV-cache AutoQuantize layout", check_layout, lambda _: None)
+    else:
+        check_layout()
     if method not in (None, "kl_div"):
         raise ValueError("cost_model='kv_cache' requires method='kl_div'.")
     if fixed_quantization_config is not None or module_search_spaces:
@@ -850,6 +869,9 @@ def _auto_quantize_kv_cache(
     if converted_for_search:
         model = apply_mode(model, mode="auto_quantize", registry=QuantizeModeRegistry)
         set_quantizer_by_cfg(model, [{"quantizer_name": "*", "enable": False}])
+    # Quantizer insertion, this search's or an earlier one without a forward loop, dropped the
+    # routed experts' all-to-all forwards, which the search's forwards need.
+    dist.reinstall_a2a_forwards(model, ep_mesh)
     searcher = AutoQuantizeKVSearcher()
     searcher.search(
         model,
@@ -965,8 +987,9 @@ def auto_quantize(
             used for the effective-bits constraint and supports ``"weight"`` (default),
             ``"active_moe"``, and ``"kv_cache"``. The KV-cache cost model dispatches to isolated
             forward-KL scoring over paired K/V formats; BF16/no-quant is its scoring reference but
-            is never solver-selectable. Distributed KV search supports data parallelism and FSDP2:
-            all ranks must use the same candidates and forward-pass count. KL is reduced over all
+            is never solver-selectable. Distributed KV search supports data parallelism, FSDP2 and
+            expert parallelism, not tensor parallelism: all ranks must use the same candidates and
+            forward-pass count. KL is reduced over all
             scored tokens, and rank 0 selects the shared recipe. Additional cost-model parameters
             are provided through the nested ``cost`` dict.
 
@@ -1128,7 +1151,13 @@ def auto_quantize(
             :mod:`modelopt.torch.quantization._auto_quantize_shapley`.
         checkpoint: (Optional) Path to checkpoint file for saving/restoring auto_quantize search state.
             If the checkpoint file exists, the search state will be restored from it, skipping the
-            expensive score estimation step.
+            expensive score estimation step. On several ranks each rank saves and restores a file
+            of its own, which a resume needs at the same world size (for the weight search also
+            from the same rank and distribution plan), or every rank refuses it. The ranks must
+            search the same layers, as data, FSDP2 and expert parallelism shard them; pipeline-
+            parallel stages, which do not, resume from a new path. One process refuses a weight
+            search's file that a run of several ranks wrote: pass its search state to
+            :func:`get_auto_quantize_config` to re-solve its scores.
         module_search_spaces: Optional module-specific candidate overrides. Each entry contains
             ``module_name_patterns`` (one or more glob patterns), ``quantization_formats``, and
             optional ``allow_no_quant`` (default True). A matching entry replaces the global
@@ -1194,6 +1223,18 @@ def auto_quantize(
 
     .. note::
 
+        On a model distributed over several ranks -- data-parallel, FSDP2-sharded, or with its
+        routed experts sharded expert-parallel as
+        :func:`~modelopt.torch.utils.plugins.model_load_utils.load_pretrained` loads one -- every
+        rank calls ``auto_quantize`` on its own share of the data, and must run the same number of
+        calibration and scoring batches. The scores are summed over the ranks, so every rank
+        picks the same formats: those one process would pick scoring every rank's batches as they
+        are, with the same loss, except where the order of the floating-point sums tips a near tie.
+        A process that batches the data otherwise can pick other formats, e.g. under a loss
+        averaged over each batch's tokens.
+
+    .. note::
+
         The ``auto_quantize`` API and algorithm is experimental and subject to change. ``auto_quantize`` searched models
         might not be readily deployable to TensorRT-LLM yet.
 
@@ -1202,14 +1243,6 @@ def auto_quantize(
         if isinstance(quantization_formats, str) or not isinstance(quantization_formats, Sequence):
             raise TypeError("`quantization_formats` must be a sequence of formats.")
         quantization_formats = list(quantization_formats)
-    plan = dist.recorded_distribution_plan(model)
-    if plan is not None and plan.is_expert_parallel:  # before anything converts the model
-        raise NotImplementedError(
-            f"auto_quantize does not support a model whose experts are sharded over {plan.ep_size} "
-            "ranks yet: its forwards would run the experts without the expert-parallel forwards "
-            "that quantization replaces and distributed_forward_loop restores. Quantize it with "
-            "mtq.quantize through distributed_forward_loop, or AutoQuantize in a single process."
-        )
     _refuse_a_malformed_variable()
 
     method_name, method_config = _parse_auto_quantize_method(method)
@@ -1259,20 +1292,37 @@ def auto_quantize(
     rewrites_weights = any(
         _rewrites_weights(QuantRecipe(cfg, name=name)) for cfg, name in all_processed_formats
     )
-    for quant_cfg, name in all_processed_formats:
-        recipe = QuantRecipe(quant_cfg, name=name)
-        algo = recipe.config.algorithm
-        if unsupported := _algorithm_methods(algo) - _AUTO_QUANTIZE_SUPPORTED_ALGORITHMS:
-            algo_method = ", ".join(sorted(map(str, unsupported)))
-            raise ValueError(
-                f"Algorithm '{algo_method}' in '{name}' is not supported by auto_quantize yet. "
-                "Please run auto_quantize with 'max' or 'mse' calibration and use "
-                "get_auto_quantize_config() to obtain a config for mtq.quantize()."
-            )
-        # Every candidate, before the search calibrates any: calibrate() would refuse mid-search.
-        _refuse_awq_on_a_sharded_fsdp2_model(model, algo, candidate=name)
-        _refuse_unsupported_distributed_calibration(model, algo)
-        _refuse_layerwise_dirs(recipe, rewrites_weights)
+    plan = dist.recorded_distribution_plan(model)
+    ep_mesh = None
+
+    def check_setup() -> None:
+        nonlocal ep_mesh
+        # Before anything converts the model: an expert-parallel plan without its mesh raises here.
+        ep_mesh = (
+            expert_parallel_mesh(model) if plan is not None and plan.is_expert_parallel else None
+        )
+        for quant_cfg, name in all_processed_formats:
+            recipe = QuantRecipe(quant_cfg, name=name)
+            algo = recipe.config.algorithm
+            if unsupported := _algorithm_methods(algo) - _AUTO_QUANTIZE_SUPPORTED_ALGORITHMS:
+                algo_method = ", ".join(sorted(map(str, unsupported)))
+                raise ValueError(
+                    f"Algorithm '{algo_method}' in '{name}' is not supported by auto_quantize yet. "
+                    "Please run auto_quantize with 'max' or 'mse' calibration and use "
+                    "get_auto_quantize_config() to obtain a config for mtq.quantize()."
+                )
+            # Every candidate, before the search calibrates any: calibrate() would refuse it
+            # mid-search.
+            _refuse_awq_on_a_sharded_fsdp2_model(model, algo, candidate=name)
+            _refuse_unsupported_distributed_calibration(model, algo)
+            _refuse_layerwise_dirs(recipe, rewrites_weights)
+
+    # Each rank checks its own model in one collective: a rank refusing alone, e.g. one missing the
+    # mesh or naming other experts' groups, would leave the others waiting in the search.
+    if dist.is_distributed_run():
+        dist.all_reduce("AutoQuantize setup", check_setup, lambda _: None)
+    else:
+        check_setup()
 
     # Select the appropriate searcher based on method
     if method_name not in AUTO_QUANTIZE_SEARCHERS:
@@ -1312,7 +1362,7 @@ def auto_quantize(
     # already-sanitized config inside search(), which is a no-op.
     search_config = searcher.sanitize_search_config(search_config)
     search_constraints = cast("ConstraintsDict", constraints or {})
-    searcher.validate_search_input(search_constraints, search_config)
+    searcher.validate_search_input(search_constraints, search_config, model)
 
     # A weight-rewriting candidate's refusals need the converted quantizers to tell which weights it
     # rewrites, as does a format shard's check of its count against the searched formats. A failure
@@ -1331,6 +1381,9 @@ def auto_quantize(
             mode="auto_quantize",
             registry=QuantizeModeRegistry,
         )
+        # Quantizer insertion dropped the routed experts' all-to-all forwards, which the search's
+        # calibration and scoring forwards need.
+        dist.reinstall_a2a_forwards(model, ep_mesh)
         # Disable all quantizers; AutoQuantize will enable the needed ones
         set_quantizer_by_cfg(model, [{"quantizer_name": "*", "enable": False}])
         if processed_fixed_quantization_config is not None:
@@ -1345,7 +1398,11 @@ def auto_quantize(
     finally:
         model_calib._ENABLE_FOLDING_PQS_TO_WEIGHTS = folding_pqs_to_weights
 
-    return model, searcher.state_dict()
+    # The rank that wrote a checkpoint and the search's ID mark its files, not the search's result.
+    search_state = searcher.state_dict()
+    search_state.pop("checkpoint_rank", None)
+    search_state.pop("search_id", None)
+    return model, search_state
 
 
 def merge_auto_quantize_checkpoints(shard_checkpoints: Sequence[str], checkpoint: str) -> None:

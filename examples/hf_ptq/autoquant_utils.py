@@ -35,7 +35,7 @@ from modelopt.torch.quantization.model_quant import _process_search_space
 from modelopt.torch.utils import distributed as dist
 from modelopt.torch.utils import safe_load
 from modelopt.torch.utils.dataset_utils import create_forward_loop, model_type_is_enc_dec
-from modelopt.torch.utils.distributed import size as world_size
+from modelopt.torch.utils.distributed import distribution_plan
 
 __all__ = ["auto_quantize"]
 
@@ -200,7 +200,8 @@ def auto_quantize(
             "or 'aumann_shapley'"
         )
 
-    score_batch_size = args.batch_size * (world_size() if args.use_fsdp2 else 1)
+    # Every rank of a distributed plan scores a batch of its own shard of the data per step.
+    score_batch_size = args.batch_size * distribution_plan(language_model).world_size
     auto_quantize_kwargs: dict[str, Any] = {
         "constraints": inputs["constraints"],
         "data_loader": calib_dataloader,
@@ -415,6 +416,23 @@ def _recipe_is_kv_auto_quantize(recipe: str | None) -> bool:
     return isinstance(loaded_recipe, ModelOptAutoQuantizeRecipe) and any(
         stage is not None and stage.constraints.cost_model == "kv_cache"
         for stage in (loaded_recipe.auto_quantize, loaded_recipe.kv_auto_quantize)
+    )
+
+
+def _auto_quantize_hands_scores_between_runs(args: argparse.Namespace) -> bool:
+    """True if the run finalizes saved scores or scores or merges format shards (peeked before
+    model load), which :func:`_auto_quantize_finalize_config` runs in one process only."""
+    # Off unless given, as _auto_quantize_finalize_config reads them, for args built without them.
+    if getattr(args, "auto_quantize_format_shard", None) is not None or getattr(
+        args, "auto_quantize_merge_shards", None
+    ):
+        return True
+    if args.recipe is None:
+        return False
+    loaded_recipe = load_recipe(args.recipe)
+    return (
+        isinstance(loaded_recipe, ModelOptAutoQuantizeRecipe)
+        and loaded_recipe.auto_quantize.finalize_algorithm is not None
     )
 
 

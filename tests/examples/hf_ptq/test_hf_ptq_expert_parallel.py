@@ -276,31 +276,73 @@ def test_a_tensorrt_llm_checkpoint_export_needs_a_single_process(
     ("world_size", "env", "use_fsdp2"),
     [
         pytest.param(2, {"MODELOPT_EP_DEGREE": "2"}, False, marks=needs_ep_transformers),
-        pytest.param(2, {}, False, marks=needs_ep_transformers),
+        pytest.param(
+            2,
+            {"MODELOPT_EP_DEGREE": "1", "MODELOPT_FSDP_SIZE": "1"},
+            False,
+            marks=needs_ep_transformers,
+        ),
         (2, {}, True),
         (1, {}, False),
     ],
     ids=["expert_parallel", "replicated", "use_fsdp2", "single_process"],
 )
-def test_an_auto_quantize_recipe_is_refused_on_the_routes_this_script_adds(
-    hf_ptq, monkeypatch, torchrun, world_size, env, use_fsdp2
+@pytest.mark.parametrize(
+    "recipe",
+    [
+        "general/auto_quantize/nvfp4_fp8_kl_div_at_5p4bits",
+        "general/auto_quantize/nvfp4_fp8_gradient_then_kv_fp8_nvfp4_cast_kl_div_at_5p4bits",
+    ],
+    ids=["weights", "then_kv_cache"],
+)
+def test_an_auto_quantize_recipe_is_admitted_on_the_routes_this_script_adds(
+    hf_ptq, monkeypatch, torchrun, world_size, env, use_fsdp2, recipe
 ):
-    """AutoQuantize scores each rank's own calibration shard and reduces no score across ranks, so
-    the ranks could choose different formats per layer. An expert-parallel or replicated run refuses
-    the recipe before the load; --use_fsdp2 keeps main's warning, and a single process runs it."""
+    """Every rank scores its own calibration shard and AutoQuantize sums the scores over the ranks,
+    so every route admits an AutoQuantize recipe, with a KV-cache search or without."""
     for name, value in env.items():
         monkeypatch.setenv(name, value)
     _serve(monkeypatch, hf_ptq, _deepseek_v3(n_routed_experts=8))
-    args = _args(
-        torchrun(world_size=world_size),
-        use_fsdp2=use_fsdp2,
-        recipe="general/auto_quantize/nvfp4_fp8_kl_div_at_5p4bits",
-    )
+    args = _args(torchrun(world_size=world_size), use_fsdp2=use_fsdp2, recipe=recipe)
 
-    if world_size == 1 or use_fsdp2:
+    plan = hf_ptq.resolve_distribution(args)[0]
+    assert plan.is_expert_parallel == (env.get("MODELOPT_EP_DEGREE") == "2")
+
+
+@pytest.mark.parametrize(
+    ("world_size", "use_fsdp2"),
+    [(2, False), (2, True), (1, False)],
+    ids=["replicated", "use_fsdp2", "single_process"],
+)
+@pytest.mark.parametrize("option", ["finalize_algorithm", "format_shard", "merge_shards"])
+def test_options_that_hand_scores_between_runs_are_refused_before_a_multi_rank_load(
+    hf_ptq, monkeypatch, torchrun, world_size, use_fsdp2, option
+):
+    """Finalizing saved scores and scoring or merging format shards hand one process's scores file
+    between runs, so a run of several ranks refuses them before the load, not after it."""
+    _serve(monkeypatch, hf_ptq, LlamaConfig(architectures=["LlamaForCausalLM"], **_TINY))
+    recipe = "general/auto_quantize/nvfp4_fp8_kl_div_at_5p4bits"
+    flags = {
+        "format_shard": {"auto_quantize_format_shard": (0, 2)},
+        "merge_shards": {"auto_quantize_merge_shards": "shard0.pth,shard1.pth"},
+    }.get(option, {})
+    if option == "finalize_algorithm":
+        autoquant_utils = importlib.import_module("autoquant_utils")
+        searched = autoquant_utils.load_recipe(recipe)
+        finalizing = searched.model_copy(
+            update={
+                "auto_quantize": searched.auto_quantize.model_copy(
+                    update={"finalize_algorithm": "max"}
+                )
+            }
+        )
+        monkeypatch.setattr(autoquant_utils, "load_recipe", lambda _recipe: finalizing)
+    args = _args(torchrun(world_size=world_size), use_fsdp2=use_fsdp2, recipe=recipe, **flags)
+
+    if world_size == 1:
         hf_ptq.resolve_distribution(args)
     else:
-        with pytest.raises(NotImplementedError, match="AutoQuantize"):
+        with pytest.raises(ValueError, match="run in one process"):
             hf_ptq.resolve_distribution(args)
 
 

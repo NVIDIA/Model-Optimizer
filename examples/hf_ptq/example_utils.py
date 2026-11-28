@@ -30,6 +30,7 @@ import torch
 import transformers
 from accelerate import infer_auto_device_map, init_empty_weights
 from accelerate.utils import get_max_memory
+from autoquant_utils import _auto_quantize_hands_scores_between_runs
 from cast_mxfp4_to_nvfp4 import force_weight_quantizers_static
 from safetensors import safe_open
 from transformers import (
@@ -40,7 +41,7 @@ from transformers import (
     PreTrainedTokenizerBase,
 )
 
-from modelopt.recipe import ModelOptAutoQuantizeRecipe, load_recipe
+from modelopt.recipe import load_recipe
 from modelopt.recipe.presets import QUANT_CFG_CHOICES
 from modelopt.torch.export import has_spec_opt
 from modelopt.torch.export.trtllm.enc_dec import is_trtllm_enc_dec_export
@@ -193,17 +194,12 @@ def resolve_distribution(args) -> tuple[DistributionPlan, Any]:
             "names. Drop it, or quantize without expert parallelism: with --use_fsdp2, or in a "
             "single process."
         )
-    if (
-        plan.world_size > 1
-        and not args.use_fsdp2
-        and args.recipe is not None
-        and isinstance(load_recipe(args.recipe), ModelOptAutoQuantizeRecipe)
-    ):
-        # Each rank would score its own data, and could pick other formats per layer.
-        raise NotImplementedError(
-            f"{plan!r}: AutoQuantize scores each rank's own calibration data and reduces no score "
-            "across ranks, so ranks could choose different formats per layer; launch hf_ptq "
-            "without torchrun for an AutoQuantize recipe."
+    if plan.world_size > 1 and _auto_quantize_hands_scores_between_runs(args):
+        # Before the load, rather than where the AutoQuantize stage refuses them after it.
+        raise ValueError(
+            f"{plan!r}: auto_quantize.finalize_algorithm, --auto_quantize_format_shard and "
+            "--auto_quantize_merge_shards run in one process; launch hf_ptq without torchrun "
+            "and without --use_fsdp2."
         )
     if plan.world_size > 1 and not args.use_fsdp2 and "lsq" in _calibration_methods(args):
         # Its scale calibration is the algorithm it runs first, synced or refused as that one is,

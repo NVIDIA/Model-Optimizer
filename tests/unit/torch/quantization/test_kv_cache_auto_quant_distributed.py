@@ -20,6 +20,7 @@ from functools import partial
 import pytest
 import torch
 import torch.distributed as dist
+from _test_utils.torch.distributed.utils import bounded_collectives
 from _test_utils.torch.transformers_models import get_tiny_llama
 
 import modelopt.torch.quantization as mtq
@@ -137,3 +138,22 @@ def test_distributed_kv_search_and_resume_matches_global_data(tmp_path, cpu_dist
     cpu_dist_workers.run(
         partial(_distributed_search, directory=tmp_path / "search", expected=expected)
     )
+
+
+def _resume_from_a_truncated_rank_file(rank, world_size, directory):
+    torch.set_num_threads(1)
+    batches = _batches()[rank::world_size]
+    _search(batches, 2, directory)
+    if rank == 1:  # truncated by an interrupted save
+        path = directory / "rank1.pth"
+        path.write_bytes(path.read_bytes()[:64])
+    # Every rank raises, rank 0 naming rank 1's failure, rather than wait for rank 1 to join it.
+    error, match = (RuntimeError, "rank 1 failed to compute") if rank == 0 else (Exception, None)
+    with bounded_collectives(), pytest.raises(error, match=match):
+        _search(batches, 2, directory)
+
+
+def test_distributed_kv_search_refuses_a_truncated_rank_file_on_every_rank(
+    tmp_path, cpu_dist_workers
+):
+    cpu_dist_workers.run(partial(_resume_from_a_truncated_rank_file, directory=tmp_path))
