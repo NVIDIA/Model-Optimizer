@@ -98,14 +98,28 @@ def _read_safetensors_metadata(path):
 def test_export_diffusers_models_non_quantized(tmp_path, model_factory):
     model = model_factory()
     export_dir = tmp_path / f"export_{type(model).__name__}"
+    # A directory reused from a residue export must not keep its layout sidecar.
+    export_dir.mkdir()
+    (export_dir / "residue_kernel_metadata.json").write_text("{}")
 
     export_hf_checkpoint(model, export_dir=export_dir)
 
+    assert not (export_dir / "residue_kernel_metadata.json").exists()
     config_path = export_dir / "config.json"
     assert config_path.exists()
 
     config_data = _load_config(config_path)
     assert "quantization_config" not in config_data
+
+
+def test_export_diffusers_without_components_keeps_residue_metadata(tmp_path):
+    sidecar = tmp_path / "residue_kernel_metadata.json"
+    sidecar.write_text("{}")
+
+    with pytest.warns(UserWarning, match="No exportable components"):
+        export_hf_checkpoint(get_tiny_unet(), export_dir=tmp_path, components=[])
+
+    assert sidecar.exists()
 
 
 @pytest.mark.parametrize("quantized", [False, True])
@@ -243,13 +257,18 @@ def test_export_diffusers_refuses_uncalibrated_static_inputs(
     backbones = nn.ModuleList([pipe.transformer, pipe.transformer_2])
     mtq.quantize(backbones, copy.deepcopy(quant_cfg), calibrate)
     export_dir = tmp_path / "export_pipeline"
+    export_dir.mkdir()
+    # Left by an earlier residue export: only a successful export may remove it.
+    sidecar = export_dir / "residue_kernel_metadata.json"
+    sidecar.write_text("{}")
 
     if num_inference_steps == 1:
         with pytest.raises(ValueError, match="transformer_2"):
             export_hf_checkpoint(pipe, export_dir=export_dir)
-        assert not any(export_dir.glob("*"))
+        assert list(export_dir.iterdir()) == [sidecar]
     else:
         export_hf_checkpoint(pipe, export_dir=export_dir)
+        assert not sidecar.exists()
         for component in ("transformer", "transformer_2"):
             exported = {}
             for shard in (export_dir / component).glob("*.safetensors"):

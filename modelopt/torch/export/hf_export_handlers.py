@@ -24,7 +24,7 @@ import torch
 import torch.nn as nn
 from torch.distributed.fsdp import FSDPModule
 
-from modelopt.torch.quantization.nn import TensorQuantizer
+from modelopt.torch.quantization.nn import ResidueQuantLinear, TensorQuantizer
 from modelopt.torch.quantization.qtensor import NVFP4QTensor
 from modelopt.torch.quantization.utils import (
     fsdp2_aware_weight_update,
@@ -44,6 +44,7 @@ from .quant_utils import (
     to_quantized_weight,
 )
 from .registry import ExportContext, ExportModuleRegistry, PrepareMoEInputsRegistry
+from .residue_export import export_residue_weight
 
 __all__: list[str] = []
 
@@ -269,6 +270,17 @@ def _export_fused_experts_module(name: str, module: nn.Module, ctx: ExportContex
         _export_fused_experts_keep_fused(module, ctx.dtype)
     else:
         _export_fused_experts(module, ctx.dtype)
+
+
+@ExportModuleRegistry.register(ResidueQuantLinear)
+def _export_residue_linear(name: str, module: nn.Module, ctx: ExportContext) -> None:
+    """Pack residue weights before the generic Linear handler can match them."""
+    tensors = export_residue_weight(module, ctx.dtype)
+    module.weight = nn.Parameter(tensors.pop("weight"), requires_grad=False)
+    for quantizer in (module.input_quantizer, module.weight_quantizer):
+        quantizer._non_persistent_buffers_set.add("_salient_indices")
+    for buffer_name, value in tensors.items():
+        module.register_buffer(buffer_name, value)
 
 
 @ExportModuleRegistry.register(predicate=is_quantlinear)

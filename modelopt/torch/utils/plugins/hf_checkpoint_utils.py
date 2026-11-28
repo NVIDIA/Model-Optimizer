@@ -123,6 +123,7 @@ _EXPORT_OWNED_FILES = frozenset(
         "quantize_config.json",
         "recipe.yaml",
         "recipe.yml",
+        "residue_kernel_metadata.json",
     }
 )
 
