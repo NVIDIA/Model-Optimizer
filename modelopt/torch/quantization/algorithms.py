@@ -53,7 +53,7 @@ from ._auto_quantize_cost import (
     normalize_auto_quantize_constraints,
 )
 from .config import LayerwiseConfig, QuantizeConfig, QuantizerAttributeConfig, QuantizerCfgEntry
-from .conversion import set_quantizer_by_cfg
+from .conversion import _apply_quantizer_by_cfg, set_quantizer_by_cfg
 from .ggml import GGML_FORMAT_REGISTRY
 from .ggml.common import PIN_OVERRIDES_WEIGHT, drop_search_scales
 from .nn import QuantLinearConvBase, QuantModule, SequentialQuantizer, TensorQuantizer
@@ -623,6 +623,8 @@ class QuantRecipeHparam(Hparam):
         no_quant_recipe = QuantRecipe(quant_cfg=None)
         calibration_recipes = sorted({*self.choices, no_quant_recipe})
         self._all_quantizer_choices = {quant_recipe: {} for quant_recipe in calibration_recipes}
+        self.resolved_quantizer_entries = {}
+        module_names = dict(zip(quant_modules or [], self.quant_module_names))
 
         quant_recipe: QuantRecipe
         for quant_recipe in calibration_recipes:
@@ -640,7 +642,29 @@ class QuantRecipeHparam(Hparam):
                         _make_fresh_quantizer_for_attr(quant_module, attr_name),
                     )
 
-                set_quantizer_by_cfg(quant_module, quant_recipe.config.quant_cfg)
+                if attr_names == _STD_QUANTIZER_ATTRS and quant_module in module_names:
+                    # Record the ordered instructions applied to fresh quantizers, before
+                    # calibration changes runtime state. Initial defaults also protect
+                    # replay from global rules belonging to other winning recipes.
+                    entries = [
+                        (
+                            attr,
+                            QuantizerCfgEntry(quantizer_name=attr, cfg=QuantizerAttributeConfig()),
+                        )
+                        for attr in attr_names
+                    ]
+                    _apply_quantizer_by_cfg(
+                        quant_module, quant_recipe.config.quant_cfg, resolved_entries=entries
+                    )
+                    self.resolved_quantizer_entries.setdefault(
+                        quant_recipe.checkpoint_signature, {}
+                    )[module_names[quant_module]] = [
+                        (attr, entry)
+                        for attr, entry in entries
+                        if attr.split(".", 1)[0] in attr_names
+                    ]
+                else:
+                    set_quantizer_by_cfg(quant_module, quant_recipe.config.quant_cfg)
                 self._all_quantizer_choices[quant_recipe][quant_module] = {
                     attr_name: getattr(quant_module, attr_name) for attr_name in attr_names
                 }
@@ -1412,6 +1436,9 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             self.candidate_stats[name]["costs"] = costs
             self.candidate_stats[name]["module_names"] = hparam.quant_module_names
             self.candidate_stats[name]["quantizer_attrs"] = hparam.quant_module_replay_attrs
+            self.candidate_stats[name]["resolved_quantizer_entries"] = (
+                hparam.resolved_quantizer_entries
+            )
             self.candidate_stats[name]["cost_weight"] = hparam.cost_weight
             self.candidate_stats[name]["allow_no_quant"] = hparam.allow_no_quant
             self.candidate_stats[name]["is_fixed"] = hparam.is_fixed
@@ -2755,10 +2782,26 @@ def get_auto_quantize_config(search_state, constraints=None, verbose=False, algo
         candidate_stat = search_state["candidate_stats"][hparam_name]
         if candidate_stat.get("is_fixed", False):
             continue
-        if recipe == QuantRecipe(quant_cfg=None):
-            continue
+        resolved = candidate_stat.get("resolved_quantizer_entries", {}).get(
+            recipe.checkpoint_signature, {}
+        )
         module_names = candidate_stat["module_names"]
         for module_name in module_names:
+            if module_name in resolved:
+                for attr, rule in resolved[module_name]:
+                    entry = {
+                        "quantizer_name": f"{module_name}.{attr}" if module_name else attr,
+                        "enable": rule.enable,
+                    }
+                    if rule.cfg is not None:
+                        entry["cfg"] = _cfg_to_dict(rule.cfg)
+                    if rule.parent_class is not None:
+                        entry["parent_class"] = rule.parent_class
+                    per_module_entries.append(entry)
+                continue
+            if recipe.is_no_quant:
+                continue
+            # Older states and fused-expert groups retain their existing replay path.
             for quantizer_attr in _get_replay_quantizer_attrs(candidate_stat, module_name):
                 matched_cfg, matched_enable = _match_quantizer_cfg(
                     recipe.config.quant_cfg, quantizer_attr
@@ -2771,6 +2814,9 @@ def get_auto_quantize_config(search_state, constraints=None, verbose=False, algo
                     if matched_cfg is not None:
                         entry["cfg"] = _cfg_to_dict(matched_cfg)
                     per_module_entries.append(entry)
+
+        if recipe.is_no_quant:
+            continue
 
         # Collect non-per-module entries (e.g. *[kv]_bmm_quantizer) from winning recipes.
         for recipe_entry in recipe.config.quant_cfg:
