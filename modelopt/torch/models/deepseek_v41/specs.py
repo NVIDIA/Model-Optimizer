@@ -14,7 +14,13 @@
 # limitations under the License.
 
 
-"""DeepSeek V4.1 text replay and native MoE ownership facts."""
+"""DeepSeek V4.1 text replay and native MoE ownership facts.
+
+MoESpec describes the separately constructible DeepseekV41MoE component with
+ordinary per-expert linears. The full LM uses V41MoE's fused expert banks and
+model-owned pre-down dispatch, covered by EPSpec and explicit Bypass feedforward
+boundaries. It must not inherit this per-expert layout for generic MoE rewrites.
+"""
 
 from ..specs import BypassSpec, EPSpec, ModelSpec, MoESpec, register
 

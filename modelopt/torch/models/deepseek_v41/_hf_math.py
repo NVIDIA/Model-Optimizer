@@ -68,6 +68,8 @@ class V41Linear(nn.Linear):
 
 class V41LMHead(nn.Linear):
     def forward(self, hidden_states):
+        if getattr(self, "checkpoint_quantized", False):
+            hidden_states = _fp8_inputs(hidden_states)
         with torch.autocast(hidden_states.device.type, enabled=False):
             return F.linear(hidden_states.float(), self.weight.float())
 
@@ -122,10 +124,11 @@ def rotary(value, positions, config, compressed, inverse=False):
         angles = -angles
     pairs = value[..., -width:].float().unflatten(-1, (-1, 2))
     real, imaginary = pairs.unbind(-1)
+    cosine, sine = angles.cos(), angles.sin()
     rotated = torch.stack(
         (
-            real * angles.cos() - imaginary * angles.sin(),
-            imaginary * angles.cos() + real * angles.sin(),
+            real * cosine - imaginary * sine,
+            imaginary * cosine + real * sine,
         ),
         -1,
     ).flatten(-2)

@@ -20,6 +20,7 @@
 """Stateless full-sequence Engram hashing and differentiable memory reads."""
 
 import math
+from numbers import Integral
 
 import numpy as np
 import torch
@@ -110,7 +111,10 @@ class V41NgramHash(nn.Module):
         if mapping is not None:
             self._validate_map(mapping)
         self.register_buffer(
-            "token_map", torch.tensor(mapping if mapping is not None else [0] * config.vocab_size)
+            "token_map",
+            torch.tensor(
+                mapping if mapping is not None else [0] * config.vocab_size, dtype=torch.long
+            ),
         )
         self.ready = mapping is not None
 
@@ -121,6 +125,7 @@ class V41NgramHash(nn.Module):
     def _validate_map(self, mapping):
         if (
             len(mapping) != self.config.vocab_size
+            or any(not isinstance(value, Integral) or isinstance(value, bool) for value in mapping)
             or min(mapping) < 0
             or max(mapping) >= self.config.engram_compressed_vocab_size
         ):

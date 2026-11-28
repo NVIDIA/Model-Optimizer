@@ -35,6 +35,8 @@ from .moe import _fp8_inputs
 
 __all__ = []
 
+_INDEX_SCORE_ELEMENTS = 8 * 1024 * 1024
+
 
 def _compression_layout(positions, token_mask, ratio):
     """Group chronological valid tokens, independent of physical padding offsets."""
@@ -107,34 +109,86 @@ class V41Indexer(nn.Module):
             self.weights_proj(hidden_states).float()
             / (self.config.index_head_dim * self.config.index_n_heads) ** 0.5
         )
-        with torch.autocast(query.device.type, enabled=False):
-            scores = torch.einsum("bshd,btd->bsht", query.float(), state["index_key"][0].float())
-        scores = (scores.relu() * weights.unsqueeze(-1)).sum(2)
-        scores = scores.masked_fill(
-            torch.arange(count, device=scores.device) >= lengths, -torch.inf
-        )
-        scores = scores.masked_fill(~compressed_valid[:, None, :], -torch.inf)
-        if self.layer_id == self.config.candidate_source_layer_id:
+        source = self.layer_id == self.config.candidate_source_layer_id
+        consuming = 0 <= self.config.candidate_source_layer_id < self.layer_id
+        if consuming and "candidates" not in state:
+            raise ValueError("Candidate source must run before a candidate-filtered indexer.")
+        candidates = state["candidates"][0] if consuming else None
+        if source:
             state["candidates"] = (
-                select_candidates(
-                    scores,
-                    lengths,
-                    self.config.candidate_topk_blocks,
-                    self.config.candidate_block_size,
+                torch.empty(
+                    hidden_states.shape[0],
+                    hidden_states.shape[1],
+                    count,
+                    dtype=torch.bool,
+                    device=hidden_states.device,
                 ),
             )
-        elif 0 <= self.config.candidate_source_layer_id < self.layer_id:
-            if "candidates" not in state:
-                raise ValueError("Candidate source must run before a candidate-filtered indexer.")
-            scores = scores.masked_fill(~state["candidates"][0], -torch.inf)
-        indices = (
-            scores.topk(min(self.config.index_topk, count), -1, sorted=False)
-            .indices.sort(-1)
-            .values
+        key_count = (
+            min(count, self.config.candidate_topk_blocks * self.config.candidate_block_size)
+            if consuming
+            else count
         )
-        return torch.where(
-            (indices < lengths) & ~torch.isneginf(scores.gather(-1, indices)), indices + offset, -1
+        # Bound both the per-head product and the global-coordinate score tile.
+        chunk = max(
+            1,
+            _INDEX_SCORE_ELEMENTS
+            // (hidden_states.shape[0] * max(count, self.config.index_n_heads * key_count)),
         )
+        result = torch.empty(
+            *hidden_states.shape[:2],
+            min(self.config.index_topk, count),
+            device=hidden_states.device,
+            dtype=torch.long,
+        )
+        # Only discrete top-k indices escape this block; no score gradient is
+        # consumed. Keeping a per-tile autograd graph would retain the full S²H
+        # activation set despite bounded forward allocations.
+        with torch.no_grad(), torch.autocast(query.device.type, enabled=False):
+            key = state["index_key"][0].float()
+            for start in range(0, hidden_states.shape[1], chunk):
+                stop = min(start + chunk, hidden_states.shape[1])
+                if candidates is not None:
+                    candidate_mask = candidates[:, start:stop]
+                    selected = (
+                        candidate_mask.to(torch.uint8).topk(key_count, -1, sorted=False).indices
+                    )
+                    selected_keys = key.gather(
+                        1, selected.flatten(1).unsqueeze(-1).expand(-1, -1, key.shape[-1])
+                    )
+                    selected_keys = selected_keys.unflatten(1, (stop - start, key_count))
+                    products = torch.einsum(
+                        "bshd,bstd->bsht", query[:, start:stop].float(), selected_keys
+                    )
+                else:
+                    products = torch.einsum("bshd,btd->bsht", query[:, start:stop].float(), key)
+                scores = (products.relu() * weights[:, start:stop].unsqueeze(-1)).sum(2)
+                if candidates is not None:
+                    scores = scores.masked_fill(~candidate_mask.gather(-1, selected), -torch.inf)
+                    # Preserve global top-k coordinates, including tie behavior,
+                    # without constructing per-head products for excluded keys.
+                    scores = scores.new_full((*scores.shape[:2], count), -torch.inf).scatter_(
+                        -1, selected, scores
+                    )
+                scores.masked_fill_(
+                    torch.arange(count, device=scores.device) >= lengths[:, start:stop], -torch.inf
+                )
+                scores.masked_fill_(~compressed_valid[:, None, :], -torch.inf)
+                if source:
+                    state["candidates"][0][:, start:stop] = select_candidates(
+                        scores,
+                        lengths[:, start:stop],
+                        self.config.candidate_topk_blocks,
+                        self.config.candidate_block_size,
+                    )
+                indices = scores.topk(result.shape[-1], -1, sorted=False).indices.sort(-1).values
+                result[:, start:stop] = torch.where(
+                    (indices < lengths[:, start:stop])
+                    & ~torch.isneginf(scores.gather(-1, indices)),
+                    indices + offset,
+                    -1,
+                )
+        return result
 
 
 class V41Attention(nn.Module):
@@ -230,7 +284,7 @@ class V41Attention(nn.Module):
         output = sparse_attention(query, kv, self.attn_sink, indices)
         output = rotary(output, positions, self.config, bool(self.compress_ratio), inverse=True)
         output = output.reshape(batch, sequence, self.config.o_groups, -1)
-        if self.config.attention_quantization:
+        if self.config.attention_quantization or getattr(self.wo_a, "checkpoint_quantized", False):
             output = _fp8_inputs(output)
         output = self.wo_a(output)
         return self.wo_b(output.flatten(2)).to(hidden_states.dtype)

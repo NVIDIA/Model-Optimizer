@@ -25,6 +25,7 @@ interface. Generation uses an exact prefix-recomputation cache; it is intended
 for correctness and repair workloads, not production serving.
 """
 
+import copy
 import re
 from collections.abc import Mapping
 
@@ -33,6 +34,7 @@ import torch.nn.functional as F
 from torch import nn
 from transformers import GenerationMixin, PreTrainedModel
 from transformers.cache_utils import Cache, KVSharingDict
+from transformers.distributed.configuration_utils import DistributedConfig
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 
 from ._hf_attention import V41Attention
@@ -219,11 +221,9 @@ class DeepseekV41PreTrainedModel(PreTrainedModel):
         if distributed is None:
             config = kwargs.get("config")
             distributed = getattr(config, "distributed_config", None)
-        ep_size = (
-            distributed.get("ep_size")
-            if isinstance(distributed, Mapping)
-            else getattr(distributed, "ep_size", None)
-        )
+        if isinstance(distributed, Mapping):
+            distributed = DistributedConfig.from_dict(dict(distributed))
+        ep_size = getattr(distributed, "ep_size", None)
         if ep_size is not None and ep_size > 1:
             raise ValueError(
                 "Native HF EP loading is unsupported for V4.1; use ModelOpt placement "
@@ -328,10 +328,18 @@ class DeepseekV41Model(DeepseekV41PreTrainedModel):
             position_ids = torch.arange(
                 prefix_length, prefix_length + new_length, device=current.device
             ).expand(batch, -1)
-        elif position_ids.ndim == 1:
-            position_ids = position_ids.unsqueeze(0).expand(batch, -1)
+        else:
+            if position_ids.ndim == 1:
+                position_ids = position_ids.unsqueeze(0)
+            if position_ids.shape == (1, new_length):
+                position_ids = position_ids.expand(batch, -1)
+            elif position_ids.shape != (batch, new_length):
+                raise ValueError("V4.1 position_ids must match the current batch and sequence.")
         if prefix_length:
             assert cache is not None
+            if cache.inputs_embeds is not None and input_ids is not None:
+                # HF continues an embedding prompt with sampled token IDs.
+                inputs_embeds, input_ids = self.embed(input_ids), None
             if (input_ids is None) != (cache.input_ids is None):
                 raise ValueError("Cached input_ids and inputs_embeds modes cannot be mixed.")
             if input_ids is not None:
@@ -456,6 +464,11 @@ class DeepseekV41ForCausalLM(DeepseekV41PreTrainedModel, GenerationMixin):
         if isinstance(logits_to_keep, int) and logits_to_keep < 0:
             raise ValueError("logits_to_keep must be nonnegative.")
         num_items_in_batch = kwargs.pop("num_items_in_batch", None)
+        caller_cache = past_key_values
+        if isinstance(caller_cache, DeepseekV41RecomputeCache):
+            # The backbone replaces cache fields but never edits their storage.
+            # Stage those assignments until head selection and loss also succeed.
+            past_key_values = copy.copy(caller_cache)
         outputs = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -476,8 +489,8 @@ class DeepseekV41ForCausalLM(DeepseekV41PreTrainedModel, GenerationMixin):
         if labels is not None:
             full_logits = self.lm_head(hidden).float()
             loss = F.cross_entropy(
-                full_logits[:, :-1].reshape(-1, self.config.vocab_size),
-                labels[:, 1:].reshape(-1),
+                full_logits.reshape(-1, self.config.vocab_size),
+                F.pad(labels[:, 1:], (0, 1), value=-100).reshape(-1),
                 ignore_index=-100,
                 reduction="mean" if num_items_in_batch is None else "sum",
             )
@@ -486,6 +499,10 @@ class DeepseekV41ForCausalLM(DeepseekV41PreTrainedModel, GenerationMixin):
             logits = full_logits[:, selection]
         else:
             logits = self.lm_head(hidden[:, selection]).float()
+        if caller_cache is not None and outputs.past_key_values is not None:
+            for name in ("input_ids", "inputs_embeds", "position_ids", "attention_mask"):
+                setattr(caller_cache, name, getattr(outputs.past_key_values, name))
+            outputs.past_key_values = caller_cache
         result = CausalLMOutputWithPast(
             loss=loss,
             logits=logits,

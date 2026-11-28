@@ -27,6 +27,8 @@ from .moe import _decode_weight
 
 __all__ = []
 
+_CHECKPOINT_CHUNK_ELEMENTS = 1 << 20
+
 
 def _canonical_key(name):
     name = name.removeprefix("model.")
@@ -81,8 +83,14 @@ def load_published_text_checkpoint(
                 raise ValueError(
                     "Engram FP8 tables require one scale per row and group of 32 columns."
                 )
-            value = weight.float().unflatten(-1, (-1, 32)) * scale.float().unsqueeze(-1)
-            return value.flatten(-2), False
+            value = torch.empty(shape, device=target_device, dtype=dtype)
+            rows = max(1, _CHECKPOINT_CHUNK_ELEMENTS // shape[1])
+            for start in range(0, shape[0], rows):
+                stop = start + rows
+                chunk = weight[start:stop].to(target_device).float().unflatten(-1, (-1, 32))
+                chunk.mul_(scale[start:stop].to(target_device).float().unsqueeze(-1))
+                value[start:stop].copy_(chunk.flatten(-2))
+            return value, False
         if len(shape) == 3:
             if (
                 weight.shape != shape
@@ -139,7 +147,7 @@ def load_published_text_checkpoint(
         else:
             value, rounded = read(name, parameter.shape, table=".engram.embed." in name)
             if tied and name == shared:
-                shared_value = value
+                shared_value, shared_rounded = value, rounded
             fp32 = any(
                 part.startswith("hc_") or part == "gate" for part in name.split(".")
             ) or name.endswith("attn_sink")
@@ -148,15 +156,19 @@ def load_published_text_checkpoint(
             if ".compressor.wkv." in name:
                 layer_id = int(name.split(".")[2])
                 fp32 = config.compress_ratios[layer_id] > 1
-            decoded[name] = (
-                value.to(device=target_device, dtype=torch.float32 if fp32 else dtype)
-                .detach()
-                .clone()
-            )
-            # wo_a is grouped; attention_quantization owns its input rounding in attention.forward.
-            if rounded and not name.endswith("wo_a.weight"):
+            if ".engram.embed." in name and canonical[name].dtype == torch.float8_e4m3fn:
+                # The row decoder already owns the final destination allocation.
+                decoded[name] = value.detach()
+            else:
+                decoded[name] = (
+                    value.to(device=target_device, dtype=torch.float32 if fp32 else dtype)
+                    .detach()
+                    .clone()
+                )
+            if rounded and name != shared:
                 quantized.append(name.removesuffix(".weight"))
     if tied:
+        head_rounded = shared_rounded
         if head in canonical:
             if canonical[head] is canonical[shared] and canonical.get(
                 "lm_head.scale"
@@ -166,10 +178,12 @@ def load_published_text_checkpoint(
                 if scale in canonical:
                     consumed.add(scale)
             else:
-                value, _ = read(head, model.model.embed.weight.shape)
+                value, head_rounded = read(head, model.model.embed.weight.shape)
                 # Validate before dtype conversion can round distinct source values to the same number.
                 if not torch.equal(value.to(shared_value.device), shared_value):
                     raise ValueError("Tied V4.1 embedding and head checkpoint weights disagree.")
+        if head_rounded:
+            quantized.append("lm_head")
         decoded[head] = decoded[shared]
     if model.model.engram_hash is not None:
         model.model.engram_hash = V41NgramHash(config).to(target_device)

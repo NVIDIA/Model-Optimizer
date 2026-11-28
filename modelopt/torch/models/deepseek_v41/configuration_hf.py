@@ -163,6 +163,8 @@ class DeepseekV41Config(PreTrainedConfig):
                 self.base_model_fsdp_plan[f"layers.*.{name}"] = "free_full_weight"
 
     def _validate_text_architecture(self):
+        if self.sliding_window <= 0:
+            raise ValueError("V4.1 sliding_window must be positive.")
         if (
             self.num_key_value_heads != 1
             or getattr(self, "attention_bias", False)

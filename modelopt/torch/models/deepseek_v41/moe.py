@@ -186,7 +186,9 @@ def _decode_weight(weight, scale, shape):
         padding = (0, -shape[1] % 32, 0, -shape[0] % 32)
         if any(padding):
             values = F.pad(values, padding)
-        blocks = values.reshape(expected[0], 32, expected[1], 32)
+        # Splitting each logical dimension is explicitly a view, including
+        # noncontiguous source layouts; in-place scaling updates returned values.
+        blocks = values.unflatten(0, (expected[0], 32)).unflatten(-1, (expected[1], 32))
         blocks.mul_(scale.float()[:, None, :, None])
         return values[: shape[0], : shape[1]], True
     if scale is not None or weight.dtype not in (
@@ -253,6 +255,14 @@ class DeepseekV41MoE(nn.Module):
         floating tensors so subsequent ModelOpt PTQ owns its own packed formats.
         No files, weights, process groups, or full model are loaded implicitly.
         """
+        if (
+            device is None
+            and len({value.device for key, value in state_dict.items() if key.startswith(prefix)})
+            > 1
+        ):
+            raise ValueError(
+                "Mixed-device V4.1 checkpoint tensors require an explicit destination device."
+            )
         model = cls(config, device="meta", dtype=dtype)
         parameters = dict(model.named_parameters())
         expected = set()
@@ -287,7 +297,7 @@ class DeepseekV41MoE(nn.Module):
             raise ValueError(f"Unexpected V4.1 MoE checkpoint keys: {sorted(extra)}")
         model.load_state_dict(decoded, assign=True)
         for owner, projections in quantized.items():
-            model.get_submodule(owner).checkpoint_quantized_projections = frozenset(projections)
+            model.get_submodule(owner).checkpoint_quantized_projections |= frozenset(projections)
         model.config = replace(
             model.config,
             checkpoint_quantized_projections=tuple(
