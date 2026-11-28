@@ -804,11 +804,13 @@ def test_configured_head_dim_graph(head_dim_config, projection_mode, tmp_path):
         )
     elif projection_mode in {"packed", "unpacked"}:
         # Real DQ weights select the quantized projection paths in surgery.
+        rng = np.random.default_rng(42)
         for node in projections:
             weight = weights[node.input[1]]
+            quantized = rng.choice(np.array([-3, -2, -1, 1, 2, 3], dtype=np.int8), size=weight.dims)
             graph.initializer.extend(
                 [
-                    _init(f"{weight.name}/int8", np.zeros(weight.dims, np.int8)),
+                    _init(f"{weight.name}/int8", quantized),
                     _init(f"{weight.name}/scale", np.array(0.02, np.float16)),
                 ]
             )
