@@ -22,7 +22,7 @@ import os
 import random
 import shutil
 import time
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 from importlib.metadata import PackageNotFoundError
 from pathlib import Path
 from types import SimpleNamespace
@@ -74,6 +74,154 @@ def test_checkpoint_refuses_changed_nonpersistent_execution_buffer(tmp_path):
     changed = BypassCheckpoint(student, teacher, config, dataloader=batches, devices=[])
     with pytest.raises(ValueError, match="identity"):
         changed.load(str(tmp_path))
+
+
+@pytest.mark.parametrize(
+    "change", ["revision", "integer_key", "key_collision", "invalid_leaf", "extra_state"]
+)
+def test_checkpoint_preserves_caller_identity(tmp_path, change):
+    class ExtraGain(_Gain):
+        def get_extra_state(self):
+            return {"_commit_hash": self.gain.item()}
+
+        def set_extra_state(self, state):
+            self.gain.fill_(state["_commit_hash"])
+
+    student, teacher, batches = bypass_problem(activation_factory=ExtraGain)
+    loader = _StatefulCursor(batches)
+    loader.data_identity = {"_commit_hash": "revision-a", 1: "shard"}
+    config = mtd.BypassConfig(
+        num_steps=1, global_batch_size=2, sequence_length=3, checkpoint_dir=str(tmp_path)
+    )
+    if change == "invalid_leaf":
+        loader.data_identity["invalid"] = object()
+        with pytest.raises(ValueError, match="identity"):
+            BypassCheckpoint(student, teacher, config, dataloader=loader, devices=[])
+        assert not list(tmp_path.iterdir())
+        return
+    if change == "key_collision":
+        loader.data_identity = {1: "dataset-a", "1": "dataset-b"}
+    checkpoint = BypassCheckpoint(student, teacher, config, dataloader=loader, devices=[])
+    checkpoint.save(1, fields={}, optimizers={}, data_position={}, rng_state=_rng_state([]))
+    assert checkpoint.load(str(tmp_path))[0] == 1
+    if change == "integer_key":
+        return  # JSON canonicalization must make the first save round-trip.
+    if change == "revision":
+        loader.data_identity["_commit_hash"] = "revision-b"
+    elif change == "key_collision":
+        loader.data_identity = {"1": "dataset-b"}
+    else:
+        # Only extra_state differs: do not also alter a registered buffer.
+        teacher.activation._buffers.pop("gain")
+        teacher.activation.gain = torch.tensor(2.0)
+        original = copy.deepcopy(teacher)
+        original.activation.gain.fill_(1)
+        # Keep public scalars and registered tensors identical; gain is an
+        # unregistered tensor, persisted solely through get_extra_state().
+        assert _model_hash(original) != _model_hash(teacher)
+        return
+    changed = BypassCheckpoint(student, teacher, config, dataloader=loader, devices=[])
+    with pytest.raises(ValueError, match="identity"):
+        changed.load(str(tmp_path))
+
+
+def test_checkpoint_refuses_teacher_buffer_advanced_by_forward(tmp_path):
+    class AdvancingGain(_Gain):
+        def forward(self, value):
+            self.gain.add_(0.125)
+            return super().forward(value)
+
+    student, teacher, batches = bypass_problem(activation_factory=AdvancingGain)
+    with pytest.raises(ValueError, match="teacher buffers changed"):
+        mtd.bypass(
+            student,
+            teacher,
+            batches,
+            {
+                "num_steps": 1,
+                "global_batch_size": 2,
+                "sequence_length": 3,
+                "checkpoint_dir": str(tmp_path),
+            },
+        )
+    assert not (tmp_path / "latest").exists()
+
+
+def test_checkpoint_save_does_not_onload_buffer_free_teacher_weights(tmp_path):
+    accelerate = pytest.importorskip("accelerate")
+    student, _, batches = bypass_problem()
+    teacher = torch.nn.Linear(3, 4)
+    accelerate.cpu_offload(teacher, execution_device="cpu")
+    checkpoint = BypassCheckpoint(
+        student,
+        teacher,
+        mtd.BypassConfig(
+            num_steps=1, global_batch_size=2, sequence_length=3, checkpoint_dir=str(tmp_path)
+        ),
+        dataloader=batches,
+        devices=[],
+    )
+    with ExitStack() as stack:
+        for hook in getattr(teacher._hf_hook, "hooks", [teacher._hf_hook]):
+            stack.enter_context(
+                mock.patch.object(
+                    hook, "pre_forward", side_effect=AssertionError("buffer-free weight onloaded")
+                )
+            )
+        checkpoint.save(1, fields={}, optimizers={}, data_position={}, rng_state=_rng_state([]))
+    assert teacher.weight.is_meta
+    assert checkpoint.load(str(tmp_path))[0] == 1
+
+
+def test_checkpoint_refuses_moment_owned_by_another_optimizer(tmp_path):
+    student, teacher, batches = bypass_problem()
+    checkpoint = BypassCheckpoint(
+        student,
+        teacher,
+        mtd.BypassConfig(
+            num_steps=1, global_batch_size=2, sequence_length=3, checkpoint_dir=str(tmp_path)
+        ),
+        dataloader=batches,
+        devices=[],
+    )
+    fields = {name: torch.nn.Parameter(torch.ones(2)) for name in ("a", "b")}
+    optimizers = {name: Lion([value]) for name, value in fields.items()}
+    for value in fields.values():
+        value.grad = torch.ones_like(value)
+    for optimizer in optimizers.values():
+        optimizer.step()
+    checkpoint.save(
+        1, fields=fields, optimizers=optimizers, data_position={}, rng_state=_rng_state([])
+    )
+    _, state = checkpoint.load(str(tmp_path))
+    state["optimizers"]["a"]["state"]["b"] = state["optimizers"]["b"]["state"].pop("b")
+    before = {name: value.detach().clone() for name, value in fields.items()}
+    with pytest.raises(ValueError, match="unknown native field"):
+        checkpoint.restore_training_state(state, fields, optimizers)
+    _equal(fields, before)
+
+
+def test_checkpoint_does_not_sync_above_existing_destination(tmp_path):
+    student, teacher, batches = bypass_problem()
+    original = checkpoint_module._sync_directory
+
+    def sync(path):
+        if Path(path) in tmp_path.parents:
+            raise PermissionError("search-only ancestor")
+        return original(path)
+
+    with mock.patch.object(checkpoint_module, "_sync_directory", side_effect=sync):
+        checkpoint = BypassCheckpoint(
+            student,
+            teacher,
+            mtd.BypassConfig(
+                num_steps=1, global_batch_size=2, sequence_length=3, checkpoint_dir=str(tmp_path)
+            ),
+            dataloader=batches,
+            devices=[],
+        )
+        checkpoint.save(1, fields={}, optimizers={}, data_position={}, rng_state=_rng_state([]))
+    assert checkpoint.load(str(tmp_path))[0] == 1
 
 
 @pytest.mark.parametrize("pointer", ["", ".."])
@@ -468,42 +616,80 @@ def test_bypass_resume_matches_uninterrupted(tmp_path, monkeypatch, caplog, stat
     assert not list((tmp_path / "resumed").glob(".pending-step-*"))
     assert incomplete.exists()  # Never delete a different writer's uncommitted directory.
     if not stateful:
-        for phase in ("after_rename", "before_latest", "after_latest", "retirement"):
+        for phase in (
+            "after_rename",
+            "before_latest",
+            "after_latest",
+            "after_latest_sync",
+            "durability_uncertain",
+            "retirement",
+        ):
             root = tmp_path / f"commit-{phase}"
             shutil.copytree(tmp_path / "resumed", root)
             foreign = root / ".latest-other-writer"
             foreign.write_text("untouched")
             original_replace = os.replace
             original_rmtree = shutil.rmtree
+            original_sync = checkpoint_module._sync_directory
+            triggered = []
 
             def fail_commit(source, target):
                 source = Path(source)
                 if phase == "before_latest" and source.name.startswith(".latest-"):
+                    triggered.append(phase)
                     raise OSError("Simulated latest pointer write failure")
                 result = original_replace(source, target)
                 if (phase == "after_rename" and source.name.startswith(".pending-step-")) or (
                     phase == "after_latest" and source.name.startswith(".latest-")
                 ):
+                    triggered.append(phase)
                     raise OSError("Simulated checkpoint commit failure")
                 return result
 
+            def fail_sync(path):
+                if (
+                    phase in ("after_latest_sync", "durability_uncertain")
+                    and (not triggered or phase == "durability_uncertain")
+                    and Path(path) == root
+                    and (root / "latest").exists()
+                ):
+                    current = (root / "latest").read_text().strip()
+                    if current.startswith("step-000004-"):
+                        triggered.append(phase)
+                        raise OSError("Simulated post-publication sync failure")
+                return original_sync(path)
+
             def fail_retire(path, *args, **kwargs):
                 if Path(path) == root / generation.name:
+                    triggered.append(phase)
                     raise OSError("Simulated old-generation retirement failure")
                 return original_rmtree(path, *args, **kwargs)
 
             candidate = fresh_student()
             with monkeypatch.context() as patch:
                 patch.setattr(os, "replace", fail_commit)
+                patch.setattr(checkpoint_module, "_sync_directory", fail_sync)
                 if phase == "retirement":
                     patch.setattr(shutil, "rmtree", fail_retire)
-                with pytest.raises(ValueError) if phase != "retirement" else nullcontext():
+                error = (
+                    "durability uncertain"
+                    if phase == "durability_uncertain"
+                    else "Simulated latest pointer write failure"
+                    if phase == "before_latest"
+                    else "Simulated checkpoint commit failure"
+                )
+                with (
+                    pytest.raises(ValueError, match=error)
+                    if phase in ("after_rename", "before_latest", "durability_uncertain")
+                    else nullcontext()
+                ):
                     mtd.bypass(
                         candidate,
                         copy.deepcopy(teacher),
                         cursor(batches),
                         {**recipe, "resume_from": str(root), "checkpoint_dir": str(root)},
                     )
+            assert triggered == [phase] * (2 if phase == "durability_uncertain" else 1)
             current, committed = _committed(root)
             reader = BypassCheckpoint(
                 fresh_student(),
@@ -513,13 +699,18 @@ def test_bypass_resume_matches_uninterrupted(tmp_path, monkeypatch, caplog, stat
                 devices=[],
             )
             verified_step, verified = reader.load(str(root))
-            assert verified_step == (4 if phase in ("after_latest", "retirement") else 2)
+            assert verified_step == (
+                4
+                if phase
+                in ("after_latest", "after_latest_sync", "durability_uncertain", "retirement")
+                else 2
+            )
             _equal(verified, committed)
             assert foreign.read_text() == "untouched"
             assert (root / incomplete.name).exists()
             assert not list(root.glob(".pending-step-*"))
             assert set(root.glob(".latest-*")) == {foreign}
-            if phase in ("after_latest", "retirement"):
+            if phase in ("after_latest", "after_latest_sync", "durability_uncertain", "retirement"):
                 assert current.name != generation.name and committed["step"] == 4
                 assert current.exists()  # Never remove the generation latest publishes.
             else:

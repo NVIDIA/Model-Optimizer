@@ -24,6 +24,7 @@ import sys
 import time
 from collections import OrderedDict
 from contextlib import ExitStack
+from unittest import mock
 
 import numpy as np
 import pytest
@@ -701,6 +702,10 @@ def test_public_bypass_offloaded_nested_boundary_matches_resident(offload, tmp_p
             self.started = True
             return super().__iter__()
 
+        def __getitem__(self, index):
+            self.started = True
+            return super().__getitem__(index)
+
     for preload in (True, "buffers"):
         composite, composite_teacher = fresh_pair(f"preload-{preload}", preload=preload)
         if preload == "buffers":
@@ -711,13 +716,26 @@ def test_public_bypass_offloaded_nested_boundary_matches_resident(offload, tmp_p
         before = caller_state(composite, composite_teacher)
         outputs = [root(batches[0]).detach().clone() for root in (composite, composite_teacher)]
         data = PreflightCursor(batches)
-        with pytest.raises(ValueError):
-            mtd.bypass(
-                composite,
-                composite_teacher,
-                data,
-                {**config, "checkpoint_dir": str(tmp_path / f"preload-{preload}-checkpoint")},
-            )
+        # Watch real Accelerate materialization hooks on each composite owner
+        # and descendant. Final meta placement alone cannot prove no onload ran.
+        with ExitStack() as stack:
+            accesses = [
+                stack.enter_context(mock.patch.object(hook, "pre_forward", wraps=hook.pre_forward))
+                for root in (composite, composite_teacher)
+                for owner in [root.buffer_only if preload == "buffers" else root]
+                for module in owner.modules()
+                if hasattr(module, "_hf_hook")
+                for hook in getattr(module._hf_hook, "hooks", [module._hf_hook])
+            ]
+            with pytest.raises(ValueError, match="individually accessible offload weight owners"):
+                mtd.bypass(
+                    composite,
+                    composite_teacher,
+                    data,
+                    {**config, "checkpoint_dir": str(tmp_path / f"preload-{preload}-checkpoint")},
+                )
+            for access in accesses:
+                access.assert_not_called()
         assert not data.started  # Refuse during identity, before priming/training.
         assert_caller_state((composite, composite_teacher), before)
         assert_exact_state(_rng_state([]), caller_rng)

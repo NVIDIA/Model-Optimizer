@@ -74,7 +74,7 @@ def _tensor_hash(digest, value):
         _tensor_hash(digest, chunk.squeeze(0) if chunk.shape[0] == 1 else chunk)
 
 
-def _model_hash(model):
+def _model_hash(model, *, buffers_only=False):
     digest = hashlib.sha256()
     names = module_name_maps(model)
 
@@ -86,6 +86,16 @@ def _model_hash(model):
             value is not None and value.is_meta
             for value in (*module._parameters.values(), *module._buffers.values())
         )
+        if buffers_only and not any(
+            value is not None and value.is_meta
+            for child in module.modules()
+            if child is module or isinstance(child, TensorQuantizer)
+            for value in child._buffers.values()
+        ):
+            # Ordinary offloaded parameter owners without meta buffers need no
+            # access window for this check. Quantizer buffers still load with
+            # their weight owner rather than acquiring independent ownership.
+            materialize = False
         if materialize and (
             not requires_weight_materialization(module, model, names)
             or any(
@@ -119,7 +129,12 @@ def _model_hash(model):
             # Own state only: state_dict() here would traverse offloaded descendants
             # before their access windows and retain a full model of stale meta refs.
             state = {}
-            module._save_to_state_dict(state, prefix="", keep_vars=True)
+            if buffers_only:
+                state.update(
+                    (key, value) for key, value in module._buffers.items() if value is not None
+                )
+            else:
+                module._save_to_state_dict(state, prefix="", keep_vars=True)
             state.update(
                 ("_non_persistent_buffer." + key, value)
                 for key, value in module._buffers.items()
@@ -131,42 +146,43 @@ def _model_hash(model):
                     digest.update(str((tuple(value.shape), value.dtype)).encode())
                     _tensor_hash(digest, value)
                 else:
-                    digest.update(_batch_hash(_semantic_config(value)).encode())
-            # Ordinary options are not always present in extra_repr (e.g. MHA
-            # num_heads). Bind public scalars without serializing arbitrary objects.
-            scalar = (str, int, float, bool, torch.dtype, type(None))
-            options = {
-                key: value
-                for key, value in vars(module).items()
-                if not key.startswith("_")
-                and key not in {"training", "name_or_path", "transformers_version"}
-                and (
-                    isinstance(value, scalar)
-                    or (
-                        isinstance(value, (tuple, list))
-                        and all(isinstance(item, scalar) for item in value)
+                    digest.update(_batch_hash(value).encode())
+            if not buffers_only:
+                # Ordinary options are not always present in extra_repr (e.g. MHA
+                # num_heads). Bind public scalars without serializing arbitrary objects.
+                scalar = (str, int, float, bool, torch.dtype, type(None))
+                options = {
+                    key: value
+                    for key, value in vars(module).items()
+                    if not key.startswith("_")
+                    and key not in {"training", "name_or_path", "transformers_version"}
+                    and (
+                        isinstance(value, scalar)
+                        or (
+                            isinstance(value, (tuple, list))
+                            and all(isinstance(item, scalar) for item in value)
+                        )
                     )
+                }
+                # Existing semantic protocols cover custom execution state. Original
+                # Python implementations and external state must remain unchanged.
+                digest.update(
+                    _batch_hash(
+                        [
+                            name,
+                            f"{type(module).__module__}.{type(module).__qualname__}",
+                            module.extra_repr(),
+                            _semantic_config(options),
+                        ]
+                    ).encode()
                 )
-            }
-            # Existing semantic protocols cover custom execution state. Original
-            # Python implementations and external state must remain unchanged.
-            digest.update(
-                _batch_hash(
-                    [
-                        name,
-                        f"{type(module).__module__}.{type(module).__qualname__}",
-                        module.extra_repr(),
-                        _semantic_config(options),
-                    ]
-                ).encode()
-            )
-            native = getattr(module, "_native_weight_meta", None)
-            if native is not None:
-                digest.update(_batch_hash(_semantic_config(native)).encode())
-            config = getattr(module, "config", None)
-            if isinstance(config, dict) or callable(getattr(config, "to_dict", None)):
-                digest.update(b"module_config:")
-                digest.update(_batch_hash(_semantic_config(config)).encode())
+                native = getattr(module, "_native_weight_meta", None)
+                if native is not None:
+                    digest.update(_batch_hash(_semantic_config(native)).encode())
+                config = getattr(module, "config", None)
+                if isinstance(config, dict) or callable(getattr(config, "to_dict", None)):
+                    digest.update(b"module_config:")
+                    digest.update(_batch_hash(_semantic_config(config)).encode())
             # _modules retains registration order and shared-module paths.
             for child_name, child in module._modules.items():
                 if child is not None:
@@ -256,7 +272,13 @@ def _data_identity(loader, max_batches):
             except Exception:
                 stream.seek(0)
                 torch.load(stream, map_location="cpu", weights_only=True)
-        return {"kind": "stateful", "identity": _semantic_config(loader.data_identity)}
+        return {
+            "kind": "stateful",
+            "identity": loader.data_identity,
+            # JSON coerces integer keys to strings; retain the caller's typed
+            # identity so coercion cannot collapse distinct data revisions.
+            "sha256": _batch_hash(loader.data_identity),
+        }
     raise ValueError(
         "Checkpointing needs a replayable Sequence or a stateful loader with data_identity"
     )
@@ -307,13 +329,13 @@ def _sync_directory(path):
         os.close(descriptor)
 
 
-def _sync_directory_ancestry(path):
+def _sync_directory_ancestry(path, boundary):
     directory = Path(path).resolve()
     device = directory.stat().st_dev
     while True:
         _sync_directory(directory)
         parent = directory.parent
-        if parent == directory or parent.stat().st_dev != device:
+        if directory in (boundary, parent) or parent.stat().st_dev != device:
             return
         directory = parent
 
@@ -373,7 +395,10 @@ class BypassCheckpoint(_CheckpointRanks):
                 ancestor = Path(self.directory).resolve()
                 while not ancestor.exists():
                     ancestor = ancestor.parent
-                _sync_directory_ancestry(ancestor)
+                # Existing entries are the durable boundary. Only entries created
+                # beneath it need ancestor syncing, including failed-save retries.
+                _sync_directory(ancestor)
+                self._durable_directory = ancestor
             model_identities = {}
             for role, model in (("student", student), ("teacher", teacher)):
                 _LOG.info("Bypass checkpoint: reading all %s model bytes for identity", role)
@@ -384,6 +409,8 @@ class BypassCheckpoint(_CheckpointRanks):
                     role,
                     time.perf_counter() - started,
                 )
+            self.teacher = teacher
+            self.teacher_buffers = _model_hash(teacher, buffers_only=True)
             batch_size = config.global_batch_size if runtime is None else runtime.local_batch_size
             self.identity = {
                 **model_identities,
@@ -405,6 +432,9 @@ class BypassCheckpoint(_CheckpointRanks):
             }
             if getattr(getattr(student, "config", None), "model_type", None):
                 self.identity["runtime"]["transformers"] = version("transformers")
+            # Fail before training on unsupported leaves and compare the exact
+            # representation written to every JSON receipt on the first save.
+            self.identity = json.loads(json.dumps(self.identity, allow_nan=False))
         except Exception as exc:
             error = f"rank {self.rank}: {type(exc).__name__}: {exc}"
         errors = [value for value in self._gather(error) if value]
@@ -428,6 +458,11 @@ class BypassCheckpoint(_CheckpointRanks):
         root = Path(self.directory)
         state, error = None, None
         try:
+            # Frozen parameters alone do not make a teacher immutable: custom
+            # forward methods may advance registered (also nonpersistent) buffers.
+            # Such teachers cannot resume from an identity-only checkpoint.
+            if _model_hash(self.teacher, buffers_only=True) != self.teacher_buffers:
+                raise ValueError("Bypass checkpoint teacher buffers changed during training")
             state = {
                 "step": step,
                 "fields": {name: value.detach().cpu() for name, value in fields.items()},
@@ -448,7 +483,7 @@ class BypassCheckpoint(_CheckpointRanks):
         def begin():
             root.mkdir(parents=True, exist_ok=True)
             # Retry must also persist entries left behind by an interrupted first save.
-            _sync_directory_ancestry(root)
+            _sync_directory_ancestry(root, self._durable_directory)
             if (root / "latest").exists():
                 previous = (root / "latest").read_text().strip()
                 if previous in {"", ".", ".."} or Path(previous).name != previous:
@@ -497,6 +532,10 @@ class BypassCheckpoint(_CheckpointRanks):
                     shutil.rmtree(path)
             temporary.unlink(missing_ok=True)
             _sync_directory(root)
+            # If latest advanced before an error, successful recovery sync makes
+            # this exact generation durable. Report success collectively rather
+            # than raising with a pointer the caller cannot retry at this step.
+            return str(root / name) if current == name else None
 
         def commit():
             for rank, expected in enumerate(receipts):
@@ -540,11 +579,17 @@ class BypassCheckpoint(_CheckpointRanks):
             if errors:
                 raise ValueError("Bypass checkpoint shards failed: " + "; ".join(errors))
             return Path(self._coordinate(commit))
-        except Exception:
+        except Exception as primary:
             try:
-                self._coordinate(discard_pending)
+                recovered = self._coordinate(discard_pending)
+                if recovered is not None:
+                    return Path(recovered)
             except Exception as exc:
-                _LOG.warning("Bypass checkpoint cleanup also failed: %s", exc)
+                raise ValueError(
+                    f"Bypass checkpoint durability uncertain for {root / name}: {primary}; "
+                    f"recovery sync failed: {exc}. After storage recovers, inspect latest "
+                    "and resume its validated generation; do not retry an unrelated same-step save."
+                ) from primary
             raise
 
     def load(self, directory):
@@ -614,8 +659,9 @@ class BypassCheckpoint(_CheckpointRanks):
                 for group, previous in zip(current, saved["groups"], strict=True):
                     if {names[id(p)] for p in group["params"]} != set(previous["params"]):
                         raise ValueError("Bypass optimizer field ownership differs")
+                owned = {names[id(parameter)] for group in current for parameter in group["params"]}
                 for field, values in saved["state"].items():
-                    if field not in fields or set(values) != {"exp_avg"}:
+                    if field not in owned or set(values) != {"exp_avg"}:
                         raise ValueError("Bypass Lion state contains an unknown native field")
                     if (
                         values["exp_avg"].shape != fields[field].shape
