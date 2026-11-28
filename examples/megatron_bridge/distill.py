@@ -42,6 +42,7 @@ from megatron.bridge.training.config import (
     GPTDatasetConfig,
     LoggerConfig,
     MockGPTDatasetConfig,
+    OptimizerConfigOverrideProvider,
     RNGConfig,
     TokenizerConfig,
     TrainingConfig,
@@ -61,6 +62,19 @@ try:
     HAS_DIRECT_HF_SFT = True
 except ImportError:
     HAS_DIRECT_HF_SFT = False
+# LSQ scale learning needs NVIDIA-NeMo/Megatron-Bridge#6699. Without #6698, a resumed run moves
+# the scales from --lsq_scale_lr to --lr.
+# TODO: replace this probe with a version check once a Megatron-Bridge release carries both.
+try:
+    from megatron.bridge.training.checkpointing import _param_group_lr_bounds  # noqa: F401
+    from megatron.bridge.training.post_training.lsq import (
+        LSQOptimizerConfigOverrideProvider,
+        freeze_all_but_lsq_scales,
+    )
+
+    HAS_LSQ = True
+except ImportError:
+    HAS_LSQ = False
 from megatron.core import parallel_state
 from megatron.core.datasets.gpt_dataset import GPTDataset
 from megatron.core.datasets.indexed_dataset import IndexedDataset
@@ -373,6 +387,19 @@ def get_args():
     parser.add_argument("--min_lr", type=float, default=1e-5, help="Minimum learning rate")
     parser.add_argument("--lr_warmup_iters", type=int, default=50, help="Number of LR warmup steps")
     parser.add_argument(
+        "--lsq_scale_lr",
+        type=float,
+        default=None,
+        help="Peak learning rate of the learnable NVFP4 weight scales of an LSQ-quantized student, in "
+        "their own parameter group (no weight decay) on the --lr schedule. Default: --lr.",
+    )
+    parser.add_argument(
+        "--lsq_scale_only",
+        action="store_true",
+        help="Train only the LSQ weight scales of the student; its other parameters are frozen and "
+        "take no gradient or optimizer state.",
+    )
+    parser.add_argument(
         "--recompute_granularity",
         type=str,
         default=None,
@@ -546,6 +573,22 @@ def get_args():
         )
     if args.sft_dataset_root and not args.sft:
         raise ValueError("--sft_dataset_root requires --sft; without it the SFT path is not used.")
+    if (args.lsq_scale_lr is not None or args.lsq_scale_only) and not HAS_LSQ:
+        raise ValueError(
+            "--lsq_scale_lr / --lsq_scale_only need a Megatron-Bridge with "
+            "NVIDIA-NeMo/Megatron-Bridge#6699 (scale learning) and #6698 (per-group LR on resume)."
+        )
+    if args.lsq_scale_only and args.student_megatron_path is None:
+        raise ValueError("--lsq_scale_only requires an LSQ-quantized --student_megatron_path.")
+    if (args.lsq_scale_lr is not None or args.lsq_scale_only) and args.tp_size > 1:
+        # TE syncs only the wgrad flag for frozen weights, not the sequence-parallel input gather.
+        raise ValueError("LSQ scale learning needs --tp_size 1, like static-block NVFP4.")
+    if args.lsq_scale_lr is not None and args.lsq_scale_lr < args.min_lr:
+        # The scale group decays to --min_lr, so its schedule would rise instead of decay.
+        raise ValueError(
+            f"--lsq_scale_lr ({args.lsq_scale_lr}) is below --min_lr ({args.min_lr}); "
+            "lower --min_lr to at most --lsq_scale_lr."
+        )
     if args.sft and args.sft_dataset_root:
         # Fail on a mistyped root here rather than after both checkpoints have loaded onto GPUs.
         required = ["training.jsonl"] + (["validation.jsonl"] if args.eval_iters > 0 else [])
@@ -674,6 +717,15 @@ class FakeQuantWeightCache(Callback):
     def on_train_step_end(self, context):
         # Before evaluation and the next step's forward, which see the optimizer's updated weights.
         self._scope.close()
+
+
+def _optimizer_config_override_provider(args) -> OptimizerConfigOverrideProvider:
+    """Optimizer parameter-group overrides; adds the LSQ scale group when --lsq_scale_lr is set."""
+    if args.lsq_scale_lr is None:
+        return OptimizerConfigOverrideProvider()
+    return LSQOptimizerConfigOverrideProvider(
+        scale_lr=args.lsq_scale_lr, scale_min_lr=None, scale_wd_mult=0.0
+    )
 
 
 def main(args: argparse.Namespace, owns_the_run: bool = True):
@@ -861,6 +913,21 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
 
         distill_provider.register_pre_wrap_hook(_per_stage_recompute_hook)
 
+    if args.lsq_scale_only:
+        # Appended, so it runs after the KD conversion. Bridge's hook makes every scale trainable;
+        # keep the ones already frozen (a frozen MTP head, the teacher) frozen, since they get no
+        # gradient and DDP's overlapped grad reduce asserts on that.
+        def _freeze_all_but_lsq_scales_hook(model_chunks):
+            frozen = [
+                p for chunk in model_chunks for p in chunk.parameters() if not p.requires_grad
+            ]
+            model_chunks = freeze_all_but_lsq_scales(model_chunks)
+            for param in frozen:
+                param.requires_grad_(False)
+            return model_chunks
+
+        distill_provider.register_pre_wrap_hook(_freeze_all_but_lsq_scales_hook)
+
     # Build optimizer and scheduler
     optimizer_config, scheduler_config = distributed_fused_adam_with_cosine_annealing(
         lr_warmup_iters=args.lr_warmup_iters,
@@ -953,6 +1020,7 @@ def main(args: argparse.Namespace, owns_the_run: bool = True):
         ),
         optimizer=optimizer_config,
         scheduler=scheduler_config,
+        optimizer_config_override_provider=_optimizer_config_override_provider(args),
         ddp=DistributedDataParallelConfig(
             check_for_nan_in_grad=True,
             grad_reduce_in_fp32=True,
