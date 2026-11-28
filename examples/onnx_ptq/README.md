@@ -1,3 +1,36 @@
+# How to Generate a Quantized ONNX Model
+
+This section provides a quick guide for generating a quantized ONNX model using Model Optimizer. For more details, see the rest of this README and the [official documentation](https://nvidia.github.io/Model-Optimizer/guides/_onnx_quantization.html).
+
+## Quick Start
+
+### Option 1: Command-line Interface (CLI)
+
+```bash
+python -m modelopt.onnx.quantization \
+    --onnx_path=<input_model.onnx> \
+    --quantize_mode=<fp8|int8|int4> \
+    --calibration_data=<calib.npy> \
+    --calibration_method=<max|entropy|awq_clip|rtn_dq> \
+    --output_path=<output_model.quant.onnx>
+```
+
+### Option 2: Python API
+
+```python
+from modelopt.onnx.quantization import quantize
+
+quantize(
+    onnx_path="input_model.onnx",
+    quantize_mode="int8",       # fp8, int8, int4 etc.
+    calibration_data="calib.npy",
+    calibration_method="max",   # max, entropy, awq_clip, rtn_dq etc.
+    output_path="output_model.quant.onnx",
+)
+```
+
+See the [examples](../torch_onnx/) for PyTorch-to-ONNX quantization workflows and more advanced features.
+
 # ONNX Post-training quantization (PTQ)
 
 This ONNX PTQ Toolkit provides a comprehensive suite of tools designed to optimize ONNX (Open Neural Network Exchange) models through quantization. Our toolkit is aimed at developers looking to enhance performance, reduce model size, and accelerate inference times without compromising the accuracy of their neural networks when deployed with TensorRT.
