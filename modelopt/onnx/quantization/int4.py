@@ -1355,7 +1355,8 @@ def _quantize_awq_lite(
                             )
                             new_tensor = np.asarray(tensor_array) / input_scale
                             new_tensor = new_tensor.reshape(old_dim)
-                            new_tensor = numpy_helper.from_array(new_tensor.get(), tensor.name)
+                            new_tensor_np = np.asnumpy(new_tensor) if has_cupy else new_tensor
+                            new_tensor = numpy_helper.from_array(new_tensor_np, tensor.name)
                             # replace initializer with new scaled array
                             tensor.CopyFrom(new_tensor)
                             for w_name in weight_tensor_names:

@@ -576,3 +576,54 @@ def test_get_x_w_mean_for_subgraph_matches_reference(ci, co_parts):
         _reference_block_normalization(concatenated, block_size, 1e-6),
         rtol=1e-5,
     )
+
+
+def test_awq_lite_fuse_nodes_without_cupy(monkeypatch, tmp_path):
+    """Regression test: awqlite_fuse_nodes must not call CuPy-only .get() when has_cupy is False."""
+    import modelopt.onnx.quantization as mo_onnx
+
+    monkeypatch.setattr(int4, "has_cupy", False)
+    monkeypatch.setattr(int4, "np", np)
+
+    rng = np.random.default_rng(7)
+    x_vi = onnx.helper.make_tensor_value_info("x", onnx.TensorProto.FLOAT, [2, 16])
+    y_vi = onnx.helper.make_tensor_value_info("y", onnx.TensorProto.FLOAT, [2, 8])
+    scale_init = onnx.numpy_helper.from_array(
+        rng.uniform(0.5, 1.5, size=(16,)).astype(np.float32), "mul_scale"
+    )
+    weight_init = onnx.numpy_helper.from_array(
+        rng.normal(0.0, 0.2, size=(16, 8)).astype(np.float32), "w"
+    )
+    graph = onnx.helper.make_graph(
+        [
+            onnx.helper.make_node("Mul", ["x", "mul_scale"], ["sx"], name="fusible_mul"),
+            onnx.helper.make_node("MatMul", ["sx", "w"], ["y"], name="mm"),
+        ],
+        "awq_fuse_no_cupy",
+        [x_vi],
+        [y_vi],
+        [scale_init, weight_init],
+    )
+    in_path = tmp_path / "in.onnx"
+    out_path = tmp_path / "out.onnx"
+    onnx.save(
+        onnx.helper.make_model(
+            graph, opset_imports=[onnx.helper.make_opsetid("", 21)], ir_version=10
+        ),
+        in_path,
+    )
+
+    mo_onnx.quantize(
+        str(in_path),
+        quantize_mode="int4",
+        block_size=8,
+        calibration_method="awq_lite",
+        awqlite_fuse_nodes=True,
+        calibration_data={"x": rng.normal(size=(4, 16)).astype(np.float32)},
+        calibration_eps=["cpu"],
+        output_path=str(out_path),
+    )
+    quantized = onnx.load(str(out_path))
+    onnx.checker.check_model(quantized, full_check=True)
+    fused_scale = next(i for i in quantized.graph.initializer if i.name == "mul_scale")
+    assert onnx.numpy_helper.to_array(fused_scale).shape == (16,)
