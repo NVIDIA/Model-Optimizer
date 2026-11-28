@@ -115,11 +115,6 @@ def _get_module_weights(module: nn.Module) -> list[nn.Parameter]:
     ]
 
 
-def _get_module_weight_numel(module: nn.Module) -> int:
-    """Return the parameter count for a module's quantizable weights."""
-    return sum(weight.numel() for weight in _get_module_weights(module))
-
-
 class AutoQuantizeCostModel:
     """Base class for AutoQuantize effective-bits cost accounting."""
 

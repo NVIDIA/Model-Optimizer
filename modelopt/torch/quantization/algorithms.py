@@ -1208,6 +1208,8 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             # one collective, a file that fails to load (e.g. truncated by an interrupted save) makes
             # every rank raise, and the ranks go on only from the same point, so each check of it
             # below raises on all of them or on none, before they enter the search's collectives.
+            # Every rank searches the same layers, as data, FSDP2 and expert parallelism leave them,
+            # so the ranks' points compare whole; pipeline stages, which would not, are unsupported.
             all_reduce("AutoQuantize checkpoint", resume_point, _resume_together)
         else:
             resume_point()

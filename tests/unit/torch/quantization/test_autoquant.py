@@ -36,7 +36,7 @@ import modelopt.torch.quantization.model_quant as model_quant
 from modelopt.torch.quantization import model_calib
 from modelopt.torch.quantization._auto_quantize_cost import (
     EXCLUDED_MODULE_NAME_PATTERNS_KEY,
-    _get_module_weight_numel,
+    _get_module_weights,
     get_auto_quantize_cost_model,
     infer_active_moe_expert_ratio,
 )
@@ -317,17 +317,19 @@ def test_active_moe_cost_model_counts_fused_experts_without_weight():
     }
 
     # Fused experts expose no `.weight`; their size is summed across all parameters.
-    assert _get_module_weight_numel(fused_experts) == (
-        fused_experts.gate_up_proj.numel() + fused_experts.down_proj.numel()
-    )
+    assert _get_module_weights(fused_experts) == [
+        fused_experts.gate_up_proj,
+        fused_experts.down_proj,
+    ]
     # Non-gated fused experts, such as Nemotron-H's, name their first projection up_proj.
     non_gated_experts = torch.nn.Module()
     non_gated_experts._first_proj_attr = "up_proj"
     non_gated_experts.up_proj = torch.nn.Parameter(torch.empty(2, 3, 5))
     non_gated_experts.down_proj = torch.nn.Parameter(torch.empty(2, 5, 3))
-    assert _get_module_weight_numel(non_gated_experts) == (
-        non_gated_experts.up_proj.numel() + non_gated_experts.down_proj.numel()
-    )
+    assert _get_module_weights(non_gated_experts) == [
+        non_gated_experts.up_proj,
+        non_gated_experts.down_proj,
+    ]
     # Routed MoE experts are scaled by the active-expert ratio; excluded modules drop to zero.
     assert cost_model.module_cost_weight(["layers.0.mlp.experts"], cost_constraints) == 0.25
     assert cost_model.module_cost_weight(["model.visual.blocks.0.attn.qkv"], cost_constraints) == 0
@@ -1543,16 +1545,19 @@ def _test_expert_parallel_auto_quantize(rank, size, methods):
                 ].items():
                     torch.testing.assert_close(amax[attr]["_amax"], buffers["_amax"])
             continue
+        # Summed in another order; the damage fit of aumann_shapley amplifies that to ~1e-3. A KL
+        # also carries float32 noise of a few 1e-6 from the logits it compares, which an INT8
+        # weight's KL of ~1e-6 is at: within a thousandth of the search's largest KL.
+        stats = reference_state["candidate_stats"].values()
+        atol = 1e-3 * max(max(s["scores"]) for s in stats) if method == "kl_div_weights" else 0
         for name, stat in reference_state["candidate_stats"].items():
             assert state["candidate_stats"][name]["formats"] == stat["formats"], name
             assert state["candidate_stats"][name]["costs"] == stat["costs"], name
-            # Summed in another order; the damage fit of aumann_shapley amplifies that to ~1e-3, and
-            # an INT8 weight's KL of ~1e-6 is at the float32 noise of the logits it compares.
             torch.testing.assert_close(
                 torch.tensor(state["candidate_stats"][name]["scores"]),
                 torch.tensor(stat["scores"]),
                 rtol=1e-2,
-                atol=1e-6 if method == "kl_div_weights" else 0,
+                atol=atol,
             )
 
 
