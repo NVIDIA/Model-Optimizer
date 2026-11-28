@@ -133,6 +133,9 @@ def pin_native_weight(quantizer, native, source):
     }
     previous_buffers = dict(quantizer._buffers)
     previous_meta = getattr(quantizer, "_native_weight_meta", None)
+    if previous_meta is not None and previous_meta.get("native_scale_buffers"):
+        # Staging describes the logical master, independently of a pin refresh.
+        meta["native_scale_buffers"] = True
     _VALIDATED.pop(quantizer, None)
     try:
         for name, value in buffers.items():

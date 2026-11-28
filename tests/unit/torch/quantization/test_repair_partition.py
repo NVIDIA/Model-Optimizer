@@ -401,6 +401,10 @@ def test_compressed_staging_preserves_public_save_restore(tmp_path, mixed):
     prepare_packed_weights_for_tp(model[0] if mixed else model)
     torch.testing.assert_close(model(inputs), expected, rtol=0, atol=0)
     codes = model[0].weight_quantizer._native_weight_codes.clone()
+    quantizer = model[0].weight_quantizer
+    pin_native_weight(
+        quantizer, get_pinned_native_weight(quantizer, model[0].weight), model[0].weight
+    )
     path = tmp_path / "compressed-staged.pt"
     mto.save(model, path)
     restored = mto.restore(
