@@ -15,7 +15,7 @@
 
 """DeepSeek-V4 PTQ — NVFP4 on the routed experts only, everything else native.
 
-Design notes (in contrast to ``examples/deepseek/deepseek_v3/ptq.py`` which covers V3):
+Design notes:
 
   * We do **not** register Quant wrappers against DeepSeek-V4's ``Linear`` /
     ``ColumnParallelLinear`` / ``RowParallelLinear`` classes. Wrapping those

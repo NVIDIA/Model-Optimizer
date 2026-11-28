@@ -133,7 +133,7 @@ Please reference our [framework scripts](#framework-scripts) and our [docs](http
 > *<sup>4.</sup>For some models, KV cache quantization may result in a higher accuracy penalty.* \
 > *<sup>5.</sup>A selective set of the popular models are internally tested. The actual model support list may be longer. NVFP4 inference requires Blackwell GPUs and TensorRT-LLM v1.2 or later* \
 > *<sup>6.</sup>Some models currently support export to HF format only.* \
-> *<sup>7.</sup>[PTQ for DeepSeek](../deepseek/README.md)* \
+> *<sup>7.</sup>See [DeepSeek V3, R1, V3.1, V3.2](#deepseek-v3-r1-v31-v32). DeepSeek-V4 uses the [DeepSeek-V4 example](../deepseek/README.md).* \
 > *<sup>8.</sup>GLM-4.7 has MTP (Multi-Token Prediction) layers that are automatically loaded and excluded from quantization.* \
 > *<sup>9.</sup>Running Whisper model requires [torchcodec](https://github.com/meta-pytorch/torchcodec?tab=readme-ov-file#installing-cuda-enabled-torchcodec) and other system packages (e.g. ffmpeg).* \
 > *<sup>10.</sup>GPT-OSS ships with native MXFP4 weights; NVFP4 export is produced via the closed-form `--cast_mxfp4_to_nvfp4` cast (see [MXFP4 → NVFP4 cast](#mxfp4--nvfp4-cast-for-gpt-oss)).* \
@@ -259,9 +259,26 @@ The cast pins each NVFP4 block's `scale_2 = 2^(k_max - 8)` and `_amax = 6 * 2^k_
 
 > *`--cast_mxfp4_to_nvfp4` requires an NVFP4-family `--qformat` (e.g. `nvfp4_mlp_only`, `nvfp4_experts_only`, `nvfp4`) and is incompatible with AutoQuantize recipes (multi-format search).*
 
-#### Deepseek R1
+#### DeepSeek V3, R1, V3.1, V3.2
 
-[PTQ for DeepSeek](../deepseek/README.md) shows how to quantize the DeepSeek model with FP4 and export to TensorRT-LLM.
+`hf_ptq.py` loads these block-FP8 checkpoints with transformers' own DeepSeek classes (DeepSeek-V3.2 needs transformers 5.11 or newer), so leave out `--trust_remote_code`, which would load the modeling code bundled with the checkpoint instead. The published NVFP4 checkpoints, such as `nvidia/DeepSeek-V3.1-NVFP4`, quantize the dense MLPs, the routed and shared experts and the attention output projection to NVFP4, with an FP8 KV cache:
+
+```bash
+python hf_ptq.py \
+    --pyt_ckpt_path deepseek-ai/DeepSeek-V3.1 \
+    --recipe models/deepseek-ai/DeepSeek-V3.1/ptq/nvfp4_omlp_only-kv_fp8_cast \
+    --export_path <quantized_ckpt_path>
+```
+
+A single process keeps the FP8 weights as stored, spreads them over the node's GPUs and dequantizes each layer only for its forward. Under `torchrun`, [expert parallelism](#expert-parallel-post-training-quantization-for-moe-models) shards the routed experts across the ranks instead; it loads the checkpoint dequantized to BF16, which takes about twice the checkpoint's size in GPU memory over all ranks.
+
+Other schemes, from fewest quantized layers to most:
+
+| Recipe | NVFP4 | FP8 |
+| :--- | :--- | :--- |
+| `general/ptq/nvfp4_mlp_only-kv_fp8_cast` | MLPs and experts | KV cache |
+| `model_type/deepseek_v3/ptq/nvfp4_omlp-fp8_mla-kv_fp8_cast` | MLPs, experts, `o_proj` | the other MLA projections (per tensor), KV cache |
+| `model_type/deepseek_v3/ptq/nvfp4_omlp_mla-kv_fp8_cast` | MLPs, experts, every MLA projection except `kv_b_proj` | KV cache |
 
 #### Kimi K3
 

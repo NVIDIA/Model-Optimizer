@@ -323,7 +323,7 @@ that baseline. The deviations come in four kinds:
 
 | Kind | What changes vs. the general recipe | Examples |
 |------|-------------------------------------|----------|
-| **Architecture-aware `quant_cfg`** | Per-sub-module format choices a single wildcard scheme can't express | `minimax_m3_vl`, `qwen3_vl`, `qwen3_5`, `qwen3_5_moe`, `qwen3_6_moe`, `vit`, `nemotron_llama` |
+| **Architecture-aware `quant_cfg`** | Per-sub-module format choices a single wildcard scheme can't express | `deepseek_v3`, `minimax_m3_vl`, `qwen3_vl`, `qwen3_5`, `qwen3_5_moe`, `qwen3_6_moe`, `vit`, `nemotron_llama` |
 | **Algorithm override** | Same numerics & scope, but the *calibration algorithm* is tweaked because the default breaks or regresses | `gemma`, `gemma4`, `mpt` |
 | **Extra exclusions** | Adds disabled-quantizer patterns so non-language branches stay full precision | `nemotron_vl`, `diffusion_gemma` |
 | **Checkpoint mirror** | A mixed-precision map reproducing one published checkpoint exactly | `models/nvidia/NVIDIA-Nemotron-3-*`, `models/mistralai/Mistral-Medium-3.5-128B` |
@@ -341,7 +341,17 @@ folder may carry a `README.md` spelling out that delta.
 > genuinely deviate and aliases the ones that don't; see
 > [`models/README.md`](models/README.md) for the alias format and when to write one.
 
-### Architecture-aware `quant_cfg` — `minimax_m3_vl`, `qwen3_vl`, `qwen3_5`, `qwen3_5_moe`, `qwen3_6_moe`, `vit`, `nemotron_llama`
+### Architecture-aware `quant_cfg` — `deepseek_v3`, `minimax_m3_vl`, `qwen3_vl`, `qwen3_5`, `qwen3_5_moe`, `qwen3_6_moe`, `vit`, `nemotron_llama`
+
+**`deepseek_v3/ptq/{nvfp4_omlp-fp8_mla-kv_fp8_cast,nvfp4_omlp_mla-kv_fp8_cast}`** extend
+`general/ptq/nvfp4_omlp_only-kv_fp8_cast` (NVFP4 MLPs, experts and `o_proj`, FP8 KV cache cast)
+to DeepSeek's multi-head latent attention, whose query and key/value projections the general
+recipes leave in BF16. `nvfp4_omlp-fp8_mla` adds per-tensor FP8 on `q_a_proj`, `q_b_proj`,
+`kv_a_proj_with_mqa` and `kv_b_proj`; `nvfp4_omlp_mla` quantizes `q_a_proj`, `q_b_proj` and
+`kv_a_proj_with_mqa` to NVFP4 and keeps `kv_b_proj` in BF16, since TensorRT-LLM folds it into
+the attention BMMs instead of running it as a GEMM. *Why special:* the projections are selected by name, so on
+DeepSeek-V3.2 (`deepseek_v32`, same names) the sparse-attention indexer, which a `*self_attn*`
+wildcard would also match, stays in BF16.
 
 **`minimax_m3_vl/ptq/mxfp8_nvfp4_experts`** applies MXFP8 to the language-model
 linear layers and MSE-calibrated NVFP4 to routed experts, with expert
