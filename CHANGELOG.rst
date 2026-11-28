@@ -60,6 +60,7 @@ Changelog
 - Fix ``--dq_only`` ONNX export producing a model that ONNX Runtime cannot load when the weights are quantized to an unsigned type. Such exports now load and match the source model.
 - Fix blocked INT4 ONNX exports using the wrong dequantization axis for transposed weights, which prevented TensorRT and ONNX Runtime from executing affected models. Re-export affected models.
 - Fix ONNX INT4 AWQ-Lite computing per-block weight scales from the wrong rows, which skewed the scale search. Re-run AWQ-Lite quantization on affected models.
+- Fix ONNX INT4 AWQ-Lite node fusion raising ``AttributeError`` when CuPy is unavailable, such as on Linux ARM64.
 
 *Speculative Decoding*
 
