@@ -112,6 +112,30 @@ python torchvision_qat.py \
 
 > **_TIP:_** For single-GPU runs, you can also use the `CUDA_VISIBLE_DEVICES` environment variable to control GPU visibility. For instance, `CUDA_VISIBLE_DEVICES=1 python torchvision_qat.py ... --gpu 0` will run the script on physical GPU 1, as PyTorch will see it as `cuda:0`.
 
+### Graph-based quantizer placement
+
+By default, `mtq.quantize` quantizes the inputs and weights of quantizable modules such as `Conv2d` and `Linear`. Functional ops between modules, such as residual adds and pooling, stay unquantized, so TensorRT cannot fuse them into INT8 kernels. `mtq.quantize_graph` instead captures the model with `torch.export` and inserts quantizers where ModelOpt's [ONNX quantization path](../onnx_ptq/README.md) places Q/DQ nodes for TensorRT. A tensor read by several ops, e.g. a residual input that also feeds the next convolution, gets one shared quantizer. Pass `--placement graph` to the script to use it:
+
+```sh
+python torchvision_qat.py ... --placement graph
+```
+
+This requires the ONNX extra (`pip install "nvidia-modelopt[onnx]"`). In code:
+
+```python
+# Returns a torch.fx.GraphModule that shares the parameters of `model`.
+model = mtq.quantize_graph(model, mtq.INT8_DEFAULT_CFG, (example_images,), calibrate_fn, dynamic_batch=True)
+
+# QAT as before: train() and eval() switch batch norm and dropout.
+train(model, train_loader, ...)
+mto.save(model, "cnn_qat_best.pth")
+
+# Restore re-exports the original architecture, so use the returned model.
+model = mto.restore(build_model(), "cnn_qat_best.pth")
+```
+
+> **_NOTE:_** The model is exported once, in eval mode. Code that branches on `self.training`, such as stochastic depth, keeps its eval behaviour during QAT.
+
 Customize flags— `--epochs`, `--lr`, `--batch-size`, etc. to fit your hardware and data. Also you may use other quantization formats from **ModelOpt**. Please see more details on the supported quantization formats and how to use them as shown below:
 
 ```python
@@ -144,3 +168,16 @@ Your actual results will vary based on the dataset, specific hyperparameters, an
 ## Deployment with TensorRT
 
 The final model after QAT, saved using `mto.save()`, contains both the model weights and the quantization metadata. This model can be deployed to TensorRT for inference after ONNX export. The process is generally similar to [deploying an ONNX PTQ](../onnx_ptq/README.md#evaluate-the-quantized-onnx-model) model from ModelOpt.
+
+A model quantized with `--placement graph` can also be compiled with [Torch-TensorRT](https://github.com/pytorch/TensorRT):
+
+```python
+import torch_tensorrt
+from modelopt.torch.quantization.utils import export_torch_mode
+
+model = mto.restore(models.resnet50(), "resnet50_qat_epoch_N.pth").cuda().eval()
+images = torch.randn(32, 3, 224, 224, device="cuda")
+with export_torch_mode(), torch.no_grad():
+    exported = torch.export.export(model, (images,), strict=False)
+    trt_model = torch_tensorrt.dynamo.compile(exported, inputs=[images])
+```

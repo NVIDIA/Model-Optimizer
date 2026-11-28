@@ -26,6 +26,7 @@ from . import mode, plugins, utils
 from .compress import *
 from .config import *
 from .conversion import *
+from .graph_placement import *
 from .lora import *
 from .model_quant import *
 from .nn.modules.quant_module import QuantModuleRegistry
