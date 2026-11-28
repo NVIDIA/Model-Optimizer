@@ -37,6 +37,7 @@ from torch import nn
 import modelopt.torch.distill as mtd
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
+from modelopt.torch.distill._bypass_capture import mse_statistics
 from modelopt.torch.distill._bypass_checkpoint import _rng_state
 from modelopt.torch.quantization.ggml import IQ_FORMAT_REGISTRY
 from modelopt.torch.quantization.ggml.common import pinned_packed_weight
@@ -544,6 +545,128 @@ def test_public_bypass_preserves_caller_state_and_seeds_initial_reader(fail, tea
                 torch.equal(value, state[name]) for name, value in student.state_dict().items()
             )
         previous = (data.draws, copy.deepcopy(student.state_dict()))
+
+
+@pytest.mark.parametrize("noncurrent", [False, True], ids=["current", "noncurrent"])
+@pytest.mark.timeout(180)
+def test_native_valid_token_mse_bounds_saved_state(noncurrent):
+    pytest.importorskip("triton")
+    from modelopt.torch.kernels.quantization.repair import masked_mse_sum
+
+    if noncurrent and torch.cuda.device_count() < 2:
+        pytest.skip("Noncurrent loss dispatch requires two CUDA devices")
+    if not torch.cuda.is_available():
+        pytest.skip("Fused MSE requires CUDA")
+    current = torch.cuda.current_device()
+    device = torch.device("cuda", (current + int(noncurrent)) % torch.cuda.device_count())
+    torch.manual_seed(113)
+    for empty in (False, True):
+        prediction = (
+            torch.randn(1, 32768, 512, device=device, dtype=torch.bfloat16)[..., ::2]
+            .detach()
+            .requires_grad_(True)
+        )
+        target = torch.randn_like(prediction)
+        valid = torch.rand(1, 32768, device=device) > 0.2
+        if empty:
+            valid.zero_()
+        reference = prediction.detach().float().requires_grad_(True)
+        oracle = torch.where(valid[..., None], reference - target.float(), 0).square().sum()
+        expected = torch.autograd.grad(oracle, reference)[0].to(prediction.dtype)
+        saved = []
+        with torch.autograd.graph.saved_tensors_hooks(
+            lambda x: saved.append((x.shape, x.dtype)) or x, lambda x: x
+        ):
+            actual, count = mse_statistics(prediction, target, valid)
+        assert torch.cuda.current_device() == current
+        assert count == valid.sum() * 256
+        torch.testing.assert_close(actual, oracle, rtol=1e-6, atol=0)
+        observed = torch.autograd.grad(actual, prediction)[0]
+        assert torch.cuda.current_device() == current
+        torch.testing.assert_close(observed, expected, rtol=0, atol=0)
+        assert (prediction.shape, torch.float32) not in saved
+
+    for dtype, value in ((torch.bfloat16, 1.0001), (torch.float16, 40000.0)):
+        for prediction_grad in (False, True):
+            for valid in (
+                None,
+                torch.tensor([[True, False]], device=device),
+                torch.zeros((1, 2), device=device, dtype=torch.bool),
+            ):
+                prediction = torch.zeros((1, 2, 4), device=device, dtype=dtype)[..., ::2]
+                prediction.requires_grad_(prediction_grad)
+                target = torch.full((1, 2, 4), value, device=device, dtype=torch.float32)[..., ::2]
+                target.requires_grad_(True)
+                reference_prediction = prediction.detach().float().requires_grad_(True)
+                reference_target = target.detach().clone().requires_grad_(True)
+                difference = reference_prediction - reference_target
+                if valid is not None:
+                    difference = torch.where(valid[..., None], difference, 0)
+                oracle = difference.square().sum()
+                expected = torch.autograd.grad(oracle, (reference_prediction, reference_target))
+                actual, count = mse_statistics(prediction, target, valid)
+                assert torch.cuda.current_device() == current
+                torch.testing.assert_close(actual, oracle, rtol=1e-6, atol=0)
+                assert count == (target.numel() if valid is None else valid.sum() * 2)
+                inputs = (prediction, target) if prediction_grad else (target,)
+                observed = torch.autograd.grad(actual, inputs)
+                assert torch.cuda.current_device() == current
+                assert torch.isfinite(observed[-1]).all()
+                torch.testing.assert_close(observed[-1], expected[1], rtol=0, atol=0)
+                if prediction_grad:
+                    torch.testing.assert_close(observed[0], expected[0].to(dtype), rtol=0, atol=0)
+    prediction = torch.ones(2, 3, device=device, dtype=torch.bfloat16, requires_grad=True)
+    target = torch.zeros_like(prediction, requires_grad=True)
+    loss, count = mse_statistics(
+        prediction, target, torch.zeros(2, device=device, dtype=torch.bool)
+    )
+    assert loss == count == 0
+    for gradient in torch.autograd.grad(loss.sqrt(), (prediction, target)):
+        torch.testing.assert_close(gradient, torch.zeros_like(gradient), rtol=0, atol=0)
+
+    prediction = torch.empty(2, 3, 0, device=device, dtype=torch.bfloat16, requires_grad=True)
+    target = torch.empty_like(prediction, dtype=torch.float32, requires_grad=True)
+    loss, count = mse_statistics(
+        prediction, target, torch.ones(2, 3, device=device, dtype=torch.bool)
+    )
+    assert torch.cuda.current_device() == current
+    assert loss == count == 0
+    for gradient in torch.autograd.grad(loss, (prediction, target)):
+        assert gradient.shape == prediction.shape and gradient.numel() == 0
+    assert torch.cuda.current_device() == current
+
+    prediction = torch.zeros(2, 3, device=device, dtype=torch.bfloat16)
+    target = torch.zeros_like(prediction, dtype=torch.float32)
+    mask = torch.ones(2, device=device, dtype=torch.bool)
+    for wrong_prediction, wrong_target, wrong_mask in (
+        (torch.zeros(2, 3), target, mask),
+        (prediction, torch.zeros(2, 3), mask),
+        (prediction, target[:, :2], mask),
+        (prediction, target, torch.ones(2, dtype=torch.bool)),
+    ):
+        with pytest.raises(ValueError):
+            masked_mse_sum(wrong_prediction, wrong_target, wrong_mask, 3)
+    with pytest.raises(ValueError):
+        masked_mse_sum(prediction, target, mask[:1], 3)
+    for features in (0, -1, 1.5):
+        with pytest.raises(ValueError):
+            masked_mse_sum(prediction, target, mask, features)
+    # Unused mask entries and empty feature payloads retain their existing safe behavior.
+    with torch.cuda.device(device):
+        assert (
+            masked_mse_sum(prediction, target, torch.ones(4, device=device, dtype=torch.bool), 3)
+            == 0
+        )
+    if torch.cuda.device_count() >= 2:
+        other = torch.device("cuda", (device.index + 1) % torch.cuda.device_count())
+        other_target = torch.zeros_like(target, device=other)
+        with pytest.raises(ValueError):
+            masked_mse_sum(prediction, other_target, mask, 3)
+        with pytest.raises(ValueError):
+            masked_mse_sum(prediction, target, torch.ones(2, device=other, dtype=torch.bool), 3)
+        with pytest.raises(ValueError):
+            mse_statistics(prediction, other_target)
+    assert torch.cuda.current_device() == current
 
 
 @pytest.mark.parametrize("offload", ["cpu", "disk"])

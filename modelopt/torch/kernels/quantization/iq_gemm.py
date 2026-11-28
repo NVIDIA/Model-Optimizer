@@ -28,6 +28,7 @@ from .repair import iq_levels, iq_metadata
 __all__ = ["iq_linear"]
 
 _TILE_M, _TILE_N, _TILE_K, _SCALE_TILE_N = 32, 32, 64, 16
+_BIAS_TILE_N = 1024
 
 
 @triton.jit
@@ -69,9 +70,12 @@ def _forward(
     BM: tl.constexpr = _TILE_M,
     BN: tl.constexpr = _TILE_N,
     BK: tl.constexpr = _TILE_K,
+    MI=0,
+    NI=0,
+    EXPLICIT: tl.constexpr = False,
 ):
-    m = (tl.program_id(0) * BM + tl.arange(0, BM)).to(tl.int64)
-    n = (tl.program_id(1) * BN + tl.arange(0, BN)).to(tl.int64)
+    m = ((MI if EXPLICIT else tl.program_id(0)) * BM + tl.arange(0, BM)).to(tl.int64)
+    n = ((NI if EXPLICIT else tl.program_id(1)) * BN + tl.arange(0, BN)).to(tl.int64)
     k = tl.arange(0, BK)
     acc = tl.full((BM, BN), 0, tl.float32)
     for start in range(tl.cdiv(K, BK)):
@@ -112,9 +116,12 @@ def _input_backward(
     BM: tl.constexpr = _TILE_M,
     BN: tl.constexpr = _TILE_N,
     BK: tl.constexpr = _TILE_K,
+    MI=0,
+    NI=0,
+    EXPLICIT: tl.constexpr = False,
 ):
-    m = (tl.program_id(0) * BM + tl.arange(0, BM)).to(tl.int64)
-    k = (tl.program_id(1) * BK + tl.arange(0, BK)).to(tl.int64)
+    m = ((MI if EXPLICIT else tl.program_id(0)) * BM + tl.arange(0, BM)).to(tl.int64)
+    k = ((NI if EXPLICIT else tl.program_id(1)) * BK + tl.arange(0, BK)).to(tl.int64)
     n = tl.arange(0, BN)
     acc = tl.full((BM, BK), 0, tl.float32)
     for start in range(tl.cdiv(N, BN)):
@@ -153,9 +160,12 @@ def _scale_backward(
     BM: tl.constexpr = _TILE_M,
     BN: tl.constexpr = _SCALE_TILE_N,
     BK: tl.constexpr = _TILE_K,
+    NI=0,
+    KI=0,
+    EXPLICIT: tl.constexpr = False,
 ):
-    n = (tl.program_id(0) * BN + tl.arange(0, BN)).to(tl.int64)
-    k = tl.program_id(1) * BK + tl.arange(0, BK)
+    n = ((NI if EXPLICIT else tl.program_id(0)) * BN + tl.arange(0, BN)).to(tl.int64)
+    k = (KI if EXPLICIT else tl.program_id(1)) * BK + tl.arange(0, BK)
     m = tl.arange(0, BM)
     acc = tl.full((BN, BK), 0, tl.float32)
     for start in range(tl.cdiv(M, BM)):
@@ -170,7 +180,7 @@ def _scale_backward(
     # before the FP32 reduction into projected scale gradients.
     values = acc.to(X.dtype.element_ty).to(tl.float32) * levels
     reduced = tl.sum(tl.reshape(values, (BN, BK // GROUP, GROUP)), 2)
-    groups = tl.program_id(1) * (BK // GROUP) + tl.arange(0, BK // GROUP)
+    groups = (KI if EXPLICIT else tl.program_id(1)) * (BK // GROUP) + tl.arange(0, BK // GROUP)
     tl.store(
         DS + n[:, None] * (K // GROUP) + groups[None, :],
         reduced,
@@ -217,11 +227,11 @@ class _IQLinear(torch.autograd.Function):
         m = gradient.shape[0]
         db = None
         if ctx.has_bias and ctx.needs_input_grad[5]:
-            # Bound native reduction workspace before allocating the other VJPs.
+            # Bound native reduction scratch by output columns; release it before the other VJPs.
             db = (
                 gradient.sum(0)
-                if n <= 1024
-                else torch.cat([columns.sum(0) for columns in gradient.split(1024, dim=1)])
+                if n <= _BIAS_TILE_N
+                else torch.cat([columns.sum(0) for columns in gradient.split(_BIAS_TILE_N, dim=1)])
             )
         dx, ds = None, None
         if ctx.needs_input_grad[0]:

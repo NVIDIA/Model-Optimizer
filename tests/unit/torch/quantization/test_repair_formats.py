@@ -24,11 +24,15 @@ from types import SimpleNamespace
 import pytest
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 import modelopt.torch.quantization as mtq
+import modelopt.torch.quantization.repair_formats as repair_formats
 from modelopt.torch.quantization.ggml import IQ_FORMAT_REGISTRY
 from modelopt.torch.quantization.ggml.common import pin_packed_weight, pinned_packed_weight
+from modelopt.torch.quantization.repair import IQRepairPolicy
 from modelopt.torch.quantization.repair_formats import IQScaleState, _native_scale_kernels
+from modelopt.torch.quantization.utils import export_torch_mode
 
 
 def _config(entries):
@@ -57,6 +61,7 @@ def test_materialized_iq_replay_saves_int8_levels_and_matches_native_vjp(dtype, 
     if dtype == torch.float16:
         state.global_base.fill_(2**-24)
     reference = copy.deepcopy(state)
+    assert state.projection_counts == reference.projection_counts == {}
     saved, unpacked = [], []
     with torch.autograd.graph.saved_tensors_hooks(
         lambda value: saved.append((value.numel(), value.dtype)) or value,
@@ -64,6 +69,8 @@ def test_materialized_iq_replay_saves_int8_levels_and_matches_native_vjp(dtype, 
     ):
         # TensorQuantizer can expose an equivalent block view of the logical weight.
         actual = state(model._parameters["weight"].reshape(4, 256))
+    assert state.projection_counts == {"materialized": 1}
+    assert reference.projection_counts == {}
     fmt = IQ_FORMAT_REGISTRY[name]
     levels, _ = fmt.decode_int8(reference.packed, torch.tensor(reference.weight_shape))
     steps = reference.projected_steps()
@@ -179,6 +186,7 @@ def test_materialized_iq_replay_saves_int8_levels_and_matches_native_vjp(dtype, 
         finite_state = IQScaleState(
             quantizer, processed_weight, weight.shape, field_prefix="weight_quantizer"
         )
+        assert finite_state.projection_counts == {}
         with torch.no_grad():
             finite_state.global_delta.fill_(0.25)
             finite_state.local_delta.fill_(1)
@@ -226,3 +234,244 @@ def test_native_codebook_warmed_in_inference_can_be_saved_for_backward(monkeypat
     actual = torch.autograd.grad((parameter * grid).sum(), parameter)[0]
     torch.testing.assert_close(actual, raw, rtol=0, atol=0)
     assert iq_metadata("cpu", name)[0] is grid
+
+
+@pytest.mark.parametrize(
+    "behavior", ["disabled", "hooked", "global_hooked", "subclass", "weight_dtype"]
+)
+def test_packed_replay_gate_preserves_weight_quantizer_behavior(monkeypatch, behavior):
+
+    model = nn.Linear(256, 2)
+    mtq.quantize(model, _config([_iq("weight_quantizer", "iq1_s")]))
+    if behavior == "subclass":
+
+        class DoubleQuantizer(mtq.nn.TensorQuantizer):
+            def forward(self, value):
+                return super().forward(value) * 2
+
+        model.weight_quantizer.__class__ = DoubleQuantizer
+    elif behavior == "weight_dtype":
+        model = model.half()
+    policy = IQRepairPolicy()
+    handle = None
+    try:
+        policy.prepare(model)
+        quantizer = model.weight_quantizer
+        if behavior == "disabled":
+            quantizer.disable()
+        elif behavior == "hooked":
+            handle = quantizer.register_forward_hook(lambda _module, _args, output: output * 2)
+        elif behavior == "global_hooked":
+            handle = nn.modules.module.register_module_forward_hook(
+                lambda module, _args, output: output * 2 if module is quantizer else None
+            )
+
+        # Qualify CPU inputs solely to reach the unavailable CUDA optimization's gate.
+        monkeypatch.setattr(repair_formats, "_packed_projection_qualified", lambda *args: True)
+
+        def unavailable(*args, **kwargs):
+            raise AssertionError("Packed projection bypassed observable quantizer behavior")
+
+        monkeypatch.setattr(repair_formats.IQScaleState, "linear", unavailable)
+        inputs = torch.randn(3, 256, dtype=model._parameters["weight"].dtype, requires_grad=True)
+        if behavior == "weight_dtype":
+            inputs = inputs.to(torch.bfloat16).detach().requires_grad_()
+        with torch.autocast("cpu", dtype=torch.bfloat16, enabled=behavior == "weight_dtype"):
+            expected = F.linear(inputs, quantizer(model._parameters["weight"]), model.bias)
+            actual = model(inputs)
+        if behavior in ("subclass", "weight_dtype"):
+            assert (
+                repair_formats.repair_grouped_linear(
+                    [quantizer] * 4, inputs, torch.tensor([0, 1, 2, 3], dtype=torch.int32)
+                )
+                is None
+            )
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        torch.testing.assert_close(
+            torch.autograd.grad(actual.sum(), inputs)[0],
+            torch.autograd.grad(expected.sum(), inputs)[0],
+            rtol=0,
+            atol=0,
+        )
+    finally:
+        if handle is not None:
+            handle.remove()
+        policy.close()
+    monkeypatch.undo()
+    quantizer.enable()
+    try:
+        policy.prepare(model)
+        fresh = quantizer._local_repair_state
+        assert fresh.projection_counts == {}
+        model(inputs.to(model._parameters["weight"].dtype))
+        assert fresh.projection_counts == {"materialized": 1}
+    finally:
+        policy.close()
+
+
+@pytest.mark.parametrize("stage", ["input", "output"])
+@pytest.mark.parametrize("scope", ["local", "global", "subclass"])
+def test_activation_hooks_observe_repaired_weight_context(monkeypatch, stage, scope):
+    model = nn.Linear(256, 2)
+    mtq.quantize(model, _config([_iq("weight_quantizer", "iq1_s")]))
+    policy = IQRepairPolicy()
+    handle = None
+    try:
+        policy.prepare(model)
+        with torch.no_grad():
+            model.weight_quantizer._local_repair_state.global_delta.fill_(1)
+        target = getattr(model, stage + "_quantizer")
+
+        def observe(module, args, output):
+            if module is target:
+                return output * model.weight.float().square().mean().to(output.dtype)
+
+        if scope == "subclass":
+
+            class ObservingQuantizer(type(target)):
+                def forward(self, value):
+                    return observe(self, (), super().forward(value))
+
+            target.__class__ = ObservingQuantizer
+        else:
+            handle = (
+                target.register_forward_hook(observe)
+                if scope == "local"
+                else nn.modules.module.register_module_forward_hook(observe)
+            )
+        monkeypatch.setattr(repair_formats, "_packed_projection_qualified", lambda *args: True)
+        monkeypatch.setattr(repair_formats, "repair_linear", lambda *args: None)
+        inputs = torch.randn(3, 256, requires_grad=True)
+        with model.quantize_weight():
+            expected = model.output_quantizer(
+                F.linear(model.input_quantizer(inputs), model.weight, model.bias)
+            )
+        actual = model(inputs)
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        torch.testing.assert_close(
+            torch.autograd.grad(actual.sum(), inputs)[0],
+            torch.autograd.grad(expected.sum(), inputs)[0],
+            rtol=0,
+            atol=0,
+        )
+    finally:
+        if handle is not None:
+            handle.remove()
+        policy.close()
+
+
+@pytest.mark.parametrize(
+    "unsupported", ["offset-shape", "offset-dtype", "offset-stride", "bias-shape", "bias-dtype"]
+)
+def test_grouped_replay_refuses_unsupported_layout_before_cuda_dispatch(monkeypatch, unsupported):
+    model = nn.ModuleList([nn.Linear(256, 2, bias=False) for _ in range(4)])
+    mtq.quantize(model, _config([_iq("*weight_quantizer", "iq1_s")]))
+    policy = IQRepairPolicy()
+    try:
+        policy.prepare(model)
+        quantizers = [module.weight_quantizer for module in model]
+        inputs = torch.randn(3, 256)
+        offsets = torch.tensor([1, 2, 3, 3], dtype=torch.int32)
+        bias = torch.zeros(4, 2)
+        if unsupported == "offset-shape":
+            offsets = offsets[:-1]
+        elif unsupported == "offset-dtype":
+            offsets = offsets.float()
+        elif unsupported == "offset-stride":
+            offsets = torch.stack([offsets, offsets], dim=-1)[:, 0]
+        elif unsupported == "bias-shape":
+            bias = bias[:-1]
+        else:
+            bias = bias.double()
+        # Exercise metadata refusal on CPU; no optimized CUDA implementation is replaced.
+        monkeypatch.setattr(repair_formats, "_packed_projection_qualified", lambda *args: True)
+        original_import = builtins.__import__
+
+        def forbidden_kernel(module, *args, **kwargs):
+            if module == "modelopt.torch.kernels.quantization.iq_grouped_gemm":
+                raise AssertionError("Malformed metadata reached grouped kernel import")
+            return original_import(module, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", forbidden_kernel)
+        assert repair_formats.repair_grouped_linear(quantizers, inputs, offsets, bias) is None
+    finally:
+        policy.close()
+
+
+def test_active_repair_export_retains_base_linear_path(monkeypatch):
+    model = nn.Linear(256, 2)
+    mtq.quantize(model, _config([_iq("weight_quantizer", "iq1_s")]))
+    policy = IQRepairPolicy()
+    try:
+        policy.prepare(model)
+        model.weight_quantizer.disable()
+        inputs = torch.randn(3, 256, requires_grad=True)
+        expected = F.linear(inputs, model._parameters["weight"], model.bias)
+        # Reach the otherwise hardware-specific override on CPU; keep export real.
+        monkeypatch.setattr(repair_formats, "_packed_projection_qualified", lambda *args: True)
+
+        def forbidden_context():
+            raise AssertionError("Export entered the weight-mutation context")
+
+        monkeypatch.setattr(model, "quantize_weight", forbidden_context)
+        with export_torch_mode():
+            actual = model(inputs)
+            exported = torch.export.export(model, (inputs,), strict=False)
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        torch.testing.assert_close(exported.module()(inputs), expected, rtol=0, atol=0)
+        torch.testing.assert_close(
+            torch.autograd.grad(actual.sum(), inputs)[0],
+            torch.autograd.grad(expected.sum(), inputs)[0],
+            rtol=0,
+            atol=0,
+        )
+    finally:
+        policy.close()
+
+
+def test_packed_replay_without_optional_triton_retains_materialized_output(monkeypatch):
+    model = nn.Linear(256, 2)
+    mtq.quantize(model, _config([_iq("weight_quantizer", "iq1_s")]))
+    policy = IQRepairPolicy()
+    try:
+        policy.prepare(model)
+        inputs = torch.randn(3, 256, requires_grad=True)
+        expected = model(inputs)
+        original_import = builtins.__import__
+
+        attempted = []
+
+        def without_triton(module, *args, **kwargs):
+            if module in (
+                "modelopt.torch.kernels.quantization.iq_gemm",
+                "modelopt.torch.kernels.quantization.iq_grouped_gemm",
+            ):
+                attempted.append(module)
+                raise ModuleNotFoundError("Optional Triton is unavailable", name="triton")
+            return original_import(module, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", without_triton)
+        # Reach the CUDA-only dispatch gate while exercising real CPU fallback math.
+        monkeypatch.setattr(repair_formats, "_packed_projection_qualified", lambda *args: True)
+        actual = model(inputs)
+        assert (
+            repair_formats.repair_grouped_linear(
+                [model.weight_quantizer] * 4,
+                inputs,
+                torch.tensor([0, 1, 2, 3], dtype=torch.int32),
+            )
+            is None
+        )
+        assert attempted == [
+            "modelopt.torch.kernels.quantization.iq_gemm",
+            "modelopt.torch.kernels.quantization.iq_grouped_gemm",
+        ]
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        torch.testing.assert_close(
+            torch.autograd.grad(actual.sum(), inputs)[0],
+            torch.autograd.grad(expected.sum(), inputs)[0],
+            rtol=0,
+            atol=0,
+        )
+    finally:
+        policy.close()

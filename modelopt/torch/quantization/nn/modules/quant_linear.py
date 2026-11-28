@@ -41,6 +41,45 @@ class _QuantLinear(QuantLinearConvBase):
 
     default_quant_desc_weight = tensor_quant.QUANT_DESC_8BIT_LINEAR_WEIGHT_PER_ROW
 
+    def forward(self, input, *args, **kwargs):
+        """Try native packed fields before the dynamic weight attribute expands them."""
+        quantizer = self.weight_quantizer
+        state = quantizer.__dict__.get("_local_repair_state")
+        if (
+            state is not None
+            and not is_torch_export_mode()
+            and self.original_cls.forward is nn.Linear.forward
+            and not hasattr(self, "_forward_pre_dm")
+            and not args
+            and not kwargs
+            and not getattr(quantizer, "rotate_back_is_enabled", False)
+            and self._parameters["weight"].dtype == input.dtype
+            and type(self.input_quantizer) is TensorQuantizer
+            and type(self.output_quantizer) is TensorQuantizer
+            # Activation hooks can observe self.weight. The superclass runs
+            # them inside quantize_weight(), so retain that context when hooked.
+            and not (
+                nn.modules.module._global_forward_hooks
+                or nn.modules.module._global_forward_pre_hooks
+                or any(
+                    child._forward_hooks or child._forward_pre_hooks
+                    for activation in (self.input_quantizer, self.output_quantizer)
+                    for child in activation.modules()
+                )
+            )
+        ):
+            # Import lazily: repair_formats imports nn.modules, including this module.
+            from ...repair_formats import _packed_projection_qualified, repair_linear
+
+            if _packed_projection_qualified(input, state.name, state.weight_shape):
+                value = self.input_quantizer(input)
+                output = repair_linear(quantizer, value, self.bias)
+                if output is None:
+                    with self.quantize_weight():
+                        output = F.linear(value, self.weight, self.bias)
+                return self.output_quantizer(output)
+        return super().forward(input, *args, **kwargs)
+
     @staticmethod
     def quantized_linear_fn(package, func_name, self, input, weight, *args, **kwargs):
         """Quantized version of a generic linear functional."""
