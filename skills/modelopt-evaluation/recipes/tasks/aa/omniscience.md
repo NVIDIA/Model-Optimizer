@@ -9,9 +9,9 @@
 Knowledge / hallucination benchmark, params aligned to Artificial Analysis Index
 v2; judge-scored. The judge `model_id` is hardcoded in the fragment below
 (**gcp/google/gemini-3-flash-preview**) — swap it for an equivalent on your own
-endpoint if needed. The judge `url` comes from `.env` (`INFERENCE_JUDGE_URL`); only
-`api_key` (`INFERENCE_API_KEY`) is exported and read by the harness. Keep the judge
-fixed across comparable runs.
+endpoint if needed. Use the judge URL from approved configuration
+(`INFERENCE_JUDGE_URL`). Export `INFERENCE_API_KEY` through approved credential setup
+for the harness; never print it. Keep the judge fixed across comparable runs.
 
 `++parse_reasoning=False` is required (golden knob — omniscience scores the final
 answer, not the reasoning trace).
@@ -34,7 +34,7 @@ Use this inside the top-level `evaluation.tasks` list:
           judge:
             api_key: INFERENCE_API_KEY
             model_id: gcp/google/gemini-3-flash-preview   # use an equivalent on your own endpoint if needed
-            url: <INFERENCE_JUDGE_URL>                     # from .env (/v1 base)
+            url: <INFERENCE_JUDGE_URL>                     # /v1 base URL
 ```
 
 ## Score Extraction from mlflow

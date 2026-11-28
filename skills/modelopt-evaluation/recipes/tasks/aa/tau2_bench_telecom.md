@@ -9,9 +9,9 @@
 Tau2 uses the evaluated model as the agent plus a separate user-simulator endpoint;
 keep both fixed across runs. The judge (**gpt-oss-120B**) and user-simulator
 (**Qwen3 235B**) `model_id`s are hardcoded in the fragment below — swap them for
-equivalents on your own endpoint if needed. Only the shared `url`
-(`TAU2_ENDPOINT_URL`) comes from `.env` (see `recipes/env.example`) — config, not a
-secret, so no export needed; only `api_key` (`INFERENCE_API_KEY`) is exported.
+equivalents on your own endpoint if needed. Use the literal shared URL from
+approved configuration (`TAU2_ENDPOINT_URL`). Export `INFERENCE_API_KEY` through
+approved credential setup; never print it.
 tau2-bench needs the full `/v1/chat/completions` URL (nemo-skills judges use the
 `/v1` base).
 
@@ -58,11 +58,11 @@ Use this inside the top-level `evaluation.tasks` list:
           n_samples: 8
           user:
             model_id: nvidia/qwen/qwen-235b    # Qwen3 235B; use an equivalent on your own endpoint if needed
-            url: <TAU2_ENDPOINT_URL>           # from .env (full /v1/chat/completions)
+            url: <TAU2_ENDPOINT_URL>           # full /v1/chat/completions URL
             api_key: INFERENCE_API_KEY         # env-var name; exported, read by harness
           judge:
             model_id: nvidia/openai/gpt-oss-120b   # gpt-oss-120B; use an equivalent on your own endpoint if needed
-            url: <TAU2_ENDPOINT_URL>           # from .env (full /v1/chat/completions)
+            url: <TAU2_ENDPOINT_URL>           # full /v1/chat/completions URL
             api_key: INFERENCE_API_KEY         # env-var name; exported, read by harness
 ```
 

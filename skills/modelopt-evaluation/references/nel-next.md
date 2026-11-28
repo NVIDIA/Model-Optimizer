@@ -42,20 +42,19 @@ you silently get a 0.3.x PyPI install — which cannot reach 0.4.x and lacks the
 registry override. Unset it unless you deliberately want the older toolchain; `--version`
 prints the resolved spec, so check there if a run behaves unexpectedly.
 
-## Credentials + internal infra (`.env`)
+## Credentials and infrastructure
 
 - **AWS creds** (sandboxes run in AWS ECS Fargate, shared NVIDIA acct `463701203462`)
-  and `HF_TOKEN` are secrets you add yourself: `HF_TOKEN`, `AWS_ACCESS_KEY_ID`,
-  `AWS_SECRET_ACCESS_KEY`. Never open `.env` with file tools — shell only.
+  and `HF_TOKEN` are secrets: export `HF_TOKEN`, `AWS_ACCESS_KEY_ID`, and
+  `AWS_SECRET_ACCESS_KEY` using your approved credential setup. Never print their values.
 - **Internal harbor infra is NOT hardcoded** — configs read `${NEL_NEXT_EVAL_IMAGE}`,
   `${HARBOR_ECR_REPOSITORY}` (Terminal-Bench), `${HARBOR_SWEBENCH_ECR_REPOSITORY}`
-  (SWE-bench), and `${MLFLOW_TRACKING_URI}` from `.env`. Run **`modelopttools:eval-config`**
-  (Step 3b) to write them — it holds the canonical values, arch/region rules, and
+  (SWE-bench), and `${MLFLOW_TRACKING_URI}` from the launcher environment. Use
+  **`modelopttools:eval-config`** (Step 3b) for canonical values and arch/region rules; it
   points to the per-benchmark `bench.yaml` source of truth.
 - **`HARBOR_ECS_REGION`** sets `sandbox.region` + `AWS_DEFAULT_REGION` (upstream default
   `us-east-1` TB2.1, `us-east-2` SWE-bench). TB2.1's ECR repo name tracks it
   (`…ecr.<region>…/harbor-<region>`); SWE-bench's stays `us-west-2/harbor-swebench`.
-- `set -a && source .env && set +a` before running so `${VAR}` resolves.
 
 ## Architecture — where each piece runs
 
@@ -222,10 +221,20 @@ with its own `run_id`, copying the shared `services:` block.
   containing `${` — `experiment_name` included, since the same pass resolves the block. Keep `tracking_uri` as `${MLFLOW_TRACKING_URI}` — cross-server, the inherited name
   makes a same-named experiment here and `modelopt_run_url` is the only route back.
 
+### Output-cap checks
+
+Some task recipes require no configured per-response output cap. For those tasks,
+do not apply a model-card budget or numeric fallback.
+`drop_params` strips request fields only. Check the merged config,
+server overrides, and inherited defaults (including `generation_config.json`) for
+numeric caps. Clear them without changing sampling, stop/EOS, context limits, or
+timeouts. For vLLM, use `--override-generation-config '{"max_new_tokens":null}'`
+where supported.
+
 ## Run (dry-run → canary → full) → push to MLflow
 
 ```bash
-set -a && source .env && set +a; NEL="$SKILL_DIR/scripts/nel-next.sh"
+NEL="$SKILL_DIR/scripts/nel-next.sh"
 "$NEL" eval run <cfg>.yaml --dry-run                                  # validate/render (no SSH)
 "$NEL" eval run <cfg>.yaml --submit -O benchmarks.0.max_problems=2 -O benchmarks.0.repeats=1 -O benchmarks.0.max_concurrent=2   # canary
 "$NEL" eval run <cfg>.yaml --submit                                 # full
@@ -233,9 +242,8 @@ set -a && source .env && set +a; NEL="$SKILL_DIR/scripts/nel-next.sh"
 "$NEL" mlflow-push -r <run_id> -c <cfg>.yaml                          # post-run: push merged bundle(s) to MLflow
 ```
 
-`eval run` on a slurm cluster scp's the sbatch + redacted `.secrets.env` and
-submits via SSH; a built-in afternotok chain auto-resumes across walltime windows;
-sharded runs auto-merge. **SLURM does not auto-export** — `mlflow-push` is the final
+On Slurm, failed jobs auto-resume across walltime windows via `afternotok`, and
+sharded runs auto-merge. **Slurm does not auto-export** — `mlflow-push` is the final
 step: it reads the config's `export_config.mlflow`, stages each merged bundle's
 `eval-*.json` off the cluster (the dev box doesn't mount the run dir), and exports with
 `emit_traces=false` (the default emits one trace per sample → minutes-long hang).

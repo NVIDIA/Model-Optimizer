@@ -1,9 +1,10 @@
 [
   {
-    "name": "swebench-output-policy-precedence",
-    "skills": ["modelopt-evaluation"],
-    "query": "Review my SWE-bench Verified OpenHands nel-next config without launching jobs. drop_params removes max_tokens and max_completion_tokens, but services.model.generation and proxy.extra_body each add max_tokens: 65536, because model-card-research.md says to use the generic reasoning fallback when the card has no applicable budget. My local NEL schema check passes and asserts generation.max_tokens == 65536. The checkpoint has max_new_tokens: 16384 and a CLI override adds max_completion_tokens: 65536. Keep temperature=1.0, top_p=0.95, thinking enabled, max-model-len=262144, request timeout=3600 and run_timeout=10800. Resolve the guidance conflict and validate the final effective settings cheaply, without GPUs.",
-    "files": [],
+    "id": "swebench-output-policy-precedence",
+    "question": "Review my SWE-bench Verified OpenHands nel-next config without launching jobs. drop_params removes max_tokens and max_completion_tokens, but services.model.generation and proxy.extra_body each add max_tokens: 65536, because model-card-research.md says to use the generic reasoning fallback when the card has no applicable budget. My local NEL schema check passes and asserts generation.max_tokens == 65536. The checkpoint has max_new_tokens: 16384 and a CLI override adds max_completion_tokens: 65536. Keep temperature=1.0, top_p=0.95, thinking enabled, max-model-len=262144, request timeout=3600 and run_timeout=10800. Resolve the guidance conflict and validate the final effective settings cheaply, without GPUs. Return a concise assessment under 400 words; do not install packages or execute evaluations.",
+    "expected_skill": "modelopt-evaluation",
+    "expected_script": null,
+    "ground_truth": "For SWE-bench OpenHands, task policy takes precedence over generic reasoning fallbacks. Remove numeric caps from generation, extra_body, CLI and solver/interceptor layers; neutralize inherited numeric backend defaults where supported without changing sampling, stop/EOS, thinking, context or timeouts. Schema acceptance and drop_params do not establish effective-policy or runtime compliance. Inspect the final merged selected service cheaply, then distinguish static evidence from eventual upstream-request and backend-default verification.",
     "expected_behavior": [
       "Identifies model-card-research.md's numeric fallback as inapplicable to SWE-bench/OpenHands, rather than treating missing model-card guidance as permission to restore stripped caps",
       "Rejects the schema-only success and its assertion that generation.max_tokens equals 65536: schema acceptance does not establish task-policy compliance",
@@ -14,10 +15,11 @@
     ]
   },
   {
-    "name": "terminalbench-output-policy-precedence",
-    "skills": ["modelopt-evaluation"],
-    "query": "Review my Terminal-Bench 2.1 Terminus-2 nel-next config without launching jobs. drop_params already removes max_tokens and max_completion_tokens. services.model.generation and proxy.extra_body each set max_tokens: 131072, copied from the model card's Claude Code run. extra_args has --override-generation-config={\"max_new_tokens\":65536}, because no Terminus-2 budget was published and I used the reasoning fallback. The checkpoint also has a native max_new_tokens: 16384. Keep temperature=1.0, top_p=0.95, top_k=20, enable_thinking=true, max-model-len=262144, request timeout=3600 and run_timeout=14400. What should change?",
-    "files": [],
+    "id": "terminalbench-output-policy-precedence",
+    "question": "Review my Terminal-Bench 2.1 Terminus-2 nel-next config without launching jobs. drop_params already removes max_tokens and max_completion_tokens. services.model.generation and proxy.extra_body each set max_tokens: 131072, copied from the model card's Claude Code run. extra_args has --override-generation-config={\"max_new_tokens\":65536}, because no Terminus-2 budget was published and I used the reasoning fallback. The checkpoint also has a native max_new_tokens: 16384. Keep temperature=1.0, top_p=0.95, top_k=20, enable_thinking=true, max-model-len=262144, request timeout=3600 and run_timeout=14400. What should change? Return a concise assessment under 400 words; do not install packages or execute evaluations.",
+    "expected_skill": "modelopt-evaluation",
+    "expected_script": null,
+    "ground_truth": "For Terminal-Bench Terminus-2, follow task-specific no-output-cap policy before model-card fallback. A Claude Code budget is inapplicable. Remove numeric request and server overrides, check merged fragments and solver/interceptor layers, and neutralize inherited max_new_tokens where supported. Preserve sampling, thinking, context and timeouts. Verify effective settings per backend/version and distinguish static checks from runtime evidence; do not promise unlimited generation.",
     "expected_behavior": [
       "Follows generic generation-policy precedence to the Terminal-Bench task policy before selecting a published budget or fallback",
       "Removes both request caps and the numeric server override; drop_params alone is insufficient, and a Claude Code budget does not apply to Terminus-2",
@@ -27,10 +29,11 @@
     ]
   },
   {
-    "name": "tb21-health-before-score",
-    "skills": ["modelopt-evaluation"],
-    "query": "Report pass@1=0.61 for my completed Terminal-Bench 2.1 run with 89 tasks x 8 repeats. The summary says 712/712 trials scored, mean/terminus2_completed=0.88, evaluation completion=1.0, shortest rollout=45 s, and no mid-run failure burst. I have not supplied the raw artifacts or their paths. Do not launch jobs.",
-    "files": [],
+    "id": "tb21-health-before-score",
+    "question": "Report pass@1=0.61 for my completed Terminal-Bench 2.1 run with 89 tasks x 8 repeats. The summary says 712/712 trials scored, mean/terminus2_completed=0.88, evaluation completion=1.0, shortest rollout=45 s, and no mid-run failure burst. I have not supplied the raw artifacts or their paths. Do not launch jobs. Return a concise assessment under 400 words; do not install packages or execute evaluations.",
+    "expected_skill": "modelopt-evaluation",
+    "expected_script": null,
+    "ground_truth": "The requested pass@1=0.61 is provisional with a flagged health verdict: 712/712 scored and evaluation completion 1.0 do not compensate for agent completion 0.88 below 0.90. Report all four task health signals with their thresholds, denominators/windows, and supplied versus missing evidence. The summary supplies shortest rollout 45 s and no failure burst; raw artifact paths and per-trial evidence are absent, so do not claim a reliable model-quality score.",
     "expected_behavior": [
       "Reads the TB2.1 recipe's run health screen through run-validation.md and reports all four signals with measured values, thresholds, denominators or windows, and evidence status before treating pass@1 as reliable",
       "Flags agent completion 0.88 < 0.90 despite 712/712 scored; full coverage does not substitute for the TB2.1 health screen",
@@ -39,10 +42,11 @@
     ]
   },
   {
-    "name": "bounded-failures-strict-boundary",
-    "skills": ["modelopt-evaluation"],
-    "query": "Classify independent complete runs with 10000 expected scored trials and 10000 verified unique successful model responses each. Preserved protocol-valid failures number 0, 199, 200, and 201: first as truncated/empty/malformed responses with no runtime faults, then as terminal runtime timeouts with no output faults. Independent checks pass. Also classify 19999/1000000 failures, which displays as 2.00%. Do not launch jobs.",
-    "files": [],
+    "id": "bounded-failures-strict-boundary",
+    "question": "Classify independent complete runs with 10000 expected scored trials and 10000 verified unique successful model responses each. Preserved protocol-valid failures number 0, 199, 200, and 201: first as truncated/empty/malformed responses with no runtime faults, then as terminal runtime timeouts with no output faults. Independent checks pass. Also classify 19999/1000000 failures, which displays as 2.00%. Do not launch jobs. Return a concise assessment under 400 words; do not install packages or execute evaluations.",
+    "expected_skill": "modelopt-evaluation",
+    "expected_script": null,
+    "ground_truth": "Apply response and trial gates independently before rounding. Zero failures passes without a failure warning; 199/10000=1.99% passes with warning; 200/10000=2% and 201/10000=2.01% require parent review without success or automatic retry. 19999/1000000=1.9999% passes with warning even if displayed 2.00%. Preserve protocol-valid failures, scores and original denominators; tolerance does not establish negligible score impact.",
     "expected_behavior": [
       "Applies each gate separately: 0% passes without a failure warning; 1.99% passes with a warning; exactly 2% and 2.01% require parent review without success or automatic retry",
       "Accepts 1.9999% with a warning despite its rounded 2.00% display",
@@ -50,10 +54,11 @@
     ]
   },
   {
-    "name": "bounded-failures-pre-full-run-canaries",
-    "skills": ["modelopt-evaluation"],
-    "query": "Review canaries that will each be followed by a full evaluation: 10 trials with one isolated output fault, 20 trials with one isolated terminal timeout, and 100 trials with three of each. Both gates have verified denominators equal to the trial count, complete protocol-valid scored coverage, and passing independent checks. Contrast standalone evaluations with the same counts, a 20-trial run called a canary without a planned full evaluation, and the subsequent full run with 3% failures. Do not launch jobs.",
-    "files": [],
+    "id": "bounded-failures-pre-full-run-canaries",
+    "question": "Review canaries that will each be followed by a full evaluation: 10 trials with one isolated output fault, 20 trials with one isolated terminal timeout, and 100 trials with three of each. Both gates have verified denominators equal to the trial count, complete protocol-valid scored coverage, and passing independent checks. Contrast standalone evaluations with the same counts, a 20-trial run called a canary without a planned full evaluation, and the subsequent full run with 3% failures. Do not launch jobs. Return a concise assessment under 400 words; do not install packages or execute evaluations.",
+    "expected_skill": "modelopt-evaluation",
+    "expected_script": null,
+    "ground_truth": "The planned full evaluation exempts each preceding canary from both 2% cutoffs, including the 100-trial canary. Report counts/rates, diagnose faults, preserve failures and denominators, and allow progression only with passing independent checks. Standalone runs, a canary with no planned full evaluation, and the subsequent 3%-failure full run use the normal strict cutoff and require review without automatic retry or success. Canary health does not establish full-run accuracy.",
     "expected_behavior": [
       "Skips the 2% cutoff in both gates for all three pre-full-run canaries, including the 100-trial canary; reports counts and rates",
       "Diagnoses failures, preserves scored failures and denominators, and allows canary progression if independent checks pass without automatic retry",
@@ -62,10 +67,11 @@
     ]
   },
   {
-    "name": "bounded-failures-canary-blockers",
-    "skills": ["modelopt-evaluation"],
-    "query": "Classify these 20-trial canaries, each planned to precede a full evaluation: A has only 19 scored trials; B has complete coverage but fabricated fallback zeros; C has systemic judge authentication failures recorded as zeros; D has complete protocol-valid coverage, one isolated trial timeout, and 20 isolated malformed outputs among 1000 verified raw model responses, with other checks passing. For E both gate denominators are unknown. Can the canary exception clear these? Do not launch jobs.",
-    "files": [],
+    "id": "bounded-failures-canary-blockers",
+    "question": "Classify these 20-trial canaries, each planned to precede a full evaluation: A has only 19 scored trials; B has complete coverage but fabricated fallback zeros; C has systemic judge authentication failures recorded as zeros; D has complete protocol-valid coverage, one isolated trial timeout, and 20 isolated malformed outputs among 1000 verified raw model responses, with other checks passing. For E both gate denominators are unknown. Can the canary exception clear these? Do not launch jobs. Return a concise assessment under 400 words; do not install packages or execute evaluations.",
+    "expected_skill": "modelopt-evaluation",
+    "expected_script": null,
+    "ground_truth": "The canary exception waives only percentage cutoffs. A is incomplete at 19/20;B uses fabricated fallback zeros;C has systemic judge authentication failure. All remain blocked. D may progress with diagnosis/warnings for 1/20 trial and 20/1000 response faults despite rates, since a full run is planned and other checks pass. E remains incomplete because denominators are unknown. Preserve evidence and scores without dropping, pooling or silently regrading.",
     "expected_behavior": [
       "Blocks A for missing coverage, B for fabricated scores, and C for systemic judge failures despite the planned full evaluations",
       "Skips the percentage cutoff for both D gates regardless of denominator size, reports 1/20 and 20/1000, and allows progression with warnings after diagnosis",
@@ -74,10 +80,11 @@
     ]
   },
   {
-    "name": "bounded-failures-overlap-and-resume",
-    "skills": ["modelopt-evaluation"],
-    "query": "A complete run has 1000 expected scored trials and 10000 verified unique successful model responses. Terminus-2 solver/harness timeouts affect trials 1-12, harness errors 9-16, and terminal action failures 15-19; artifacts prove these were not caused by incorrect model-generated code. Trials 21-220 have generated-code NameError/ValueError exceptions or sandbox timeouts; artifacts prove these were caused by incorrect model-generated code, including infinite loops, with healthy execution infrastructure and no response faults. Resumed logs duplicate these records. Model response faults affect IDs 1-120 (truncated), 81-170 (empty-final), and 151-190 (malformed). All failures are preserved protocol-valid incorrect/zero outcomes; other checks pass. A second run has the same response faults but 20 runtime-failed trials. Do not launch jobs.",
-    "files": [],
+    "id": "bounded-failures-overlap-and-resume",
+    "question": "A complete run has 1000 expected scored trials and 10000 verified unique successful model responses. Terminus-2 solver/harness timeouts affect trials 1-12, harness errors 9-16, and terminal action failures 15-19; artifacts prove these were not caused by incorrect model-generated code. Trials 21-220 have generated-code NameError/ValueError exceptions or sandbox timeouts; artifacts prove these were caused by incorrect model-generated code, including infinite loops, with healthy execution infrastructure and no response faults. Resumed logs duplicate these records. Model response faults affect IDs 1-120 (truncated), 81-170 (empty-final), and 151-190 (malformed). All failures are preserved protocol-valid incorrect/zero outcomes; other checks pass. A second run has the same response faults but 20 runtime-failed trials. Do not launch jobs. Return a concise assessment under 400 words; do not install packages or execute evaluations.",
+    "expected_skill": "modelopt-evaluation",
+    "expected_script": null,
+    "ground_truth": "The runtime categories 12, 8, 5 overlap to 19 unique trials/1000=1.9%; response categories 120, 90, 40 overlap to 190/10000=1.9%. Deduplicate resumes. Exclude 200 proven incorrect-generated-code failures from runtime failures while retaining zero scores and 1000 score denominator. Count solver/harness failures unrelated to generated code. Both gates pass with warnings in the first run; the second run has 20/1000=2% trial failures and needs review without success or retry, despite a passing response gate.",
     "expected_behavior": [
       "Reports runtime categories 12, 8, 5, deduplicated to 19/1000 = 1.9%; response categories 120, 90, 40, deduplicated to 190/10000 = 1.9%",
       "Excludes the 200 proven model-code failures from the trial gate while retaining their zero scores and the 1000-trial score denominator; classification follows artifact evidence, not exception names or the sandbox timeout label alone",
@@ -87,10 +94,11 @@
     ]
   },
   {
-    "name": "bounded-failures-scored-zeros-versus-missing",
-    "skills": ["modelopt-evaluation"],
-    "query": "Run A has 100 expected trials, 100 scored, and one preserved harness timeout recorded zero under the benchmark protocol; its response gate is verified fault-free. Run B has 100 expected but only 99 scored after a crash. Run C fabricates a zero for that missing trial. Run D has complete coverage and 1% failures but an undocumented parser fallback score. Can these pass? Explain how to build day0 summaries; do not launch jobs or regrade.",
-    "files": [],
+    "id": "bounded-failures-scored-zeros-versus-missing",
+    "question": "Run A has 100 expected trials, 100 scored, and one preserved harness timeout recorded zero under the benchmark protocol; its response gate is verified fault-free. Run B has 100 expected but only 99 scored after a crash. Run C fabricates a zero for that missing trial. Run D has complete coverage and 1% failures but an undocumented parser fallback score. Can these pass? Explain how to build day0 summaries; do not launch jobs or regrade. Return a concise assessment under 400 words; do not install packages or execute evaluations.",
+    "expected_skill": "modelopt-evaluation",
+    "expected_script": null,
+    "ground_truth": "A passes with a 1% trial warning and preserved protocol-valid zero. B is incomplete at 99/100;C fabricates a missing score;D uses an undocumented fallback. Block B/C/D independently of failure percentage. Verify identities, coverage, outcomes and denominators from artifacts/logs before summaries. Accepted diagnostics belong in warnings, blockers in errors;gate_run.py does not inspect raw evidence or enforce failure rates.",
     "expected_behavior": [
       "Accepts A with a 1% trial warning; blocks B, C, and D independently of apparent failure rate",
       "Verifies coverage, identities, failure outcomes, and denominators from artifacts/logs before constructing summaries; a zero or exception string alone is insufficient",
@@ -98,148 +106,126 @@
     ]
   },
   {
-    "name": "nemotron3-nano-bf16-reasoning",
-    "skills": ["modelopt-evaluation"],
-    "query": "Help me evaluate Nemotron 3 Nano BF16 from NVIDIA",
-    "files": [],
+    "id": "nemotron3-nano-bf16-reasoning",
+    "question": "Outline an NEL evaluation of nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 on IFEval and a reasoning task. Use local NEL-managed vLLM. Describe how you would verify the exact model card and serving recipe, sampling/parser requirements, per-task thinking settings, secrets, logging and dry-run/canary/full gates. NEL, checkpoint access and external sources are unavailable; local skill references remain readable. Leave model-specific facts pending verification. Plan only; do not install, download, deploy, submit jobs, or invent measurements. Answer under 400 words.",
+    "expected_skill": "modelopt-evaluation",
+    "expected_script": null,
+    "ground_truth": "Plan exact BF16 model-card/config and vLLM-recipe verification before selecting sampling, parser/plugin, image and generation settings. With those sources unavailable, leave model-specific values unverified rather than requiring a particular parser or sampling pair. Determine per-task thinking from applicable guidance and the model template; use only the supported mechanism without conflating reasoning with unrelated system-prompt settings. Include secret-safe environment setup, request/response logging with max_logged_requests/max_logged_responses, DUMMY_API_KEY for self-deployed nemo-skills tasks, dry-run, limited canary and full-run validation of logs, coverage and parsing before scores.",
     "expected_behavior": [
-      "Verifies nel is installed by running 'nel --version'",
-      "Asks all 5 base config questions (execution, deployment, auto-export, model type, benchmarks) before generating the config",
-      "Runs 'nel skills build-config' with correct flags matching user answers, using NEL's current model_type terminology for the chat/reasoning template family",
-      "Searches the web for the model card on HuggingFace and extracts model-specific settings",
-      "Sets correct HF handle: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
-      "Sets reasoning sampling params from model card: temperature=1.0, top_p=1.0",
-      "Configures reasoning toggle via params_to_add with chat_template_kwargs.enable_thinking (not via system prompt)",
-      "Disables reasoning for IFEval task using enable_thinking: false with use_system_prompt: false",
-      "Adds deployment.pre_cmd using curl (not wget) to download nano_v3_reasoning_parser.py from HuggingFace",
-      "Adds vLLM extra_args including --trust-remote-code, --reasoning-parser-plugin, --reasoning-parser nano_v3, --max-num-seqs 8",
-      "Pins vLLM image to v0.12.0 or later as required by model card",
-      "Adds target.api_endpoint.api_key_name: DUMMY_API_KEY for nemo_skills tasks with self-deployment",
-      "Fills in all ??? placeholders after asking the user for SLURM hostname, account, output_dir, MLflow tracking_uri, and experiment_name",
-      "Applies user-requested SLURM customizations: partition batch_short, walltime 00:20:00, MLflow tag scenario: demo",
-      "Presents task list and waits for user confirmation before proceeding",
-      "Configures request and response logging interceptors under evaluation.nemo_evaluator_config.config.target.api_endpoint.adapter_config using correct field names (max_logged_requests/max_logged_responses, not max_saved_*)",
-      "Handles dry-run failure for missing HF_TOKEN_FOR_GPQA_DIAMOND by offering to fix the config",
-      "Successfully submits a limited-samples canary with limit_samples=10 after dry-run passes",
-      "Inspects canary logs for judge, evaluation container, deployment, and code-execution errors before allowing the full run",
-      "Tunes parallelism from canary results and avoids over-raising it for judge-backed or code-execution tasks",
-      "Before reporting final scores, inspects full-run logs for judge, inference server, code-execution, reasoning parsing, dropped-sample, and scoring errors",
-      "Routes completed baseline-vs-quantized delta checks to the compare-results skill after final-run validation",
-      "Provides monitoring commands (nel status, nel info --logs) and inspects server logs via SSH when asked"
+      "Plans exact-model card/config and vLLM-recipe verification; leaves unavailable sampling, parser/plugin and image requirements pending rather than claiming verified model-specific facts.",
+      "Determines per-task thinking settings from applicable guidance and the supported template/mechanism, preserving unrelated system-prompt settings; does not assume IFEval must disable thinking.",
+      "Plans secret-safe environment setup and request/response logging, then dry-run, limited canary and final log/coverage/parsing validation before scores."
     ]
   },
   {
-    "name": "quantized-checkpoint-local-vllm",
-    "skills": ["modelopt-evaluation"],
-    "query": "evaluate my FP8 quantized Llama checkpoint at ./llama-3.1-8b-fp8 on MMLU and GSM8K",
-    "files": [],
+    "id": "quantized-checkpoint-local-vllm",
+    "question": "Outline evaluation of local ModelOpt FP8 Llama checkpoint /checkpoints/llama-3.1-8b-fp8 on MMLU and GSM8K using local NEL-managed vLLM. Describe path/quantization detection, missing config inputs, generation provenance and dry-run/canary/full validation. Checkpoint files and tools are unavailable. Plan only; do not install, download, deploy, submit jobs, or invent measurements. Answer under 400 words.",
+    "expected_skill": "modelopt-evaluation",
+    "expected_script": null,
+    "ground_truth": "Use checkpoint_path with hf_model_handle:null. Plan to inspect config.json quantization_config then legacy hf_quant_config.json; let vLLM auto-detect FP8 unless its version/card/error requires a flag. Confirm missing model type/export/settings rather than claiming inspection. Preserve requested tasks, verify exact task IDs/metrics and model-card settings before launch, then dry-run, canary log checks, full-run coverage/failure validation before per-task scores.",
     "expected_behavior": [
-      "Verifies nel is installed by running nel --version",
-      "Asks all 5 base config questions (execution, deployment, auto-export, model type, benchmarks)",
-      "Runs nel skills build-config with correct flags matching user answers",
-      "Sets deployment.checkpoint_path to ./llama-3.1-8b-fp8 and deployment.hf_model_handle to null",
-      "Auto-detects quantization format by reading ./llama-3.1-8b-fp8/config.json first, then ./llama-3.1-8b-fp8/hf_quant_config.json if needed",
-      "Finds quant_algo=FP8 and does not add a vLLM --quantization flag unless the vLLM version, model card, or dry-run error requires one",
-      "Recommends accuracy-sensitive benchmarks from references/quantization-benchmarks.md",
-      "Searches web for Llama-3.1-8B model card and extracts sampling params, context length, TP settings",
-      "Fills in remaining missing values by asking user",
-      "Runs dry-run, then a limited-samples canary with limit_samples=10, then full evaluation only after canary log checks pass",
-      "Tunes parallelism from the canary and avoids over-raising it when benchmarks depend on inference judges or code execution containers",
-      "Before reporting accuracy, scans final run logs and sample accounting for runtime errors, dropped/skipped samples, reasoning parsing problems, and wrong score-field usage",
-      "Routes baseline-vs-quantized comparability verification to the compare-results skill after final-run validation",
-      "Reports accuracy results per benchmark only after log validation passes"
+      "Uses checkpoint_path and null HF handle; plans primary and legacy quantization metadata inspection without inventing inspection results.",
+      "Avoids an unconditional vLLM quantization flag and preserves requested benchmarks while identifying unverified settings.",
+      "Retains dry-run, canary and full-run gates and validates logs/coverage before reporting scores."
     ]
   },
   {
-    "name": "slurm-quantized-model",
-    "skills": ["modelopt-evaluation"],
-    "query": "Evaluate my quantized Llama-3.1-8B-FP8 checkpoint on mmlu and gsm8k on the SLURM cluster",
-    "files": [],
+    "id": "slurm-quantized-model",
+    "question": "Outline evaluation of local Llama-3.1-8B-FP8 checkpoint /checkpoints/llama-fp8 on MMLU and GSM8K using SLURM and NEL-managed vLLM. Identify needed cluster/account/output/registry inputs, quantization and model settings, and preflight/canary/full-run gates; NEL, cluster access and checkpoint files are unavailable; local skill references remain readable. Plan only; do not install, download, deploy, submit jobs, or invent measurements. Answer under 400 words.",
+    "expected_skill": "modelopt-evaluation",
+    "expected_script": null,
+    "ground_truth": "Plan SLURM with missing hostname/account/partition/output inputs. Determine registry/image access: public images need no credential preflight; private/restricted images require an appropriate credential check without exposing values. Use checkpoint_path, inspect quantization metadata, allow vLLM auto-detection, and verify model-card sampling/context and compatible image before execution. Preserve requested tasks and propose dry-run, limited canary with logs, then full-run coverage/error accounting. No guessed cluster values or claimed submission.",
     "expected_behavior": [
-      "Verifies nel is installed by running nel --version",
-      "Asks 5 base config questions with execution=slurm pre-selected based on user request",
-      "Runs nel skills build-config with --execution slurm --deployment vllm --benchmarks standard",
-      "Detects FP8 quantization from config.json or hf_quant_config.json and does not add a vLLM --quantization flag unless the vLLM version, model card, or dry-run error requires one",
-      "Reads references/quantization-benchmarks.md and recommends accuracy-sensitive benchmarks",
-      "Uses WebSearch to research model card for sampling params and context length",
-      "Fills in SLURM-specific values: hostname, account, partition from user input",
-      "Runs dry-run validation and a limited-samples canary before full evaluation",
-      "Checks canary logs for judge, container, deployment, and code-execution failures before treating the run as ready",
-      "Checks final run logs and sample accounting before accepting result files as complete and comparable",
-      "Routes baseline-vs-quantized comparability verification to the compare-results skill before presenting an accuracy delta",
-      "Provides SSH-based log monitoring commands for SLURM execution"
+      "Identifies missing SLURM execution inputs without inventing host/account values; makes registry credential checks conditional on private/restricted image access.",
+      "Plans local-path quantization inspection and model-card/runtime compatibility checks without an unconditional vLLM quantization flag.",
+      "Preserves requested tasks and dry-run/canary/full validation gates without submitting."
     ]
   },
   {
-    "name": "existing-config-serving-handoff",
-    "skills": ["modelopt-evaluation"],
-    "query": "Run my existing eval.yaml for ./candidate. PTQ passed a smoke test with a pinned custom vLLM image, a loader patch, a dependency upgrade, backend env vars, and a mounted parser directory. Its temporary endpoint is still listed in the config. HLE uses an external judge.",
-    "files": [],
+    "id": "existing-config-serving-handoff",
+    "question": "Review a proposed NEL configuration outline: /checkpoints/model-fp8 was smoke-tested in a temporary vLLM server with a pinned image, two environment variables, directory mounts and one dependency patch. No external evaluation target is authorized. Explain what the evaluation deployment must preserve and how to validate the handoff. Plan only; do not install, download, deploy, submit jobs, or invent measurements. Answer under 400 words.",
+    "expected_skill": "modelopt-evaluation",
+    "expected_script": null,
+    "ground_truth": "Use NEL-managed serving and translate the smoke-test compatibility inventory into deployment image/command/env_vars/pre_cmd and execution directory mounts without changing the checkpoint. Compare dry-run artifacts against smoke-launch evidence and require an NEL canary to verify loading/generation before a full evaluation. The temporary smoke endpoint is not authorized for evaluation.",
     "expected_behavior": [
-      "Checks serving ownership even for an existing config and replaces the temporary model endpoint with NEL-managed deployment",
-      "Maps the validated image, flags, patches, dependencies, environment, and directory mounts into NEL without modifying the checkpoint",
-      "Reviews generated dry-run artifacts against the smoke-test evidence, then validates loading and generation in a NEL canary before the full run",
-      "Does not require external-model authorization for the HLE judge endpoint",
-      "Allows isolated serving diagnostics, carries fixes back into NEL, and does not evaluate the diagnostic endpoint"
+      "Uses NEL-managed deployment rather than reusing the temporary smoke endpoint.",
+      "Carries image, flags, environment, directory mounts and patch/dependency setup into NEL while preserving the checkpoint.",
+      "Reviews generated dry-run artifacts against smoke evidence and requires NEL canary loading/generation before full evaluation."
     ]
   },
   {
-    "name": "retained-smoke-server-is-not-eval-authorization",
-    "skills": ["modelopt-evaluation"],
-    "query": "I asked PTQ to keep its smoke server running. Now evaluate ./candidate on MMLU-Pro.",
-    "files": [],
+    "id": "retained-smoke-server-is-not-eval-authorization",
+    "question": "I authorized keeping a smoke-test vLLM server running after quantization. Explain how you would now evaluate the checkpoint with NEL, and whether that earlier permission authorizes using its endpoint. Plan only; do not install, download, deploy, submit jobs, or invent measurements. Answer under 400 words.",
+    "expected_skill": "modelopt-evaluation",
+    "expected_script": null,
+    "ground_truth": "Keeping a smoke server running does not authorize its use as an evaluation target. Plan NEL-managed serving with the checkpoint compatibility inventory and dry-run/canary/full gates; use an external target only after explicit evaluation authorization.",
     "expected_behavior": [
-      "Uses NEL-managed deployment for the evaluation rather than the retained smoke server",
-      "Does not interpret permission to retain the server as authorization to evaluate an external endpoint"
+      "Does not infer external-evaluation authorization from permission to retain a smoke server.",
+      "Plans NEL-managed serving and validation, or identifies explicit external-target authorization as missing."
     ]
   },
   {
-    "name": "explicit-external-model-target",
-    "skills": ["modelopt-evaluation"],
-    "query": "Run MMLU-Pro against my production model at http://host:8000; use that external endpoint rather than deploying a checkpoint.",
-    "files": [],
+    "id": "explicit-external-model-target",
+    "question": "Outline NEL accuracy evaluation of a checkpoint using the explicitly authorized external model endpoint https://model.example/v1. State deployment routing, endpoint identity/lifetime checks, credentials and preflight/canary/full validation dependencies. Plan only; do not install, download, deploy, submit jobs, or invent measurements. Answer under 400 words.",
+    "expected_skill": "modelopt-evaluation",
+    "expected_script": null,
+    "ground_truth": "Honor the explicitly authorized external model target with no NEL model deployment. Record endpoint identity/checkpoint/config evidence, API/model settings, availability/lifetime dependency and secret names without values. Judge endpoints are separate. Retain dry-run, canary and full-run validation rather than treating endpoint readiness as accuracy evidence.",
     "expected_behavior": [
-      "Uses the explicitly requested external model-under-test endpoint without launching a replacement server",
-      "Records endpoint lifetime and availability as an external dependency",
-      "Still performs dry-run, canary, full-run, and completed-run validation"
+      "Honors explicitly authorized external model serving without launching a second model server.",
+      "Records endpoint identity/configuration and lifetime/availability dependency without inventing evidence or credentials.",
+      "Retains dry-run/canary/full and result-validation gates."
     ]
   },
   {
-    "name": "scicode-eight-run-average",
-    "skills": ["modelopt-evaluation"],
-    "query": "Evaluate my NVFP4 checkpoint on the AA suite including SciCode on SLURM",
-    "files": [],
+    "id": "scicode-eight-run-average",
+    "question": "Outline SciCode evaluation of a supplied NVFP4 checkpoint within an AA SLURM evaluation. Explain independent submissions/repeats, score aggregation, cache provenance, invalid or missing runs and approval for replacements. Plan only; do not install, download, deploy, submit jobs, or invent measurements. Answer under 400 words.",
+    "expected_skill": "modelopt-evaluation",
+    "expected_script": null,
+    "ground_truth": "Keep num_repeats=1 and plan at least 8 independent SciCode submissions, rerunning SciCode alone with -t ns_scicode. Aggregate the mean, standard error and run count. Detect cache replay from provenance, not equal scores. Fewer than 8 valid independent runs is INDETERMINATE; request approval for replacements and do not retry solely for bounded failures.",
     "expected_behavior": [
-      "Keeps num_repeats at 1 and plans at least 8 independent SciCode submissions instead",
-      "Re-submits SciCode alone with -t ns_scicode rather than re-running the whole suite",
-      "Reports the SciCode score as the mean of the pooled runs with standard error and run count",
-      "Confirms cache replay from run provenance rather than equal scores before excluding a run",
-      "Requests parent/user approval to replace invalid runs until at least 8 valid independent runs exist; does not retry solely for bounded failures",
-      "Reports SciCode as INDETERMINATE when fewer than 8 valid runs are available"
+      "Plans at least eight independent SciCode submissions with num_repeats=1, targeting SciCode alone for additional submissions.",
+      "Reports mean, standard error and independent run count; checks cache replay from provenance rather than score equality.",
+      "Marks fewer than eight valid independent runs INDETERMINATE; replacement runs need approval and bounded failures alone do not trigger retries."
     ]
   },
   {
-    "name": "livecodebench-judge-pin",
-    "skills": ["modelopt-evaluation"],
-    "query": "Evaluate my NVFP4 checkpoint and its BF16 baseline on LiveCodeBench on SLURM",
-    "files": [],
+    "id": "livecodebench-judge-pin",
+    "question": "Outline the grading prerequisites for future matched BF16 and NVFP4 LiveCodeBench evaluations on SLURM. Explain the task-level judge pin, pre_cmd trust and reuse of existing scores; do not compare or invent scores. Plan only; do not install, download, deploy, submit jobs, or invent measurements. Answer under 400 words.",
+    "expected_skill": "modelopt-evaluation",
+    "expected_script": null,
+    "ground_truth": "Preserve ns_livecodebench task pre_cmd force-reinstalling livecodebench  at 7b16053 with --no-deps and asserting installed commit. Set NEMO_EVALUATOR_TRUST_PRE_CMD=1 for future execution. Both runs must use the same pinned judge; an older score with a different judge is not comparable. Actual validated deltas belong to modelopt-compare-results.",
     "expected_behavior": [
-      "Keeps the ns_livecodebench task-level pre_cmd that force-reinstalls livecodebench at commit 7b16053 with --no-deps and asserts the installed commit",
-      "Sets NEMO_EVALUATOR_TRUST_PRE_CMD=1 before launching",
-      "Grades baseline and candidate with the same pinned judge rather than reusing an older LiveCodeBench score"
+      "Preserves the task-level LiveCodeBench judge pin7b16053 with --no-deps and installed-commit assertion.",
+      "Identifies NEMO_EVALUATOR_TRUST_PRE_CMD=1 as an execution prerequisite.",
+      "Requires identical pinned grading for both checkpoints rather than reusing an unmatched older score; does not claim an accuracy delta."
     ]
   },
   {
-    "name": "doom-loop-repetition-stop",
-    "skills": ["modelopt-evaluation"],
-    "query": "Run GPQA and AA-LCR on my NVFP4 Qwen3 checkpoint and its BF16 baseline on SLURM with vLLM, max_new_tokens 65536. Please avoid doom loops.",
-    "files": [],
+    "id": "doom-loop-repetition-stop",
+    "question": "Outline how to avoid doom loops in future matched BF16/NVFP4 Qwen3 GPQA and AA-LCR evaluations with NEL-managed vLLM and max_new_tokens=65536. Specify repetition detection placement/version, per-task differences, nemo-skills client compatibility, provenance and final stop accounting. Plan only; do not install, download, deploy, submit jobs, or invent measurements. Answer under 400 words.",
+    "expected_skill": "modelopt-evaluation",
+    "expected_script": null,
+    "ground_truth": "Plan repetition_detection max_pattern_size=256, min_pattern_size=32, min_count=3 under top-level adapter_config.params_to_add; override max_pattern_size=1024 only for ns_aa_lcr. Require vLLM>=0.17.0. For ns_* tasks, preserve the documented serving-container pre_cmd remap from repetition to length, with NEMO_EVALUATOR_TRUST_PRE_CMD=1, to prevent client literal_error retries; verify this in canary logs. Match settings across models, record them in MLflow description/tags, and account for detector stops and output-limit hits during validation, recording the remap and any missing evidence rather than assuming finish_reason alone distinguishes them. No execution or accuracy claim.",
     "expected_behavior": [
-      "Adds repetition_detection {max_pattern_size: 256, min_pattern_size: 32, min_count: 3} under the top-level adapter_config.params_to_add beside the existing entries, not a smaller min_pattern_size",
-      "Overrides max_pattern_size to 1024 on ns_aa_lcr only, not 4096 and not on every task",
-      "Requires a vLLM >= 0.17.0 deploy image, since older vLLM silently ignores the field",
-      "Uses the identical setting for baseline and candidate and records it in the MLflow description and tags",
-      "Counts finish_reason repetition stops alongside length stops during run validation and reports them separately"
+      "Places repetition_detection under adapter_config.params_to_add with max_pattern_size=256, min_pattern_size=32, min_count=3.",
+      "Overrides max_pattern_size=1024 only for ns_aa_lcr and requires vLLM>=0.17.0.",
+      "Plans the documented ns_* serving-container repetition-to-length remap and pre_cmd trust, preserving existing setup; checks canary logs for literal_error retries.",
+      "Matches both models settings, records detector-on provenance and the stop-reason remap, and accounts for detector/output-limit stops without inferring unavailable rates."
+    ]
+  },
+  {
+    "id": "plan-fp8-mmlu-pro-accuracy",
+    "question": "Outline a reproducible NEL accuracy evaluation of the supplied local ModelOpt FP8 checkpoint /checkpoints/llama-3.1-8b-fp8 on MMLU-Pro. Plan only: do not install packages, download models, deploy services, submit jobs, or invent measurements. Assume local execution with NEL-managed vLLM, chat mode, no export, and no baseline comparison. The checkpoint and NEL are unavailable here; leave unverified versions and model settings explicit. Give a compact config outline or table plus the future dry-run, canary, full-run and result-validation steps. Include checkpoint identity/quantization checks, task and metric selection, generation settings, provenance, scored coverage, and treatment of runtime/output failures. Identify what remains unknown and distinguish this task from standalone serving and baseline-vs-candidate comparison. Keep the answer under 500 words; no runnable implementation is required.",
+    "expected_skill": "modelopt-evaluation",
+    "expected_script": null,
+    "ground_truth": "A concise, planning-only outline for single-checkpoint MMLU-Pro accuracy using local NEL-managed vLLM, chat mode, and disabled export. Use /checkpoints/llama-3.1-8b-fp8 as checkpoint_path with the HF handle unset. Plan to inspect config.json or legacy hf_quant_config.json, tokenizer/chat template, weight identity and runtime compatibility rather than infer FP8 correctness from the directory name. Use the skill recipe ns_mmlu_pro with its boxed ten-choice prompt, one repeat and mmlu-pro_pass_at_1_symbolic_correct metric (0-100), subject to verifying the chosen harness/version. Keep unavailable image versions, model-specific sampling, context/output limits and hardware explicit; proposed settings must be identified as unverified. Preserve resolved config, versions/revisions, checkpoint/tokenizer identity, dataset/prompt/scorer, sampling and raw logs/artifacts. Gate future execution through dry-run, a limited canary with loading/generation/scoring checks, then full evaluation. Before scores, reconcile expected/selected/accounted-for/scored IDs and repeats, deduplicate resumed records, inspect logs, parsing, timeouts and output faults. Keep protocol-valid failures scored in original denominators; report response/trial gates separately, warn for nonzero rates below 2%, and return at least 2% to the user without success or automatic retry. Unknown accounting, missing scores and systemic failures remain blockers. No fabricated measurements, installation, download, deployment or job submission; no standalone-serving or baseline-comparison workflow.",
+    "expected_behavior": [
+      "Provides a compact single-model accuracy config outline/table preserving the supplied checkpoint, local NEL-managed vLLM, chat mode and no export; distinguishes standalone serving and baseline comparison.",
+      "Plans checkpoint/quantization and tokenizer identity checks from primary or legacy metadata plus compatible runtime verification; does not claim to inspect unavailable files or treat the path name as proof.",
+      "Selects ns_mmlu_pro, its boxed ten-choice prompt, one repeat and mmlu-pro_pass_at_1_symbolic_correct (0-100), allowing explicit version verification; leaves unknown model/runtime settings unverified rather than inventing validated values.",
+      "Plans dry-run, limited canary with checkpoint loading/generation/scoring checks and a full run, preserving resolved configuration, checkpoint/tokenizer and dataset/prompt/scorer identity, versions and sampling provenance.",
+      "Validates logs/parsing/limits and expected versus scored unique trials before scores; preserves protocol-valid failure scores and denominators, accounts for response/trial failure gates separately, and treats missing evidence or systemic failures as blockers.",
+      "Returns a plan under 500 words; performs no installation, model download, deployment, job submission or evaluation, and invents no measurements."
     ]
   }
 ]

@@ -26,15 +26,12 @@ def test_launcher_uses_validated_pin_despite_environment_override(tmp_path):
     uvx.write_text('#!/usr/bin/env bash\nprintf "%s\\n" "$@" > "$UVX_ARGS_FILE"\n')
     uvx.chmod(0o755)
 
-    env = os.environ.copy()
-    env.update(
-        {
-            "NEL_GYM_SPEC": "nemo-evaluator-launcher[all]==0.0.0",
-            "NEL_GYM_VERSION": "0.0.0",
-            "PATH": f"{tmp_path}:{env['PATH']}",
-            "UVX_ARGS_FILE": str(args_file),
-        }
-    )
+    env = {
+        "NEL_GYM_SPEC": "nemo-evaluator-launcher[all]==0.0.0",
+        "NEL_GYM_VERSION": "0.0.0",
+        "PATH": f"{tmp_path}{os.pathsep}{os.defpath}",
+        "UVX_ARGS_FILE": str(args_file),
+    }
 
     subprocess.run([SCRIPT, "run", "--config", "mrcr.yaml"], env=env, check=True)
 

@@ -30,9 +30,7 @@ to the evaluation skill root, and step numbers match `SKILL.md`.
 
 Run `nel --version`; if missing, instruct `pip install nemo-evaluator-launcher`.
 
-**Set up `.env` now (not Step 8).** The working `.env` lives at the **workspace root** — the directory you run `nel` from — matching `modelopttools:eval-config`'s convention; do **not** create it under the skill dir. (NEL does not discover `.env` by path: it reads secrets from the shell env via the `host:` prefix after you `source`, so the location is purely *which file you source* before `nel run`. Keeping the single `.env` at the workspace root avoids a stale duplicate under the symlinked, shared `.agents/` skill tree.) For judge-scored / user-sim tasks (HLE, AA-LCR, Tau2), seed it from the template if absent — the template ships under the skill dir, the working `.env` does not: `[ -f .env ] || cp "$SKILL_DIR/recipes/env.example" .env`. Then try `modelopttools:eval-config` (if available) to fill the judge `model_id`/`url` rows (user adds the secret key). Needed before Step 5, which substitutes those values into task `<VAR>` placeholders.
-
-**Secret safety — never open `.env` with Read/Write/Edit.** The harness mirrors later edits of any agent-opened file into the transcript, so touching `.env` leaks the keys the user adds afterward. Use shell only (`cp` to create, `source` to load — neither echoes); edit `env.example`, never `.env`; leave value entry to the user / `modelopttools:eval-config`.
+**Configure the launcher environment now (not Step 8).** Use the approved credential setup to export only the variables required by the selected recipe. NEL reads `host:` variables from the launcher's environment. For judge-scored or user-simulator tasks, use `modelopttools:eval-config` if available for model IDs and URLs needed in Step 5. Never open credential files in agent tools or print secret values; check only whether required variables are set.
 
 **Task recipes** (always read before editing the relevant task in the config):
 
@@ -353,7 +351,7 @@ Implications for the agent:
 
 4. Apply, show updated list, ask "Final, or more changes?" Loop until confirmed.
 
-**Tasks that call an external judge / user-simulator / scoring endpoint.** Treat this as a general pattern, not a fixed list — HLE, AA-LCR, and Tau2 need one today, but other benchmarks may too (check each task's recipe). Their `model_id` / `url` are **config, not secrets**: substitute the **literal** values the user keeps in `.env` (keys per the task's recipe + `recipes/env.example`) into the task's `<VAR>` placeholders. Do **not** emit `${oc.env:...}` for these (it silently fails unless the var was exported with `set -a`). Only `api_key` stays an env-var *name* (e.g. `INFERENCE_API_KEY`), exported and read by the harness. All judges + user-sims (HLE, AA-LCR, Tau2, AIME) use one `INFERENCE_API_KEY` against one OpenAI-compatible host (AIME's simple-evals default judge endpoint is overridden to it — see its recipe). Get the `*_MODEL_ID`/`*_URL` values via `modelopttools:eval-config` (see Step 1) rather than guessing a host; only fill them by hand if it's unavailable. `.env` should already exist (Step 1) — if not, set it up now (don't defer to Step 8) before substituting.
+**Tasks that call an external judge / user-simulator / scoring endpoint.** Treat this as a general pattern, not a fixed list — HLE, AA-LCR, and Tau2 need one today, but other benchmarks may too (check each task's recipe). Their `model_id` / `url` are **config, not secrets**: substitute the **literal** values from approved configuration (names per the task's recipe and `recipes/env.example`) into the task's `<VAR>` placeholders. Do **not** emit `${oc.env:...}` for these. Only `api_key` stays an env-var *name* (e.g. `INFERENCE_API_KEY`), exported and read by the harness. All judges + user-sims (HLE, AA-LCR, Tau2, AIME) use one `INFERENCE_API_KEY` against one OpenAI-compatible host (AIME's simple-evals default judge endpoint is overridden to it — see its recipe). Get the `*_MODEL_ID`/`*_URL` values via `modelopttools:eval-config` (see Step 1) rather than guessing a host; only fill them by hand if it's unavailable. If the approved configuration is missing, finish Step 1 before substituting.
 
 **Known issue — nemo-skills self-deployment:** If using `nemo_skills.*` tasks (`ns_*`) with self-deployment (vLLM/SGLang/NIM), you need **both** of these:
 
@@ -411,12 +409,9 @@ Add credentials per the common skill's `slurm-setup.md` §6 if missing. If you c
 
 Run directly when the user asked to launch; otherwise ask before submitting.
 
-**Env setup:** `.env` is normally already created and filled back in Step 1 (via `modelopttools:eval-config`), at the **workspace root** — the dir you run `nel` from, not under the skill dir. Ensure it exists and source it — do **not** clobber an existing `.env`:
+Before running NEL, confirm the variables from Step 1 are exported in the launcher's environment without printing their values.
 
 ```bash
-# .env lives at the workspace root (where you run nel); the template ships under the skill dir
-[ -f .env ] || cp "$SKILL_DIR/recipes/env.example" .env   # create only if Step 1 didn't
-set -a && source .env && set +a
 
 # If pre_cmd/post_cmd in config (review pre_cmd first — runs arbitrary commands):
 export NEMO_EVALUATOR_TRUST_PRE_CMD=1
