@@ -63,6 +63,8 @@ Changelog
 
 *Speculative Decoding*
 
+- ``specdec_bench --engine SGLANG`` now works with SGLang 0.5.14 and later.
+
 *Megatron Framework (M-LM / M-Bridge)*
 
 - Preserve model-specific hybrid stacks when selecting MoE expert layouts in Megatron-Bridge, and reject grouped GEMM when a custom factory returns sequential experts. Custom built stack ``ModuleSpec`` values are now rejected; assign a named factory function instead.

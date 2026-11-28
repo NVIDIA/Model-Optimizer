@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import inspect
 import itertools
 import time
 
@@ -23,6 +24,14 @@ try:
 except ImportError:
     print("sglang is not installed.")
     sglang = None
+
+
+def _cuda_graph_max_bs_kwarg():
+    # SGLang 0.5.14 split cuda_graph_max_bs into per-phase settings. Dev builds report
+    # 0.0.0.devN, so check the installed ServerArgs rather than the version.
+    if "cuda_graph_max_bs_decode" in inspect.signature(sgl.ServerArgs).parameters:
+        return "cuda_graph_max_bs_decode"
+    return "cuda_graph_max_bs"
 
 
 class SGLANGModel(Model):
@@ -64,7 +73,7 @@ class SGLANGModel(Model):
             "max_running_requests": max_concurrent_requests,
             "attention_backend": kwargs.get("attention_backend"),
             "enable_torch_compile": kwargs.get("enable_torch_compile", False),
-            "cuda_graph_max_bs": max_concurrent_requests,
+            _cuda_graph_max_bs_kwarg(): max_concurrent_requests,
             "disable_cuda_graph": False,
             # Cross-engine `--max_seq_len` from run.py lands here as
             # `context_length` (sgl.Engine's spelling). None lets SGLang
