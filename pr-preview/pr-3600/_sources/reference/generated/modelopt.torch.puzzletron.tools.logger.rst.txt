@@ -1,0 +1,6 @@
+modelopt.torch.puzzletron.tools.logger
+======================================
+
+.. currentmodule:: modelopt.torch.puzzletron.tools
+
+.. autodata:: logger
