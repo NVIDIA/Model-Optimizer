@@ -39,6 +39,7 @@ from .config import (
 from .nn import (
     QuantModule,
     QuantModuleRegistry,
+    ResidueQuantLinear,
     SequentialQuantizer,
     StaticBlockScaleQuantizer,
     SVDQuantLinear,
@@ -181,6 +182,46 @@ def restore_quantizer_state(model: nn.Module, config: QuantizeConfig, metadata: 
     _restore_shared_quant_state_aliases(model, config, metadata)
 
     return model
+
+
+ResidueQuantModuleRegistry = _DMRegistryCls("ResidueQuant")
+
+
+def create_and_replace_residue_linear_on_the_fly(model, names):
+    """Promote selected linears using the same dynamic-module mechanism as SVDQuant."""
+    for name in names:
+        module = model.get_submodule(name)
+        if isinstance(module, ResidueQuantLinear):
+            continue
+        if type(module) not in ResidueQuantModuleRegistry:
+            ResidueQuantModuleRegistry.register({type(module): type(module).__name__})(
+                ResidueQuantLinear
+            )
+        # Convert directly to include a root Linear.
+        ResidueQuantModuleRegistry.convert(module)
+
+
+def update_residue_metadata(model, config, metadata):
+    """Record residue module names; native quantizer state carries the indices."""
+    update_quantize_metadata(model, config, metadata)
+    metadata["residue_modules"] = {
+        name: {"shared_input_group": getattr(module, "_residue_group", ())}
+        for name, module in model.named_modules()
+        if isinstance(module, ResidueQuantLinear)
+    }
+
+
+def restore_residue_model(model, config, metadata):
+    """Restore residue linears with their original weight dimensions."""
+    states = metadata["residue_modules"]
+    if any(state.get("original_in_features") is not None for state in states.values()):
+        raise NotImplementedError(
+            "Materialized residue checkpoints are unsupported; use an unextended QDQ checkpoint."
+        )
+    create_and_replace_residue_linear_on_the_fly(model, states)
+    for name, state in states.items():
+        model.get_submodule(name)._residue_group = tuple(state.get("shared_input_group", ()))
+    return restore_quantizer_state(model, config, metadata)
 
 
 SVDQuantModuleRegistry = _DMRegistryCls("SVDQuant")
