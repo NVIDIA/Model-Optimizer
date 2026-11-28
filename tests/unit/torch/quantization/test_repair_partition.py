@@ -360,3 +360,88 @@ def test_dynamic_nvfp4_partition_refuses_unavailable_global_maximum():
     quantizer._set_buffer("_scale", torch.ones(4, 2))
     with pytest.raises(ValueError):
         native_weight_partition(quantizer, NativeWeightPartition((4, 32), 1, 0, 2))
+
+
+@pytest.mark.parametrize("mixed", [False, True])
+def test_compressed_staging_preserves_public_save_restore(tmp_path, mixed):
+    torch.manual_seed(63)
+    model = torch.nn.Sequential(
+        torch.nn.Linear(32, 16, bias=False), torch.nn.Linear(16, 8, bias=False)
+    )
+    inputs = torch.randn(3, 32)
+    mtq.quantize(
+        model,
+        {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {
+                    "quantizer_name": "*weight_quantizer",
+                    "enable": True,
+                    "cfg": {"num_bits": (4, 3), "axis": 0},
+                },
+            ],
+            "algorithm": "max",
+        },
+        lambda m: m(inputs),
+    )
+    mtq.compress(model)
+    assert isinstance(model[0].weight, QTensorWrapper)
+    expected = model(inputs)
+    packed_path = tmp_path / "compressed.pt"
+    mto.save(model, packed_path)
+    packed_restored = mto.restore(
+        torch.nn.Sequential(
+            torch.nn.Linear(32, 16, bias=False), torch.nn.Linear(16, 8, bias=False)
+        ),
+        packed_path,
+    )
+    assert isinstance(packed_restored[0].weight, QTensorWrapper)
+    torch.testing.assert_close(packed_restored(inputs), expected, rtol=0, atol=0)
+    sibling_codes = model[1].weight.get_qtensor()._quantized_data.view(torch.uint8).clone()
+    prepare_packed_weights_for_tp(model[0] if mixed else model)
+    torch.testing.assert_close(model(inputs), expected, rtol=0, atol=0)
+    codes = model[0].weight_quantizer._native_weight_codes.clone()
+    path = tmp_path / "compressed-staged.pt"
+    mto.save(model, path)
+    restored = mto.restore(
+        torch.nn.Sequential(
+            torch.nn.Linear(32, 16, bias=False), torch.nn.Linear(16, 8, bias=False)
+        ),
+        path,
+    )
+    assert isinstance(restored[1].weight, QTensorWrapper) == mixed
+    if mixed:
+        assert torch.equal(
+            restored[1].weight.get_qtensor()._quantized_data.view(torch.uint8), sibling_codes
+        )
+    assert not isinstance(restored[0].weight, QTensorWrapper)
+    assert not restored[0].weight.requires_grad
+    assert get_pinned_native_weight(restored[0].weight_quantizer, restored[0].weight) is not None
+    assert torch.equal(restored[0].weight_quantizer._native_weight_codes, codes)
+    torch.testing.assert_close(restored(inputs), expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("reduced", [(-1,), (-2,), (-1, -2)])
+@pytest.mark.parametrize("dim", [0, 1])
+def test_dynamic_partition_derives_unconsumed_block_axes(reduced, dim):
+    blocks = dict.fromkeys(reduced)
+    quantizer = TensorQuantizer(
+        QuantizerAttributeConfig(num_bits=(4, 3), type="dynamic", block_sizes=blocks)
+    )
+    weight = torch.randn(4, 32)
+    view = NativeWeightPartition(tuple(weight.shape), dim, 0, 2)
+    retained = {0, 1} - {value % 2 for value in reduced}
+    if dim not in retained or retained == {0, 1}:
+        with pytest.raises(ValueError, match="require calibrated thresholds"):
+            native_weight_partition(quantizer, view)
+    else:
+        fields, _, _ = native_weight_partition(quantizer, view)
+        assert not fields
+        torch.testing.assert_close(
+            copy.deepcopy(quantizer)(view.select(weight)),
+            view.select(copy.deepcopy(quantizer)(weight)),
+            rtol=0,
+            atol=0,
+        )
+    assert quantizer.axis is None
+    assert quantizer.block_sizes == blocks

@@ -255,12 +255,13 @@ def native_weight_partition(quantizer, view, source=None):
     axes = (axis,) if isinstance(axis, int) else axis or ()
     # An empty reduction list means a global maximum, not a per-element maximum.
     retained = {value % 2 for value in axes}
+    if quantizer.block_sizes is not None and not blocks:
+        # Forward consumes all-None block layouts into their complementary axes.
+        # Derive that geometry without running or mutating the quantizer here.
+        retained = {0, 1} - {value % 2 for value in quantizer.block_sizes if isinstance(value, int)}
     # Dynamic maxima are preserved only when the split does not divide their reduction.
     dynamic_is_local = (
-        quantizer._dynamic
-        and not quantizer.block_sizes
-        and retained != {0, 1}
-        and view.dim in retained
+        quantizer._dynamic and not blocks and retained != {0, 1} and view.dim in retained
     )
     if (
         not quantizer.is_mx_format
