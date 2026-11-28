@@ -44,6 +44,7 @@ def test_modelopt_torch_imports_without_hf_extra():
             "import torch",
             "import modelopt.torch",
             "import modelopt.torch.quantization as mtq",
+            "from modelopt.torch.distill.plugins.transformers import TransformersBypassAdapter",
             "model = torch.nn.Sequential(torch.nn.Linear(16, 16), torch.nn.ReLU())",
             "mtq.quantize(model, mtq.INT8_DEFAULT_CFG, lambda m: m(torch.randn(2, 16)))",
         ]

@@ -26,6 +26,15 @@ from torch import nn
 
 pytest.importorskip("transformers", minversion="5.23")
 
+from transformers import (
+    LlamaConfig,
+    LlamaForCausalLM,
+    Qwen3Config,
+    Qwen3ForCausalLM,
+    Qwen3MoeConfig,
+    Qwen3MoeForCausalLM,
+)
+
 import modelopt.torch.distill as mtd
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
@@ -33,7 +42,220 @@ from modelopt.torch.distill._bypass_capture import BypassUnit
 from modelopt.torch.distill.plugins.transformers import TransformersBypassAdapter
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.ggml.common import pinned_packed_weight
-from modelopt.torch.quantization.nn import TensorQuantizer
+from modelopt.torch.quantization.nn import QuantModuleRegistry, TensorQuantizer
+from modelopt.torch.quantization.plugins.huggingface import register_hf_attentions_on_the_fly
+
+
+@pytest.fixture
+def native_cp_models():
+    config = LlamaConfig(
+        vocab_size=32,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=8,
+        use_cache=False,
+    )
+    config._attn_implementation = "sdpa"
+    teacher = LlamaForCausalLM(config).to(torch.bfloat16).eval()
+    adapter = TransformersBypassAdapter()
+    adapter.student = copy.deepcopy(teacher)
+    return teacher, adapter
+
+
+def test_native_cp_reuses_owners_with_live_quantizers(native_cp_models, monkeypatch):
+    teacher, adapter = native_cp_models
+    batch = {"input_ids": torch.tensor([[1, 2, 3, 4]])}
+    adapter._cp_inputs(teacher, batch)
+    student = adapter.student
+    register_hf_attentions_on_the_fly(student)
+    attention = QuantModuleRegistry.convert(student.model.layers[0].self_attn)
+    for name in ("q", "k", "v", "p"):
+        getattr(attention, f"{name}_bmm_quantizer").disable()
+    attention.add_module(
+        "future_activation", TensorQuantizer(QuantizerAttributeConfig(type="dynamic", enable=False))
+    )
+    probability = attention.p_bmm_quantizer
+    probability.num_bits = (4, 3)
+    probability.block_sizes = None
+    probability.amax = torch.tensor(3.0)
+    scans = []
+
+    def observe(model):
+        original = model.named_modules
+
+        def named_modules(*args, **kwargs):
+            scans.append(model)
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(model, "named_modules", named_modules)
+
+    for model in (teacher, student):
+        observe(model)
+    for quantizer in (attention.future_activation, probability):
+        for enabled in (False, True, False):
+            quantizer.enable() if enabled else quantizer.disable()
+            for length in (3, 4):
+                document = {"input_ids": batch["input_ids"][:, :length]}
+                if enabled:
+                    with pytest.raises(ValueError):
+                        adapter._cp_inputs(teacher, document)
+                else:
+                    tokens, _ = adapter._cp_inputs(teacher, document)
+                    torch.testing.assert_close(tokens, document["input_ids"])
+    assert not scans
+
+
+@pytest.mark.parametrize("missing", ["one", "all"])
+def test_native_cp_requires_declared_decoder_attentions(native_cp_models, missing):
+    teacher, adapter = native_cp_models
+    if missing == "all":
+        teacher.model.layers = nn.ModuleList()
+    else:
+        del teacher.model.layers[0].self_attn
+    with pytest.raises(ValueError, match="self_attn"):
+        adapter._cp_inputs(teacher, {"input_ids": torch.tensor([[1, 2, 3]])})
+
+
+@pytest.mark.parametrize("validity", ["default", "all", "partial", "zero", "override"])
+def test_native_cp_preserves_effective_loss_validity(native_cp_models, validity):
+    teacher, adapter = native_cp_models
+    batch = {"input_ids": torch.tensor([[1, 2, 3, 4, 5, 6, 7]])}
+    if validity != "default":
+        batch["loss_mask"] = torch.tensor(
+            [[0, 0, 1, 1, 1, 1, 1]] if validity == "partial" else [[0] * 7]
+        )
+        if validity == "all":
+            batch["loss_mask"].fill_(1)
+        elif validity == "override":
+            batch["valid_mask"] = torch.ones_like(batch["input_ids"], dtype=torch.bool)
+    if validity in ("partial", "zero"):
+        with pytest.raises(ValueError):
+            adapter._cp_inputs(teacher, batch)
+    else:
+        tokens, positions = adapter._cp_inputs(teacher, batch)
+        torch.testing.assert_close(tokens, batch["input_ids"])
+        torch.testing.assert_close(positions, torch.arange(7).unsqueeze(0))
+
+
+@pytest.mark.parametrize("side", ["teacher", "student"])
+@pytest.mark.parametrize(
+    "state", ["active_p", "disabled_p", "calibration_p", "calibration_k", "kv_only"]
+)
+def test_native_cp_refuses_alternate_p_attention(native_cp_models, side, state):
+    teacher, adapter = native_cp_models
+    model = teacher if side == "teacher" else adapter.student
+    batch = {"input_ids": torch.tensor([[1, 2, 3, 4, 5, 6, 7]])}
+    original_attention_type = type(model.model.layers[0].self_attn)
+    with torch.no_grad():
+        expected = model(**batch).logits
+    register_hf_attentions_on_the_fly(model)
+    attention = QuantModuleRegistry.convert(model.model.layers[0].self_attn)
+    for name in ("q", "k", "v", "p"):
+        getattr(attention, f"{name}_bmm_quantizer").disable()
+    with torch.no_grad():
+        torch.testing.assert_close(model(**batch).logits, expected, rtol=0, atol=0)
+    assert original_attention_type in type(attention).__mro__
+    quantizer = attention.k_bmm_quantizer if state == "calibration_k" else attention.p_bmm_quantizer
+    quantizer.num_bits = (4, 3)
+    quantizer.block_sizes = None
+    quantizer.amax = torch.tensor(3.0)
+    if state not in ("disabled_p", "kv_only"):
+        quantizer.enable()
+        if state != "calibration_k":
+            assert attention._p_qdq_mode() == "fp8"
+        if state in ("calibration_p", "calibration_k"):
+            quantizer.disable_quant()
+            quantizer.enable_calib()
+    elif state == "kv_only":
+        for name in ("k", "v"):
+            kv = getattr(attention, f"{name}_bmm_quantizer")
+            kv.num_bits = (4, 3)
+            kv.block_sizes = None
+            kv.amax = torch.tensor(3.0)
+            kv.enable()
+    if state in ("active_p", "calibration_p", "calibration_k"):
+        assert quantizer.is_enabled
+        with pytest.raises(ValueError):
+            adapter._cp_inputs(teacher, batch)
+    else:
+        tokens, positions = adapter._cp_inputs(teacher, batch)
+        torch.testing.assert_close(tokens, batch["input_ids"])
+        torch.testing.assert_close(positions, torch.arange(7).unsqueeze(0))
+
+
+@pytest.mark.parametrize("side", ["teacher", "student"])
+@pytest.mark.parametrize(
+    ("family", "attention"),
+    [
+        ("llama", "default"),
+        ("llama", "dynamic"),
+        ("llama", "longrope"),
+        ("qwen3", "default"),
+        ("qwen3", "sliding"),
+        ("qwen3", "bidirectional_config"),
+        ("qwen3", "bidirectional_attention"),
+        ("qwen3_moe", "default"),
+        ("qwen3_moe", "sliding"),
+    ],
+)
+def test_native_cp_refuses_document_dependent_attention(family, attention, side):
+    config_cls, model_cls = {
+        "llama": (LlamaConfig, LlamaForCausalLM),
+        "qwen3": (Qwen3Config, Qwen3ForCausalLM),
+        "qwen3_moe": (Qwen3MoeConfig, Qwen3MoeForCausalLM),
+    }[family]
+    kwargs = {
+        "vocab_size": 32,
+        "hidden_size": 16,
+        "intermediate_size": 32,
+        "num_hidden_layers": 1,
+        "num_attention_heads": 2,
+        "num_key_value_heads": 1,
+        "head_dim": 8,
+        "max_position_embeddings": 4,
+        "use_cache": False,
+    }
+    if family == "qwen3_moe":
+        kwargs.update(moe_intermediate_size=16, num_experts=2, num_experts_per_tok=1)
+    policy = {}
+    if attention == "dynamic":
+        policy["rope_parameters"] = {"rope_type": "dynamic", "factor": 2.0}
+    elif attention == "longrope":
+        policy["rope_parameters"] = {
+            "rope_type": "longrope",
+            "factor": 2.0,
+            "original_max_position_embeddings": 4,
+            "short_factor": [1.0] * 4,
+            "long_factor": [2.0] * 4,
+        }
+    elif attention == "sliding":
+        # Let HF realize the layer policy, including Qwen3's max_window_layers rule.
+        policy.update(use_sliding_window=True, sliding_window=2)
+        if family == "qwen3":
+            policy["max_window_layers"] = 0
+    teacher_config = config_cls(**kwargs, **(policy if side == "teacher" else {}))
+    student_config = config_cls(**kwargs, **(policy if side == "student" else {}))
+    for config in (teacher_config, student_config):
+        config._attn_implementation = "sdpa"
+    teacher = model_cls(teacher_config).to(torch.bfloat16).eval()
+    adapter = TransformersBypassAdapter()
+    adapter.student = model_cls(student_config).to(torch.bfloat16).eval()
+    target = teacher if side == "teacher" else adapter.student
+    if attention == "bidirectional_config":
+        target.config.is_causal = False
+    elif attention == "bidirectional_attention":
+        target.model.layers[0].self_attn.is_causal = False
+    batch = {"input_ids": torch.tensor([[1, 2, 3, 4, 5, 6, 7, 8]])}
+    if attention != "default":
+        with pytest.raises(ValueError):
+            adapter._cp_inputs(teacher, batch)
+    else:
+        tokens, positions = adapter._cp_inputs(teacher, batch)
+        torch.testing.assert_close(tokens, batch["input_ids"])
+        torch.testing.assert_close(positions, torch.arange(8).unsqueeze(0))
 
 
 def test_teacher_replay_caches_model_scans_without_changing_targets():

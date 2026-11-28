@@ -62,12 +62,27 @@ def _model_spec(model):
     return BypassSpec()
 
 
+def _document_dependent_positions(model):
+    config = getattr(model, "config", None)
+    getter = getattr(config, "get_text_config", None)
+    config = getter() if callable(getter) else config
+    pending = [getattr(config, name, None) for name in ("rope_scaling", "rope_parameters")]
+    while pending:
+        value = pending.pop()
+        if isinstance(value, dict):
+            if value.get("rope_type", value.get("type")) in ("dynamic", "longrope"):
+                return True
+            pending.extend(value.values())
+    return False
+
+
 @dataclass(frozen=True)
 class _ReplayFacts:
     spec: BypassSpec
     modules: tuple[weakref.ReferenceType[nn.Module], ...]
     head_ref: weakref.ReferenceType[nn.Module] | None
     head_paths: tuple[str, ...]
+    attentions: tuple[weakref.ReferenceType[nn.Module], ...] = ()
 
     @property
     def head(self):
@@ -92,6 +107,7 @@ class TransformersBypassAdapter(ModuleBypassAdapter):
                 else torch_mesh_context(device_mesh)
             )
         self.student = None
+        self._native_context = False
         self._providers = weakref.WeakKeyDictionary()
         self._model_facts = weakref.WeakKeyDictionary()
 
@@ -107,11 +123,23 @@ class TransformersBypassAdapter(ModuleBypassAdapter):
         facts = self._model_facts.get(model)
         if facts is None or facts.head is not head:
             modules = tuple(model.named_modules())
+            spec, attentions = _model_spec(model), ()
+            if spec.causal_context_parallel:
+                try:
+                    layers = self._decoder_layers(model)
+                except ValueError:
+                    pass
+                else:
+                    blocks = layers.values() if isinstance(layers, nn.ModuleDict) else layers
+                    children = tuple(block._modules.get("self_attn") for block in blocks)
+                    if children and all(isinstance(child, nn.Module) for child in children):
+                        attentions = tuple(weakref.ref(child) for child in children)
             facts = _ReplayFacts(
-                _model_spec(model),
+                spec,
                 tuple(weakref.ref(child) for _, child in modules),
                 None if head is None else weakref.ref(head),
                 tuple(name for name, child in modules if child is head),
+                attentions,
             )
             self._model_facts[model] = facts
         return facts
@@ -609,17 +637,7 @@ class TransformersBypassAdapter(ModuleBypassAdapter):
             for identity, quantizer in quantizers.items()
         ):
             return False
-        config = getattr(model, "config", None)
-        getter = getattr(config, "get_text_config", None)
-        config = getter() if callable(getter) else config
-        pending = [getattr(config, name, None) for name in ("rope_scaling", "rope_parameters")]
-        while pending:
-            value = pending.pop()
-            if isinstance(value, dict):
-                if value.get("rope_type", value.get("type")) in ("dynamic", "longrope"):
-                    return False
-                pending.extend(value.values())
-        return True
+        return not _document_dependent_positions(model)
 
     def forward_teacher(self, teacher, args, kwargs):
         """Run the native text task, retaining outer hooks for wrapped text models."""
@@ -643,19 +661,163 @@ class TransformersBypassAdapter(ModuleBypassAdapter):
 
         _synchronize_error(self.context, error)
 
+    def _cp_inputs(self, teacher, batch):
+        # Generic adapter imports must remain usable without the optional HF extra.
+        from modelopt.torch.quantization.plugins import huggingface as hf_quantization
+        from modelopt.torch.quantization.repair_partition import requires_full_context_activations
+
+        models = [model for model in (teacher, self.student) if model is not None]
+        for model in models:
+            facts = self._facts(model)
+            if not facts.attentions or any(reference() is None for reference in facts.attentions):
+                raise ValueError(
+                    "Native CP requires self_attn on every declared text decoder block"
+                )
+            owners = tuple(
+                module for reference in facts.modules if (module := reference()) is not None
+            )
+            config = model.config.get_text_config()
+            if (
+                not facts.spec.causal_context_parallel
+                or not model.supports_context_parallel
+                or config._attn_implementation != "sdpa"
+                or not getattr(config, "is_causal", True)
+                or any(
+                    not getattr(reference(), "is_causal", True) for reference in facts.attentions
+                )
+                or next(
+                    parameter for module in owners for parameter in module.parameters(recurse=False)
+                ).dtype
+                not in (torch.float16, torch.bfloat16)
+                or requires_full_context_activations(model, modules=owners)
+                or _document_dependent_positions(model)
+                # Fused P-QDQ attention bypasses the SDPA interface intercepted by native CP.
+                or any(
+                    isinstance(module, hf_quantization._QuantAttention)
+                    and module.p_bmm_quantizer.is_enabled
+                    and module.p_bmm_quantizer._if_quant
+                    and (
+                        module._p_qdq_mode() is not None
+                        or module.use_kitchen
+                        or (
+                            getattr(hf_quantization, "kitchen", None) is not None
+                            and module.kitchen_attn_fn is None
+                        )
+                    )
+                    for reference in facts.attentions
+                    if (module := reference()) is not None
+                )
+            ):
+                raise ValueError("This model requires faithful full-context execution")
+        supported = {
+            "input_ids",
+            "attention_mask",
+            "position_ids",
+            "valid_mask",
+            "_packed_seq_ids",
+            "use_cache",
+            "labels",
+            "loss_mask",
+            "sample_ids",
+            "document_ids",
+        }
+        if any(key not in supported and value is not None for key, value in batch.items()):
+            raise ValueError("Native CP cannot discard model-specific inputs")
+        tokens = batch["input_ids"]
+        if tokens.ndim != 2:
+            raise ValueError("Native CP needs [batch, sequence] tokens")
+        positions = batch.get("position_ids")
+        for name in ("attention_mask", "valid_mask", "_packed_seq_ids"):
+            value = batch.get(name)
+            if value is not None and (value.shape != tokens.shape or not bool(value.eq(1).all())):
+                raise ValueError("Native CP requires unpadded single-document causal rows")
+        if batch.get("loss_mask") is not None:
+            validity = _valid_token_mask(batch)
+            if validity.shape != tokens.shape or not bool(validity.all()):
+                raise ValueError("Native CP requires all-valid loss tokens")
+        if positions is not None and (
+            positions.shape != tokens.shape
+            or bool((positions[:, 1:] - positions[:, :-1] != 1).any())
+        ):
+            raise ValueError("Native CP cannot discard position resets or mRoPE axes")
+        if positions is None:
+            positions = torch.arange(tokens.shape[1], device=tokens.device).expand_as(tokens)
+        return tokens, positions
+
+    @staticmethod
+    def _causal_attention(module, args, kwargs):
+        return args, {**kwargs, "attention_mask": None, "is_causal": True}
+
     def _document_teacher(self, teacher, units, document, consume):
-        prepared, error = None, None
-        try:
-            prepared = {
-                **self.prepare_batch(teacher, document),
-                "valid_mask": _valid_token_mask(document),
-            }
-        except Exception as exc:
-            if self.context is None or self.context.device_mesh.size() == 1:
-                raise
-            error = f"{type(exc).__name__}: {exc}"
-        self._synchronize_error(error)
-        return super().teacher_microbatch(teacher, units, prepared, consume)
+        from ..._bypass_parallel import _all_rank_max, _size
+        from .context_parallel import (
+            CPSequenceLayout,
+            _native_attention_api,
+            _NativeCPUnavailableError,
+        )
+
+        cp = None if self.context is None else self.context.context_mesh
+        native, inputs, error = False, None, None
+        if _size(cp) > 1:
+            try:
+                _native_attention_api()
+                inputs = self._cp_inputs(teacher, document)
+                native = True
+            except (ValueError, _NativeCPUnavailableError):
+                pass
+            except Exception as exc:
+                if self.context.device_mesh.size() == 1:
+                    raise
+                error = f"{type(exc).__name__}: {exc}"
+            failed, replicated = _all_rank_max(self.context, [int(error is not None), -int(native)])
+            if failed:
+                self._synchronize_error(error)
+            native = replicated == -1
+        if not native:
+            prepared, error = None, None
+            try:
+                prepared = {
+                    **self.prepare_batch(teacher, document),
+                    "valid_mask": _valid_token_mask(document),
+                }
+            except Exception as exc:
+                if self.context is None or self.context.device_mesh.size() == 1:
+                    raise
+                error = f"{type(exc).__name__}: {exc}"
+            self._synchronize_error(error)
+            return super().teacher_microbatch(teacher, units, prepared, consume)
+        assert inputs is not None
+        tokens, positions = inputs
+        with ExitStack() as stack:
+            error = None
+            try:
+                layout = CPSequenceLayout(cp, tokens.shape[1], device=tokens.device)
+                batch = {
+                    "input_ids": layout.shard(tokens, 1),
+                    "position_ids": layout.shard(positions, 1),
+                    "valid_mask": layout.shard(torch.ones_like(tokens, dtype=torch.bool), 1),
+                }
+                # Head-tail positions contain gaps that HF otherwise mistakes for
+                # packed documents, allocating a dense mask before native CP discards it.
+                batch["attention_mask"] = torch.ones_like(batch["input_ids"], dtype=torch.bool)
+                for model in (teacher, self.student):
+                    if model is not None:
+                        for reference in self._facts(model).attentions:
+                            handle = reference().register_forward_pre_hook(
+                                self._causal_attention, with_kwargs=True
+                            )
+                            stack.callback(handle.remove)
+                stack.enter_context(layout.attention())
+            except Exception as exc:
+                if self.context.device_mesh.size() == 1:
+                    raise
+                error = f"{type(exc).__name__}: {exc}"
+            self._synchronize_error(error)
+            self._native_context = True
+            try:
+                return super().teacher_microbatch(teacher, units, batch, consume)
+            finally:
+                self._native_context = False
 
     def teacher_microbatch(self, teacher, units, batch, consume):
         """Keep document recurrence faithful and match every rank's forward schedule."""
