@@ -61,7 +61,7 @@ from .config import QuantizeAlgoCfgType
 from .kv_cache_auto_quant import (
     _KV_QUANTIZER_ATTRS,
     AutoQuantizeKVSearcher,
-    _has_dtensors_outside_experts,
+    _has_tensor_parallel_dtensors,
     _validate_parallel_state,
     get_kv_cache_auto_quantize_config,
 )
@@ -791,12 +791,13 @@ def _auto_quantize_kv_cache(
     plan = dist.recorded_distribution_plan(model)
     ep_mesh = expert_parallel_mesh(model) if plan is not None and plan.is_expert_parallel else None
     # From transformers 5.16 the expert-parallel load leaves the routed experts' weights DTensors:
-    # only theirs and FSDP2's own are exempt, so a dense layer a caller shards with tensor
-    # parallelism stays refused. Without expert parallelism an FSDP2 model is exempt whole, as on main.
+    # only theirs, on the layout the load gives them, and FSDP2's own are exempt, so a dense layer
+    # a caller shards with tensor parallelism stays refused, as does an expert resharded on another
+    # axis. Without expert parallelism an FSDP2 model is exempt whole, as on main.
     if (
         dist.size() > 1
         and (ep_mesh is not None or not dist.is_fsdp2_model(model))
-        and _has_dtensors_outside_experts(model)
+        and _has_tensor_parallel_dtensors(model)
     ):
         raise NotImplementedError(
             "Distributed KV-cache AutoQuantize supports DP/FSDP2 and EP, not TP."
@@ -1218,8 +1219,10 @@ def auto_quantize(
         :func:`~modelopt.torch.utils.plugins.model_load_utils.load_pretrained` loads one -- every
         rank calls ``auto_quantize`` on its own share of the data, and must run the same number of
         calibration and scoring batches. The scores are summed over the ranks, so every rank
-        picks the same formats: those one process scoring all their data would pick, except where
-        the order of the floating-point sums tips a near tie.
+        picks the same formats: those one process would pick scoring every rank's batches as they
+        are, with the same loss, except where the order of the floating-point sums tips a near tie.
+        A process that batches the data otherwise can pick other formats, e.g. under a loss
+        averaged over each batch's tokens.
 
     .. note::
 
@@ -1373,9 +1376,10 @@ def auto_quantize(
     finally:
         model_calib._ENABLE_FOLDING_PQS_TO_WEIGHTS = folding_pqs_to_weights
 
-    # The rank that wrote a checkpoint marks its file, not the search's result, alike on every rank.
+    # The rank that wrote a checkpoint and the search's ID mark its files, not the search's result.
     search_state = searcher.state_dict()
     search_state.pop("checkpoint_rank", None)
+    search_state.pop("search_id", None)
     return model, search_state
 
 

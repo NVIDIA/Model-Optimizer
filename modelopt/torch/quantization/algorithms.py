@@ -21,6 +21,7 @@ import functools
 import gc
 import numbers
 import types
+import uuid
 import warnings
 from abc import ABC, abstractmethod
 from collections import defaultdict
@@ -44,6 +45,7 @@ from modelopt.torch.utils.distributed import (
     DistributedProcessGroup,
     ParallelState,
     all_reduce,
+    broadcast_from,
     is_distributed_run,
     is_master,
     rank,
@@ -788,6 +790,36 @@ class QuantRecipeHparam(Hparam):
             total_score += importance.item()
         return total_score
 
+    def weight_numels(self) -> list[tuple[ParallelState | None, dict[tuple, int]]]:
+        """Each quant module's parallel state, and its weights' sizes by the groups to sum them over.
+
+        A plain tensor is this rank's shard over the TP and EP groups, and a DTensor is whole over its
+        mesh, as for the routed experts transformers shards expert-parallel: a weight is summed over
+        the TP and EP groups its mesh leaves out. Makes no collective call.
+        """
+        numels_by_module = []
+        for quant_module in self.quant_modules:
+            parallel_state = getattr(quant_module, "parallel_state", None)
+            groups = (
+                ()
+                if parallel_state is None
+                else (
+                    parallel_state.tensor_parallel_group,
+                    parallel_state.expert_model_parallel_group,
+                )
+            )
+            numels: dict[tuple, int] = {}
+            if _AutoQuantizeBaseSearcher._is_auto_quantize_module(quant_module):
+                for weight in _get_module_weights(quant_module):
+                    summed_over = tuple(
+                        group
+                        for group in groups
+                        if group.is_initialized() and not _mesh_spans(weight, group)
+                    )
+                    numels[summed_over] = numels.get(summed_over, 0) + weight.numel()
+            numels_by_module.append((parallel_state, numels))
+        return numels_by_module
+
     def get_cost(self, recipe: QuantRecipe, cost_weight: float | None = None) -> float:
         """Get the cost for a given recipe.
 
@@ -796,45 +828,20 @@ class QuantRecipeHparam(Hparam):
         """
         cost_weight = self.cost_weight if cost_weight is None else cost_weight
         cost = 0
-        for quant_module in self.quant_modules:
-            weights = (
-                _get_module_weights(quant_module)
-                if _AutoQuantizeBaseSearcher._is_auto_quantize_module(quant_module)
-                else []
-            )
-            parallel_state = getattr(quant_module, "parallel_state", None)
-
-            if parallel_state is None:
-                cost += sum(w.numel() for w in weights) * cost_weight * recipe.compression
-                continue
-
-            # A plain tensor is this rank's shard over the TP and EP groups, and a DTensor is whole
-            # over its mesh, as for the routed experts transformers shards expert-parallel: a weight
-            # is summed over the TP and EP groups its mesh leaves out.
-            numels: dict[tuple, int] = {}
-            for weight in weights:
-                groups = tuple(
-                    group
-                    for group in (
-                        parallel_state.tensor_parallel_group,
-                        parallel_state.expert_model_parallel_group,
-                    )
-                    if group.is_initialized() and not _mesh_spans(weight, group)
-                )
-                numels[groups] = numels.get(groups, 0) + weight.numel()
+        for parallel_state, numels in self.weight_numels():
             weight_size = sum(
                 DistributedProcessGroup.get_dist_syncd_obj(numel * cost_weight, list(groups), sum)
                 if groups
                 else numel * cost_weight
                 for groups, numel in numels.items()
             )
-
-            # Across data parallel groups, the weight size is the same for all the ranks.
-            weight_size = DistributedProcessGroup.get_dist_syncd_obj(
-                weight_size,
-                [parallel_state.data_parallel_group],
-                lambda a: a[0],
-            )
+            if parallel_state is not None:
+                # Across data parallel groups, the weight size is the same for all the ranks.
+                weight_size = DistributedProcessGroup.get_dist_syncd_obj(
+                    weight_size,
+                    [parallel_state.data_parallel_group],
+                    lambda a: a[0],
+                )
             cost += weight_size * recipe.compression
 
         return cost
@@ -1023,6 +1030,8 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             # rank's own, an expert-parallel rank's those of its own experts.
             "checkpoint_rank": None,
             "distribution_plan": None,
+            # Common to the files of every rank of one search, which calibrated and scored together.
+            "search_id": None,
             "best": {"recipe": {}, "constraints": {}, "score": float("inf"), "is_satisfied": False},
         }
 
@@ -1736,6 +1745,15 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         self.cost_denominator = getattr(self, "cost_denominator", None)
         self.checkpoint_rank = rank()
         self.distribution_plan = plan
+        # Rank and plan say whose shard a file holds, not which search calibrated it. A resume keeps
+        # the ID every rank restored alike (checked in validate_search_input); a new search, or one
+        # resumed from files saved without an ID, takes rank 0's.
+        if self.search_id is None:
+            self.search_id = (
+                broadcast_from("AutoQuantize search ID", lambda: uuid.uuid4().hex)
+                if is_distributed_run()
+                else uuid.uuid4().hex
+            )
 
         module_search_spaces = self._normalize_module_search_spaces(
             self.config["module_search_spaces"]
@@ -1805,6 +1823,15 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                 "checkpoint path."
             )
         self.resolved_search_setup_signature = resolved_search_setup_signature
+        if is_distributed_run():
+
+            def check_weight_layouts() -> None:
+                for hparam in quant_recipe_hparams:
+                    hparam.weight_numels()  # raises on a layout the cost cannot sum
+
+            # A layout the cost refuses on some ranks alone would leave the others in its sums: every
+            # rank checks its own in one collective first, so all of them raise.
+            all_reduce("AutoQuantize weight layouts", check_weight_layouts, lambda _: None)
         self._verify_resolved_constraint(quant_recipe_hparams)
 
         format_shard = self.config["format_shard"]

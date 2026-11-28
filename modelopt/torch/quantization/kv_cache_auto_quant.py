@@ -27,7 +27,7 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.distributed.tensor import DTensor
+from torch.distributed.tensor import DTensor, Shard
 from tqdm import tqdm
 
 from modelopt.torch.opt.hparam import Hparam
@@ -635,15 +635,27 @@ def _expert_quantizer_names(model: nn.Module) -> set[str]:
     }
 
 
-def _has_dtensors_outside_experts(model: nn.Module) -> bool:
-    """Whether a DTensor is neither a routed expert's nor FSDP2's alone: tensor parallelism's."""
-    experts = _expert_module_names(model)
-    fsdp2_alone = _fsdp2_sharded_alone(model)
+def _has_tensor_parallel_dtensors(model: nn.Module) -> bool:
+    """Whether a DTensor is neither FSDP2's alone nor a routed expert's laid out expert-parallel.
+
+    The expert-parallel load shards a routed expert's weights on their first dim, the experts', over
+    its module's expert-parallel group alone: the axis the all-to-all forward reads them along.
+    """
+    exempt = _fsdp2_sharded_alone(model)
+    for name in _expert_module_names(model):
+        experts = model.get_submodule(name)
+        group = experts._parallel_state.expert_model_parallel_group.group
+        ranks = dist.get_process_group_ranks(group or dist.group.WORLD)
+        exempt.update(
+            id(tensor)
+            for tensor in (*experts.parameters(), *experts.buffers())
+            if isinstance(tensor, DTensor)
+            and tensor.placements == (Shard(0),)
+            and tensor.device_mesh.mesh.flatten().tolist() == ranks
+        )
     return any(
-        isinstance(tensor, DTensor)
-        and not _is_under(name, experts)
-        and id(tensor) not in fsdp2_alone
-        for name, tensor in (*model.named_parameters(), *model.named_buffers())
+        isinstance(tensor, DTensor) and id(tensor) not in exempt
+        for tensor in (*model.parameters(), *model.buffers())
     )
 
 
@@ -810,6 +822,10 @@ class AutoQuantizeKVSearcher(BaseSearcher):
     def _validate_distributed_state(self, signature: dict[str, Any]) -> None:
         if size() == 1:
             return
+        # Unlike the weight search's, a rank's checkpoint is not tied to its rank or the distribution
+        # plan: the K/V scales and scores in it are reduced over the ranks, alike on every rank, and
+        # each rank checks the quantizers before them, its experts' included, against its own model.
+        # The world size, which shards the data, must match.
         signature["distributed_world_size"] = size()
         # Each rank of an expert-parallel model holds only its own experts' quantizers: those must
         # match across the ranks holding the same experts, and everything else across every rank.
