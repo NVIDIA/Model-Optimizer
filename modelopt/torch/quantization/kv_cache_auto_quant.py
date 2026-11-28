@@ -44,7 +44,7 @@ from ._auto_quantize_cost import (
 from .config import QuantizeConfig, QuantizerAttributeConfig
 from .conversion import set_quantizer_by_cfg
 from .nn import TensorQuantizer
-from .utils.core_utils import _fsdp2_sharded_alone
+from .utils.core_utils import _fsdp2_sharded_alone, _group_ranks
 
 __all__ = ["AutoQuantizeKVSearcher"]
 
@@ -644,8 +644,7 @@ def _has_tensor_parallel_dtensors(model: nn.Module) -> bool:
     exempt = _fsdp2_sharded_alone(model)
     for name in _expert_module_names(model):
         experts = model.get_submodule(name)
-        group = experts._parallel_state.expert_model_parallel_group.group
-        ranks = dist.get_process_group_ranks(group or dist.group.WORLD)
+        ranks = _group_ranks(experts._parallel_state.expert_model_parallel_group)
         exempt.update(
             id(tensor)
             for tensor in (*experts.parameters(), *experts.buffers())

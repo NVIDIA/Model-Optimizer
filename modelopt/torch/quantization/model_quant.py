@@ -71,7 +71,7 @@ from .mode import QuantizeModeRegistry, _rank_local_calibrations, get_modelike_f
 from .nn import AnyQuantizer, QuantModule, SequentialQuantizer, TensorQuantizer
 from .qtensor import QTensorWrapper
 from .utils import is_quantized, weight_attr_names
-from .utils.core_utils import _get_fsdp2_mesh
+from .utils.core_utils import _get_fsdp2_mesh, _group_ranks
 from .utils.weight_cache import _suspend_weight_cache
 
 __all__ = [
@@ -89,13 +89,6 @@ __all__ = [
     "quantize",
     "temporarily_fold_weights",
 ]
-
-
-def _group_ranks(group: dist.DistributedProcessGroup) -> list[int]:
-    """The ranks ``group`` spans, in its rank order; just this rank for a group not set."""
-    if not group.is_initialized():
-        return [dist.rank()]
-    return torch.distributed.get_process_group_ranks(group.group or torch.distributed.group.WORLD)
 
 
 def _names_the_experts_groups(
@@ -1162,7 +1155,11 @@ def auto_quantize(
             :mod:`modelopt.torch.quantization._auto_quantize_shapley`.
         checkpoint: (Optional) Path to checkpoint file for saving/restoring auto_quantize search state.
             If the checkpoint file exists, the search state will be restored from it, skipping the
-            expensive score estimation step.
+            expensive score estimation step. On several ranks each rank saves and restores a file
+            of its own, which a resume needs at the same world size (for the weight search also
+            from the same rank and distribution plan), or every rank refuses it. One process
+            refuses a weight search's file that a run of several ranks wrote: pass its search state
+            to :func:`get_auto_quantize_config` to re-solve its scores.
         module_search_spaces: Optional module-specific candidate overrides. Each entry contains
             ``module_name_patterns`` (one or more glob patterns), ``quantization_formats``, and
             optional ``allow_no_quant`` (default True). A matching entry replaces the global
@@ -1367,7 +1364,7 @@ def auto_quantize(
     # already-sanitized config inside search(), which is a no-op.
     search_config = searcher.sanitize_search_config(search_config)
     search_constraints = cast("ConstraintsDict", constraints or {})
-    searcher.validate_search_input(search_constraints, search_config)
+    searcher.validate_search_input(search_constraints, search_config, model)
 
     # A weight-rewriting candidate's refusals need the converted quantizers to tell which weights it
     # rewrites, as does a format shard's check of its count against the searched formats. A failure

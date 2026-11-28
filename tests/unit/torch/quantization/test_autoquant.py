@@ -44,7 +44,6 @@ from modelopt.torch.quantization.algorithms import (
     AutoQuantizeGradientSearcher,
     QuantRecipe,
     QuantRecipeHparam,
-    _AutoQuantizeBaseSearcher,
     _AutoQuantizeGradientScoringSession,
     _get_kl_div_loss,
     _get_log_prob,
@@ -1495,6 +1494,11 @@ def _test_expert_parallel_auto_quantize(rank, size, methods):
             lambda model, batch: model(**batch).logits,
             {"effective_bits": 7.0},
         ),
+        "kl_div_weights": (
+            {"quantization_formats": formats, "method": "kl_div"},
+            lambda model, batch: model(**batch).logits,
+            {"effective_bits": 6.0},
+        ),
         "kl_div": _kv_cache_search(),
     }
 
@@ -1507,8 +1511,7 @@ def _test_expert_parallel_auto_quantize(rank, size, methods):
             forward_step=forward_step,
             num_calib_steps=len(data_loader),
             num_score_steps=len(data_loader),
-            method=method,
-            **search,
+            **{"method": method, **search},
         )[1]
 
     # One process scoring every rank's batches, one per step as the ranks do: its groups unset.
@@ -1543,28 +1546,42 @@ def _test_expert_parallel_auto_quantize(rank, size, methods):
         for name, stat in reference_state["candidate_stats"].items():
             assert state["candidate_stats"][name]["formats"] == stat["formats"], name
             assert state["candidate_stats"][name]["costs"] == stat["costs"], name
-            # Summed in another order; the damage fit of aumann_shapley amplifies that to ~1e-3.
+            # Summed in another order; the damage fit of aumann_shapley amplifies that to ~1e-3, and
+            # an INT8 weight's KL of ~1e-6 is at the float32 noise of the logits it compares.
             torch.testing.assert_close(
                 torch.tensor(state["candidate_stats"][name]["scores"]),
                 torch.tensor(stat["scores"]),
                 rtol=1e-2,
-                atol=0,
+                atol=1e-6 if method == "kl_div_weights" else 0,
             )
 
 
 @pytest.mark.parametrize(
     "methods",
-    [("gradient", "kl_div"), ("aumann_shapley",), ("kl_div",), ("quantize", "kl_div")],
-    ids=["gradient_then_kv_cache", "aumann_shapley", "kv_cache", "quantize_then_kv_cache"],
+    [
+        ("gradient", "kl_div"),
+        ("kl_div_weights",),
+        ("aumann_shapley",),
+        ("kl_div",),
+        ("quantize", "kl_div"),
+    ],
+    ids=[
+        "gradient_then_kv_cache",
+        "kl_div",
+        "aumann_shapley",
+        "kv_cache",
+        "quantize_then_kv_cache",
+    ],
 )
 def test_expert_parallel_auto_quantize_picks_one_processes_formats(cpu_dist_workers, methods):
     """Each rank scores its own batches through the experts it holds, sharded as transformers'
     expert-parallel load leaves them: DTensors over every rank, behind the all-to-all forwards that
     quantizer insertion drops. The search gives the costs, scores and formats of one process scoring
-    every rank's batches -- with aumann_shapley over the experts alone, whose groups hold no rank's
-    whole data. So does the KV-cache search, on the model as it loads, after a weight search, where
-    each rank holds the weight quantizers of its own experts alone, and after mtq.quantize without a
-    forward loop, which leaves the experts' forwards dropped."""
+    every rank's batches, by gradient or KL divergence -- and with aumann_shapley over the experts
+    alone, whose groups hold no rank's whole data. So does the KV-cache search, on the model as it
+    loads, after a weight search, where each rank holds the weight quantizers of its own experts
+    alone, and after mtq.quantize without a forward loop, which leaves the experts' forwards
+    dropped."""
     transformers = pytest.importorskip("transformers")
     if Version(transformers.__version__) < Version("5.16"):
         pytest.skip("transformers' expert-parallel load shards the experts as DTensors from 5.16")
@@ -1757,8 +1774,8 @@ def _test_expert_parallel_weight_search_resumes(rank, size, directory, files):
         input_ids = torch.randint(0, 64, (2, 8), generator=gen)
         batches.append({"input_ids": input_ids, "labels": input_ids})
 
-    def search():
-        model = _sharded_like_the_expert_parallel_load(_tiny_qwen3_moe("torch_a2a"), size)
+    def search(model=None):
+        model = model or _sharded_like_the_expert_parallel_load(_tiny_qwen3_moe("torch_a2a"), size)
         return _weight_search(model, batches[rank::size], directory)
 
     searched = search()
@@ -1769,18 +1786,25 @@ def _test_expert_parallel_weight_search_resumes(rank, size, directory, files):
         first.rename(spare)
         second.rename(first)
         spare.rename(second)
+    if files == "other_plan":  # as one with another expert-parallel degree or dense layout records
+        path = directory / f"rank{rank}.pth"
+        safe_save({**safe_load(path), "distribution_plan": repr(DistributionPlan(size))}, path)
     # Each rank's file holds its own experts' quantizer states, and the same scores and costs.
     with bounded_collectives():
-        if files == "swapped":  # the scores agree, but each rank would take the other's experts
-            with pytest.raises(ValueError, match="written by rank"):
-                search()
+        if files in ("swapped", "other_plan"):  # the scores agree, but not whose experts they hold
+            model = _sharded_like_the_expert_parallel_load(_tiny_qwen3_moe("torch_a2a"), size)
+            match = "written by rank" if files == "swapped" else "written under"
+            with pytest.raises(ValueError, match=match):
+                search(model)
+            # Refused before converting the model, which the caller can still search afresh.
+            assert not any(isinstance(module, TensorQuantizer) for module in model.modules())
             return
         resumed = search()
     assert resumed["best"]["recipe"] == searched["best"]["recipe"]
     assert resumed["candidate_stats"] == searched["candidate_stats"]
 
 
-@pytest.mark.parametrize("files", ["own", "swapped", "in_one_process"])
+@pytest.mark.parametrize("files", ["own", "swapped", "other_plan", "in_one_process"])
 def test_expert_parallel_weight_search_resumes_from_its_checkpoint(
     cpu_dist_workers, tmp_path, files
 ):
@@ -2180,20 +2204,11 @@ def test_gradient_scoring_restores_forward_attribute_layout(instance_override):
         assert "forward" not in module.__dict__
 
 
-def test_auto_quantize_budget_uses_no_quant_candidate_cost(monkeypatch):
+def test_auto_quantize_budget_uses_no_quant_candidate_cost():
     class _BudgetCaptureSearcher(AutoQuantizeGradientSearcher):
         def run_search_with_stats(self, max_weight_size, verbose=False):
             self.max_weight_size = max_weight_size
             return {}, True
-
-    def _raise_local_total_weight_size(modules):
-        pytest.fail("run_search should derive total weight size from candidate costs")
-
-    monkeypatch.setattr(
-        _AutoQuantizeBaseSearcher,
-        "_get_total_weight_size",
-        staticmethod(_raise_local_total_weight_size),
-    )
 
     searcher = _BudgetCaptureSearcher()
     searcher.reset_search()

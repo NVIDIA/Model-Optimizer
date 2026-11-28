@@ -31,6 +31,7 @@ from torch.distributed.fsdp import FSDPModule, MixedPrecisionPolicy, fully_shard
 from torch.distributed.fsdp._fully_shard._fsdp_param import FSDPParam
 from torch.distributed.tensor import DTensor, Replicate
 
+import modelopt.torch.utils.distributed as dist
 from modelopt.torch.quantization.config import QuantizerCfgEntry
 from modelopt.torch.utils import get_unwrapped_name, print_rank_0
 from modelopt.torch.utils.network import temporarily_remove_accelerate_hook
@@ -580,6 +581,13 @@ def _fsdp2_state_params(fsdp_param) -> Iterator[nn.Parameter]:
     ):
         if state_param is not None:
             yield state_param
+
+
+def _group_ranks(group: dist.DistributedProcessGroup) -> list[int]:
+    """The ranks ``group`` spans, in its rank order; just this rank for a group not set."""
+    if not group.is_initialized():
+        return [dist.rank()]
+    return torch.distributed.get_process_group_ranks(group.group or torch.distributed.group.WORLD)
 
 
 def _fsdp2_sharded_alone(module: nn.Module) -> set[int]:

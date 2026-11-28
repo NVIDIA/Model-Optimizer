@@ -444,10 +444,10 @@ class AutoQuantizeAumannShapleySearcher(_AutoQuantizeBackwardScoringSearcher):
             )
         return config
 
-    def validate_search_input(self, constraints, config) -> None:
+    def validate_search_input(self, constraints, config, model=None) -> None:
         """Reject ambiguous target combinations (runs before any model mutation)."""
         self._check_targets(constraints, config)
-        super().validate_search_input(constraints, config)
+        super().validate_search_input(constraints, config, model)
 
     @staticmethod
     def _check_targets(constraints, config) -> None:

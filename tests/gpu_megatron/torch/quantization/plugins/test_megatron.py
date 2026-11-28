@@ -74,6 +74,7 @@ from modelopt.torch.opt.plugins.mcore_dist_checkpointing import (
     restore_sharded_modelopt_state,
     save_sharded_modelopt_state,
 )
+from modelopt.torch.quantization._auto_quantize_cost import _get_module_weight_numel
 from modelopt.torch.quantization.algorithms import QuantRecipe, _AutoQuantizeBaseSearcher
 from modelopt.torch.quantization.ggml.common import PINNED_IMPORTANCE_PREFIX, PINNED_PAYLOAD_PREFIX
 from modelopt.torch.quantization.nn import QuantModuleRegistry, SequentialQuantizer, TensorQuantizer
@@ -1618,7 +1619,11 @@ def _auto_quantize_mamba_hybrid_cost_helper(rank, size, expert_model_parallel_si
     if expert_model_parallel_size == 1:
         # With EP=1, every rank has the full expert set. DP de-duplication should make the
         # summed no-quant cost match the local quantizable weight size on each rank.
-        local_total = _AutoQuantizeBaseSearcher._get_total_weight_size(list(model.modules()))
+        local_total = sum(
+            _get_module_weight_numel(module)
+            for module in model.modules()
+            if _AutoQuantizeBaseSearcher._is_auto_quantize_module(module)
+        )
         assert summed_cost == pytest.approx(local_total, rel=1e-6)
 
     if rank == 0:

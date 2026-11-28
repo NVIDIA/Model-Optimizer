@@ -60,7 +60,6 @@ from ._auto_quantize_cost import (
     AUTO_QUANTIZE_CONSTRAINT_KEYS,
     COST_MODEL_ACTIVE_MOE,
     COST_MODEL_WEIGHT,
-    _get_module_weight_numel,
     _get_module_weights,
     get_auto_quantize_cost_model,
     normalize_auto_quantize_constraints,
@@ -71,6 +70,7 @@ from .ggml import GGML_FORMAT_REGISTRY
 from .ggml.common import PIN_OVERRIDES_WEIGHT, drop_search_scales
 from .nn import QuantLinearConvBase, QuantModule, SequentialQuantizer, TensorQuantizer
 from .utils import is_quantized_linear
+from .utils.core_utils import _group_ranks
 
 
 def _is_hf_quant_fused_experts_module(module: nn.Module) -> bool:
@@ -918,12 +918,6 @@ def _comparable(value: Any) -> Any:
     return repr(value)
 
 
-def _group_ranks(group: DistributedProcessGroup) -> tuple[int, ...]:
-    return tuple(
-        torch.distributed.get_process_group_ranks(group.group or torch.distributed.group.WORLD)
-    )
-
-
 def _group_name(group: DistributedProcessGroup) -> str:
     """The name of an initialized ``group``'s communicator, which torch gives alike on its ranks."""
     process_group = group.group or torch.distributed.group.WORLD
@@ -976,7 +970,7 @@ def _weight_layouts_by_group(
             )
             for kind, group in kinds.items():
                 if group.is_initialized():
-                    by_group[_group_ranks(group), _group_name(group)].append(
+                    by_group[tuple(_group_ranks(group)), _group_name(group)].append(
                         (module_names.get(id(module)), kind, layout)
                     )
     return {
@@ -1146,7 +1140,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             config["format_shard"] = (index, count)
         return config
 
-    def validate_search_input(self, constraints, config) -> None:
+    def validate_search_input(self, constraints, config, model: nn.Module | None = None) -> None:
         """Validate method-specific inputs before quantizing the model."""
         # Refuse scores of another method or scoring options before the model is converted, so the
         # caller can retry the same model with another checkpoint. The search restores the state
@@ -1180,6 +1174,19 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                     f"{state['checkpoint_world_size']} ranks, not {world_size}. Resume with the "
                     "same world size, or use a new checkpoint path. To re-solve its scores in one "
                     "process, pass its search state to get_auto_quantize_config()."
+                )
+            # Another plan gives a rank other experts, or another share of the dense part.
+            plan = None if model is None else _plan_signature(model)
+            if (
+                is_distributed_run()
+                and model is not None
+                and (state["quantizer_states"] or state["candidate_stats"])
+                and state["distribution_plan"] not in (None, plan)
+            ):
+                raise ValueError(
+                    f"The AutoQuantize checkpoint was written under {state['distribution_plan']}, "
+                    f"not {plan}. Resume with the same world size, expert-parallel degree and "
+                    "dense layout, or use a new checkpoint path."
                 )
             # Everything restored but the solved result, which the search solves again, the writer's
             # rank, checked above, and the calibrated quantizer states, each rank's own, by format.
@@ -1804,21 +1811,9 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         mismatch = self.scoring_mismatch(self.state_dict()) if self.candidate_stats else None
         if mismatch:
             raise ValueError(f"{mismatch} Use a different checkpoint path.")
-        # Another plan gives a rank other experts; validate_search_input refused another world
-        # size. Every rank restored the same plan (checked there) and runs under the same one, so
-        # every rank refuses alike.
-        restored_plan, plan = getattr(self, "distribution_plan", None), _plan_signature(self.model)
+        # validate_search_input refused a checkpoint of another world size or plan.
+        plan = _plan_signature(self.model)
         world_size = torch.distributed.get_world_size() if is_distributed_run() else 1
-        if (
-            is_distributed_run()
-            and (self.quantizer_states or self.candidate_stats)
-            and restored_plan not in (None, plan)
-        ):
-            raise ValueError(
-                f"The AutoQuantize checkpoint was written under {restored_plan}, not {plan}. "
-                "Resume with the same world size and expert-parallel degree, or use a new "
-                "checkpoint path."
-            )
         self.method = self.method_name
         self.scoring_config = self.scoring_config_from(self.config)
         self.cost_model = self.config["cost_model"]
@@ -2045,15 +2040,6 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         effective_bits = (total_cost / total_weight_size) * 16
         print_rank_0(f"{prefix} effective bits: {effective_bits:.2f}")
         return effective_bits
-
-    @staticmethod
-    def _get_total_weight_size(modules):
-        return sum(
-            _get_module_weight_numel(module)
-            if _AutoQuantizeBaseSearcher._is_auto_quantize_module(module)
-            else 0
-            for module in modules
-        )
 
     @staticmethod
     def _get_total_weight_size_from_candidate_stats(candidate_stats):
