@@ -2,7 +2,7 @@
 <html lang="en" data-accent-color="green" data-content_root="../../">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>model_quant - Model Optimizer 0.0.1.dev1+g73761fb70</title><link rel="index" title="Index" href="../../genindex.html" /><link rel="search" title="Search" href="../../search.html" /><link rel="next" title="nn" href="modelopt.torch.quantization.nn.html" /><link rel="prev" title="model_calib" href="modelopt.torch.quantization.model_calib.html" /><script>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>model_quant - Model Optimizer 0.0.1.dev1+gb03512ad8</title><link rel="index" title="Index" href="../../genindex.html" /><link rel="search" title="Search" href="../../search.html" /><link rel="next" title="nn" href="modelopt.torch.quantization.nn.html" /><link rel="prev" title="model_calib" href="modelopt.torch.quantization.model_calib.html" /><script>
     function setColorMode(t){let e=document.documentElement;e.setAttribute("data-color-mode",t);let a=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches,s=t;"auto"===t&&(s=a?"dark":"light"),"light"===s?(e.classList.remove("dark"),e.classList.add("light")):(e.classList.remove("light"),e.classList.add("dark"))}
     setColorMode(localStorage._theme||"auto");
   </script><link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=e1a1ceaf" />
@@ -751,8 +751,10 @@ routed experts sharded expert-parallel as
 <code class="xref py py-func docutils literal notranslate"><span class="pre">load_pretrained()</span></code> loads one – every
 rank calls <code class="docutils literal notranslate"><span class="pre">auto_quantize</span></code> on its own share of the data, and must run the same number of
 calibration and scoring batches. The scores are summed over the ranks, so every rank
-picks the same formats: those one process scoring all their data would pick, except where
-the order of the floating-point sums tips a near tie.</p>
+picks the same formats: those one process would pick scoring every rank’s batches as they
+are, with the same loss, except where the order of the floating-point sums tips a near tie.
+A process that batches the data otherwise can pick other formats, e.g. under a loss
+averaged over each batch’s tokens.</p>
 </div>
 <div class="admonition note">
 <p class="admonition-title">Note</p>
