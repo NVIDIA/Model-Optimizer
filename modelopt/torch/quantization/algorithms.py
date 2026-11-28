@@ -1000,9 +1000,10 @@ def _plan_signature(model: nn.Module) -> str | None:
 def _resume_together(progresses: list) -> None:
     if any(progress != progresses[0] for progress in progresses):
         raise ValueError(
-            "Distributed AutoQuantize requires every rank's checkpoint at the same progress. "
-            "Restore all rank files from the same search, or use a new checkpoint path on every "
-            "rank."
+            "Distributed AutoQuantize requires every rank's checkpoint at the same progress, every "
+            "rank searching the same layers (pipeline-parallel stages, which do not, resume from a "
+            "new checkpoint path). Restore all rank files from the same search, or use a new "
+            "checkpoint path on every rank."
         )
 
 

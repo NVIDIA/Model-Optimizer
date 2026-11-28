@@ -1157,9 +1157,11 @@ def auto_quantize(
             If the checkpoint file exists, the search state will be restored from it, skipping the
             expensive score estimation step. On several ranks each rank saves and restores a file
             of its own, which a resume needs at the same world size (for the weight search also
-            from the same rank and distribution plan), or every rank refuses it. One process
-            refuses a weight search's file that a run of several ranks wrote: pass its search state
-            to :func:`get_auto_quantize_config` to re-solve its scores.
+            from the same rank and distribution plan), or every rank refuses it. The ranks must
+            search the same layers, as data, FSDP2 and expert parallelism shard them; pipeline-
+            parallel stages, which do not, resume from a new path. One process refuses a weight
+            search's file that a run of several ranks wrote: pass its search state to
+            :func:`get_auto_quantize_config` to re-solve its scores.
         module_search_spaces: Optional module-specific candidate overrides. Each entry contains
             ``module_name_patterns`` (one or more glob patterns), ``quantization_formats``, and
             optional ``allow_no_quant`` (default True). A matching entry replaces the global
