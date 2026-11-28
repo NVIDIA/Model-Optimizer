@@ -1,0 +1,341 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Installation for Linux &mdash; Model Optimizer 0.0.1.dev1+g0b4affa4e</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
+      <link rel="stylesheet" type="text/css" href="../_static/tabs.css?v=4c969af8" />
+      <link rel="stylesheet" type="text/css" href="../_static/togglebutton.css?v=9c3e77be" />
+      <link rel="stylesheet" type="text/css" href="../_static/autodoc_pydantic.css" />
+      <link rel="stylesheet" type="text/css" href="../_static/custom.css?v=7a224f4b" />
+
+  
+      <script src="../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="../_static/copybutton.js?v=20d3d275"></script>
+      <script src="../_static/tabs.js?v=3ee01567"></script>
+      <script>let toggleHintShow = 'Click to show';</script>
+      <script>let toggleHintHide = 'Click to hide';</script>
+      <script>let toggleOpenOnPrint = 'true';</script>
+      <script src="../_static/togglebutton.js?v=b8b12719"></script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+    <script src="../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+    <link rel="next" title="Installation for Windows" href="windows/_installation_for_Windows.html" />
+    <link rel="prev" title="Installation" href="2_installation.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../index.html" class="icon icon-home">
+            Model Optimizer
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="1_overview.html">Overview</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="2_installation.html">Installation</a><ul class="current">
+<li class="toctree-l2 current"><a class="current reference internal" href="#">Installation for Linux</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#system-requirements">System requirements</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#environment-setup">Environment setup</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#install-model-optimizer">Install Model Optimizer</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#check-installation">Check installation</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="windows/_installation_for_Windows.html">Installation for Windows</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_qat" rel="noopener noreferrer" target="_blank">Quick Start: QAT</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning" rel="noopener noreferrer" target="_blank">Quick Start: Pruning</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_distill" rel="noopener noreferrer" target="_blank">Quick Start: Distillation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/speculative_decoding" rel="noopener noreferrer" target="_blank">Quick Start: Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity" rel="noopener noreferrer" target="_blank">Quick Start: Sparsity</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Guides</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../guides/0_support_matrix.html">Support Matrix</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/10_recipes.html">Recipes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/1_quantization.html">Quantization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/2_save_load.html">Saving &amp; Restoring</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/3_pruning.html">Pruning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/4_distillation.html">Distillation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/5_speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/6_sparsity.html">Sparsity</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/7_nas.html">NAS</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/8_autocast.html">AutoCast (ONNX)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/9_autotune.html">Autotune (ONNX)</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Deployment</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../deployment/1_tensorrt_llm.html">TensorRT-LLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../deployment/2_onnxruntime.html">Onnxruntime</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../deployment/3_unified_hf.html">Unified HuggingFace Checkpoint</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Examples</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../examples/0_all_examples.html">All GitHub Examples</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../reference/0_changelog.html">Changelog</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../reference/1_modelopt_api.html">modelopt API</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Support</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../support/1_contact.html">Contact us</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../support/2_faqs.html">FAQs</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../index.html">Model Optimizer</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content style-external-links">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="2_installation.html">Installation</a></li>
+      <li class="breadcrumb-item active">Installation for Linux</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../_sources/getting_started/_installation_for_Linux.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="installation-for-linux">
+<h1>Installation for Linux<a class="headerlink" href="#installation-for-linux" title="Link to this heading"></a></h1>
+<section id="system-requirements">
+<h2>System requirements<a class="headerlink" href="#system-requirements" title="Link to this heading"></a></h2>
+<p>Latest Model Optimizer (<code class="docutils literal notranslate"><span class="pre">nvidia-modelopt</span></code>) currently has the following system requirements:</p>
+<table class="docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p>OS</p></td>
+<td><p>Linux</p></td>
+</tr>
+<tr class="row-even"><td><p>Architecture</p></td>
+<td><p>x86_64, aarch64 (SBSA)</p></td>
+</tr>
+<tr class="row-odd"><td><p>Python</p></td>
+<td><p>&gt;=3.10,&lt;3.14</p></td>
+</tr>
+<tr class="row-even"><td><p>CUDA</p></td>
+<td><p>12.x, 13.x</p></td>
+</tr>
+<tr class="row-odd"><td><p>PyTorch</p></td>
+<td><p>&gt;=2.8</p></td>
+</tr>
+<tr class="row-even"><td><p>TensorRT-LLM (Optional)</p></td>
+<td><p>&gt;=1.0</p></td>
+</tr>
+<tr class="row-odd"><td><p>ONNX Runtime (Optional)</p></td>
+<td><p>1.24</p></td>
+</tr>
+<tr class="row-even"><td><p>TensorRT (Optional)</p></td>
+<td><p>&gt;=10.0</p></td>
+</tr>
+</tbody>
+</table>
+</section>
+<section id="environment-setup">
+<h2>Environment setup<a class="headerlink" href="#environment-setup" title="Link to this heading"></a></h2>
+<div class="tab-set docutils container">
+<input checked="True" class="tab-input" id="tab-set--0-input--1" name="tab-set--0" type="radio" /><label class="tab-label" for="tab-set--0-input--1">Docker image (Recommended)</label><div class="tab-content docutils container">
+<p>To use Model Optimizer with full dependencies (e.g. TensorRT/TensorRT-LLM deployment), we recommend using the
+<a class="reference external" href="https://catalog.ngc.nvidia.com/orgs/nvidia/teams/tensorrt-llm/containers/release/tags" rel="noopener noreferrer" target="_blank">TensorRT-LLM docker image</a>,
+e.g., <code class="docutils literal notranslate"><span class="pre">nvcr.io/nvidia/tensorrt-llm/release:&lt;version&gt;</span></code> (Model Optimizer pre-installed).</p>
+<p>Make sure to upgrade Model Optimizer to the latest version using <code class="docutils literal notranslate"><span class="pre">pip</span></code> as described in the next section.</p>
+<p>If relevant, you would also need to setup appropriate environment variables for the TensorRT binaries as follows:</p>
+<div class="highlight-shell notranslate"><div class="highlight"><pre><span></span><span class="nb">export</span><span class="w"> </span><span class="nv">PIP_CONSTRAINT</span><span class="o">=</span><span class="s2">&quot;&quot;</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">LD_LIBRARY_PATH</span><span class="o">=</span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">LD_LIBRARY_PATH</span><span class="si">}</span><span class="s2">:/usr/include:/usr/lib/x86_64-linux-gnu&quot;</span>
+</pre></div>
+</div>
+<p>You may need to install additional dependencies from the respective examples’s <cite>requirements.txt</cite> file.</p>
+<p><strong>Alternative NVIDIA docker images</strong></p>
+<p>For PyTorch, you can also use <a class="reference external" href="https://catalog.ngc.nvidia.com/orgs/nvidia/containers/pytorch/tags" rel="noopener noreferrer" target="_blank">NVIDIA NGC PyTorch container</a>
+(<code class="docutils literal notranslate"><span class="pre">nvcr.io/nvidia/pytorch:&lt;version&gt;-py3</span></code>, Model Optimizer pre-installed)
+and for NVIDIA Megatron-Bridge or Megatron-LM framework, you can use the <a class="reference external" href="https://catalog.ngc.nvidia.com/orgs/nvidia/containers/nemo/tags" rel="noopener noreferrer" target="_blank">NeMo container</a>
+(<code class="docutils literal notranslate"><span class="pre">nvcr.io/nvidia/nemo:&lt;version&gt;</span></code>, Model Optimizer pre-installed).
+Make sure to update the Model Optimizer to the latest version if not already.</p>
+<p>For ONNX / TensorRT use cases, you can also use the <a class="reference external" href="https://catalog.ngc.nvidia.com/orgs/nvidia/containers/tensorrt/tags" rel="noopener noreferrer" target="_blank">TensorRT container</a>
+(<code class="docutils literal notranslate"><span class="pre">nvcr.io/nvidia/tensorrt:&lt;version&gt;-py3</span></code>), which provides superior performance to the PyTorch container.</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>Before pulling and using the container images, please review their respective license terms.</p>
+</div>
+</div>
+<input class="tab-input" id="tab-set--0-input--2" name="tab-set--0" type="radio" /><label class="tab-label" for="tab-set--0-input--2">Local environment (PIP / Conda)</label><div class="tab-content docutils container">
+<p><strong>Setting up a virtual environment</strong></p>
+<p>We recommend setting up a virtual environment if you don’t have one already. Run the following
+command to set up and activate a <code class="docutils literal notranslate"><span class="pre">conda</span></code> virtual environment named <code class="docutils literal notranslate"><span class="pre">modelopt</span></code> with Python 3.12:</p>
+<div class="highlight-shell notranslate"><div class="highlight"><pre><span></span>conda<span class="w"> </span>create<span class="w"> </span>-n<span class="w"> </span>modelopt<span class="w"> </span><span class="nv">python</span><span class="o">=</span><span class="m">3</span>.12<span class="w"> </span>pip
+conda<span class="w"> </span>activate<span class="w"> </span>modelopt
+</pre></div>
+</div>
+<p>(Optional) <strong>Install desired PyTorch version</strong></p>
+<p>By default, the latest PyTorch version available on <code class="docutils literal notranslate"><span class="pre">pip</span></code> will
+be installed. If you want to install a specific PyTorch version for a specific CUDA version, please first
+follow the instructions to <a class="reference external" href="https://pytorch.org/get-started/locally/" rel="noopener noreferrer" target="_blank">install your desired PyTorch version</a>.</p>
+<p>(Optional) <strong>Install other NVIDIA dependencies</strong></p>
+<p>If you wish to use ModelOpt in conjunction with other NVIDIA libraries (e.g. TensorRT, TensorRT-LLM, Megatron-Bridge, Megatron-LM, Triton, etc.),
+please make sure to check the ease of installation of these libraries in a local environment. If you face any
+issues, we recommend using a docker image for a seamless experience. You may still choose to use other ModelOpt’s
+features locally for example, quantizing a HuggingFace model and then use a docker image for deployment.</p>
+</div>
+</div>
+</section>
+<section id="install-model-optimizer">
+<h2>Install Model Optimizer<a class="headerlink" href="#install-model-optimizer" title="Link to this heading"></a></h2>
+<p>Model Optimizer will download and install additional third-party open source software projects. Review the license
+terms of these open source projects before use.</p>
+<p>If you build and use ModelOpt’s docker image, you can skip this step as the image already contains ModelOpt and all
+optional dependencies pre-installed.
+If you use other suggested docker images, ModelOpt is pre-installed with some of the below optional dependencies.
+Make sure to upgrade to the latest version of ModelOpt (with appropriate optional dependencies you need) using pip as shown below.</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>pip<span class="w"> </span>install<span class="w"> </span>-U<span class="w"> </span><span class="s2">&quot;nvidia-modelopt[all]&quot;</span>
+</pre></div>
+</div>
+<p>If you want to install only partial dependencies, please replace <code class="docutils literal notranslate"><span class="pre">[all]</span></code> with the desired
+optional dependencies as described below.</p>
+<p><strong>Identify correct partial dependencies</strong></p>
+<p>Note that when installing <code class="docutils literal notranslate"><span class="pre">nvidia-modelopt</span></code> without any optional dependencies, only the <code class="docutils literal notranslate"><span class="pre">modelopt.torch</span></code> package
+requirements are installed and other modules may not work without the appropriate optional
+dependencies or <code class="docutils literal notranslate"><span class="pre">[all]</span></code> optional dependencies. Below is a list of optional dependencies that
+need to be installed to correctly use the corresponding modules:</p>
+<table class="docutils align-default">
+<colgroup>
+<col style="width: 50.0%" />
+<col style="width: 50.0%" />
+</colgroup>
+<thead>
+<tr class="row-odd"><th class="head"><p>Module</p></th>
+<th class="head"><p>Optional dependencies</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">modelopt.onnx</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">[onnx]</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">modelopt.torch._deploy</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">[onnx]</span></code></p></td>
+</tr>
+</tbody>
+</table>
+<p>Additionally, we support installing dependencies for following 3rd-party packages:</p>
+<table class="docutils align-default">
+<colgroup>
+<col style="width: 50.0%" />
+<col style="width: 50.0%" />
+</colgroup>
+<thead>
+<tr class="row-odd"><th class="head"><p>Third-party package</p></th>
+<th class="head"><p>Optional dependencies</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>Huggingface (<code class="docutils literal notranslate"><span class="pre">transformers</span></code>, <code class="docutils literal notranslate"><span class="pre">diffusers</span></code>, etc.)</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">[hf]</span></code></p></td>
+</tr>
+</tbody>
+</table>
+<p><strong>CUDA specific dependencies</strong></p>
+<ul class="simple">
+<li><p>By default, <code class="docutils literal notranslate"><span class="pre">cupy-cuda12x</span></code> is installed for INT4 ONNX quantization. If you have CUDA 13, you need to run <code class="docutils literal notranslate"><span class="pre">pip</span> <span class="pre">uninstall</span> <span class="pre">-y</span> <span class="pre">cupy-cuda12x</span></code> and <code class="docutils literal notranslate"><span class="pre">pip</span> <span class="pre">install</span> <span class="pre">cupy-cuda13x</span></code> after installing <code class="docutils literal notranslate"><span class="pre">nvidia-modelopt[onnx]</span></code>.</p></li>
+</ul>
+<p><strong>Accelerated Quantization with Triton Kernels</strong></p>
+<p>ModelOpt includes optimized quantization kernels implemented with Triton language that accelerate quantization
+operations by approximately 40% compared to the default implementation. These kernels are particularly
+beneficial for <a class="reference internal" href="../guides/_choosing_quant_methods.html"><span class="doc">AWQ</span></a> and Quantization-aware Training (QAT) workflows.</p>
+<p>The Triton-based kernels currently support the NVFP4 quantization format, with support for additional
+formats coming in future releases. To use these accelerated kernels, you need:</p>
+<ul class="simple">
+<li><p>CUDA device with compute capability &gt;= 8.9 (e.g. RTX 40 series, RTX 6000, NVIDIA L40 or later)</p></li>
+<li><p>Triton package installed: <code class="docutils literal notranslate"><span class="pre">pip</span> <span class="pre">install</span> <span class="pre">triton</span></code></p></li>
+</ul>
+<p>No additional configuration is required - the optimized kernels are used automatically when available
+for your hardware and quantization format.</p>
+</section>
+<section id="check-installation">
+<h2>Check installation<a class="headerlink" href="#check-installation" title="Link to this heading"></a></h2>
+<div class="admonition tip">
+<p class="admonition-title">Tip</p>
+<p>When you use ModelOpt’s PyTorch quantization APIs for the first time, it will compile the fast quantization kernels
+using your installed torch and CUDA if available.
+This may take a few minutes but subsequent quantization calls will be much faster.
+To invoke the compilation and check if it is successful or pre-compile for docker builds, run the following command:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>-c<span class="w"> </span><span class="s2">&quot;import modelopt.torch.quantization.extensions as ext; ext.precompile()&quot;</span>
+</pre></div>
+</div>
+</div>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="2_installation.html" class="btn btn-neutral float-left" title="Installation" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="windows/_installation_for_Windows.html" class="btn btn-neutral float-right" title="Installation for Windows" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2023-2025, NVIDIA Corporation.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

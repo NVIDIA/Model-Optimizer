@@ -1,0 +1,6 @@
+modelopt.torch.quantization.compress
+====================================
+
+.. currentmodule:: modelopt.torch.quantization
+
+.. autofunction:: compress

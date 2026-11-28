@@ -1,0 +1,1150 @@
+<!DOCTYPE html>
+<html lang="en" data-accent-color="green" data-content_root="../../">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>state_sparsity - Model Optimizer 0.0.1.dev1+gfa642f087</title><link rel="index" title="Index" href="../../genindex.html" /><link rel="search" title="Search" href="../../search.html" /><link rel="next" title="weight_sparsity" href="modelopt.torch.sparsity.weight_sparsity.html" /><link rel="prev" title="utils" href="modelopt.torch.sparsity.attention_sparsity.utils.html" /><script>
+    function setColorMode(t){let e=document.documentElement;e.setAttribute("data-color-mode",t);let a=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches,s=t;"auto"===t&&(s=a?"dark":"light"),"light"===s?(e.classList.remove("dark"),e.classList.add("light")):(e.classList.remove("light"),e.classList.add("dark"))}
+    setColorMode(localStorage._theme||"auto");
+  </script><link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=e1a1ceaf" />
+    <link rel="stylesheet" type="text/css" href="../../_static/shibuya.css?v=2ceb65ce" />
+    <link rel="stylesheet" type="text/css" href="../../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../../_static/tabs.css?v=4c969af8" />
+    <link rel="stylesheet" type="text/css" href="../../_static/togglebutton.css?v=9c3e77be" />
+    <link rel="stylesheet" type="text/css" href="../../_static/autodoc_pydantic.css" />
+    <link media="print" rel="stylesheet" type="text/css" href="../../_static/print.css?v=20ff2c19" />
+    <link rel="stylesheet" type="text/css" href="../../_static/custom.css?v=948f803c" />
+    <link rel="stylesheet" type="text/css" href="../../_static/announcements.css?v=3c458a87" />
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --sy-f-text: "Inter", var(--sy-f-sys), var(--sy-f-cjk), sans-serif;
+  --sy-f-heading: "Inter", var(--sy-f-sys), var(--sy-f-cjk), sans-serif;
+}
+</style>
+    
+  <meta property="og:type" content="website"/><meta property="og:title" content="state_sparsity"/>
+    <meta name="twitter:card" content="summary"/>
+  </head>
+<body><div class="sy-head">
+  <div class="sy-head-blur"></div>
+  <div class="sy-head-inner sy-container mx-auto">
+    <a class="sy-head-brand" href="../../index.html">
+      
+      
+      <strong>Model Optimizer</strong>
+    </a>
+    <div class="sy-head-nav" id="head-nav">
+      <nav class="sy-head-links"></nav>
+      <div class="sy-head-extra flex items-center print:hidden"><form class="searchbox flex items-center" action="../../search.html" method="get">
+  <input type="text" name="q" placeholder="Search" />
+  <kbd>/</kbd>
+</form><div class="sy-head-socials"></div></div>
+    </div>
+    <div class="sy-head-actions flex items-center shrink-0 print:hidden"><button class="js-theme theme-switch flex items-center"
+data-aria-auto="Switch to light color mode"
+data-aria-light="Switch to dark color mode"
+data-aria-dark="Switch to auto color mode">
+<i class="i-lucide theme-icon"></i>
+</button><button class="md:hidden flex items-center js-menu" aria-label="Menu" type="button" aria-controls="head-nav" aria-expanded="false">
+        <div class="hamburger">
+          <span class="hamburger_1"></span>
+          <span class="hamburger_2"></span>
+          <span class="hamburger_3"></span>
+        </div>
+      </button>
+    </div>
+  </div>
+</div>
+<div class="sy-page sy-container flex mx-auto">
+  <aside id="lside" class="sy-lside md:w-72 md:shrink-0 print:hidden">
+    <div class="sy-lside-inner md:sticky">
+      <div class="sy-scrollbar p-6">
+        <div class="globaltoc" data-expand-depth="1"><p class="caption" role="heading" aria-level="3"><span class="caption-text">Announcements</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../index.html">Announcements</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../getting_started/1_overview.html">Overview</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../getting_started/2_installation.html">Installation</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../getting_started/_installation_for_Linux.html">Installation for Linux</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../getting_started/windows/_installation_for_Windows.html">Installation for Windows</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../getting_started/windows/_installation_standalone.html">Install ModelOpt-Windows as a Standalone Toolkit</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../getting_started/windows/_installation_windows_arm64.html">Install ModelOpt on Windows on Arm</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../getting_started/windows/_installation_with_olive.html">Install ModelOpt-Windows with Olive</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/hf_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_qat" rel="noopener noreferrer" target="_blank">Quick Start: QAT</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning" rel="noopener noreferrer" target="_blank">Quick Start: Pruning</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_distill" rel="noopener noreferrer" target="_blank">Quick Start: Distillation</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/speculative_decoding" rel="noopener noreferrer" target="_blank">Quick Start: Speculative Decoding</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity" rel="noopener noreferrer" target="_blank">Quick Start: Sparsity</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Guides</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../guides/0_support_matrix.html">Support Matrix</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../guides/10_recipes.html">Recipes</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../guides/11_config_system.html">ModelOpt Config System</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../guides/1_quantization.html">Quantization</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../guides/_basic_quantization.html">Basic Concepts</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../guides/_choosing_quant_methods.html">Best practices to choose the right quantization methods</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../guides/_pytorch_quantization.html">PyTorch Quantization</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../guides/_quant_cfg.html">Quantization Configuration (quant_cfg)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../guides/_customized_model_quantization.html">Guides to quantize a customized model from Hugging Face for TensorRT-LLM deployment</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../guides/_compress_quantized_models.html">Compress quantized models</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../guides/_onnx_quantization.html">ONNX Quantization - Linux (Beta)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../guides/windows_guides/_ONNX_PTQ_guide.html">ONNX Quantization - Windows</a></li>
+</ul>
+</li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../guides/2_save_load.html">Saving &amp; Restoring</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../guides/3_pruning.html">Pruning</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../guides/4_distillation.html">Distillation</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../guides/5_speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../guides/6_sparsity.html">Sparsity</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../guides/7_nas.html">NAS</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../guides/8_autocast.html">AutoCast (ONNX)</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../guides/9_autotune.html">Autotune (ONNX)</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Deployment</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../deployment/1_tensorrt_llm.html">TensorRT-LLM</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../deployment/2_onnxruntime.html">Onnxruntime</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../deployment/3_unified_hf.html">Unified HuggingFace Checkpoint</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Examples</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../examples/0_all_examples.html">All GitHub Examples</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Reference</span></p>
+<ul class="current">
+<li class="toctree-l1 _expand"><a class="reference internal" href="../0_changelog.html">Changelog</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="../1_modelopt_api.html">modelopt API</a><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="modelopt.deploy.html">deploy</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.deploy.llm.html">llm</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.deploy.llm.generate.html">generate</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="modelopt.onnx.html">onnx</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.autocast.html">autocast</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.autocast.convert.html">convert</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.autocast.graphsanitizer.html">graphsanitizer</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.autocast.logging_config.html">logging_config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.autocast.nodeclassifier.html">nodeclassifier</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.autocast.precisionconverter.html">precisionconverter</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.autocast.referencerunner.html">referencerunner</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.autocast.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.export.html">export</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.graph_surgery.html">graph_surgery</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.llm_export_utils.html">llm_export_utils</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.llm_export_utils.export_utils.html">export_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.llm_export_utils.quantization_utils.html">quantization_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.llm_export_utils.surgeon_utils.html">surgeon_utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.logging_config.html">logging_config</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.op_types.html">op_types</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.quantization.html">quantization</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.autotune.html">autotune</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.calib_utils.html">calib_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.extensions.html">extensions</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.fp8.html">fp8</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.graph_utils.html">graph_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.gs_patching.html">gs_patching</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.int4.html">int4</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.int8.html">int8</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.operators.html">operators</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.ort_patching.html">ort_patching</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.ort_utils.html">ort_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.partitioning.html">partitioning</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.precision_utils.html">precision_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.qdq_utils.html">qdq_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.quant_utils.html">quant_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.quantize.html">modelopt.onnx.quantization.quantize</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.trt_utils.html">trt_utils</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l2 current"><a class="reference internal" href="modelopt.torch.html">torch</a><ul class="current">
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.distill.html">distill</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.distill.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.distill.distillation.html">distillation</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.distill.distillation_model.html">distillation_model</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.distill.layerwise_distillation_model.html">layerwise_distillation_model</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.distill.loss_balancers.html">loss_balancers</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.distill.losses.html">losses</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.distill.mode.html">mode</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.distill.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.distill.registry.html">registry</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.export.html">export</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.convert_hf_config.html">convert_hf_config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.diffusers_utils.html">diffusers_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.hf_export_handlers.html">hf_export_handlers</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.layer_utils.html">layer_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.layerwise_export.html">layerwise_export</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.model_utils.html">model_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.moe_utils.html">moe_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.quant_aware_conversion.html">quant_aware_conversion</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.quant_format.html">quant_format</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.quant_utils.html">quant_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.registry.html">registry</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.shard_cast_utils.html">shard_cast_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.transformer_engine.html">transformer_engine</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.trtllm.html">trtllm</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.unified_export_hf.html">unified_export_hf</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.unified_export_hf_streaming.html">unified_export_hf_streaming</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.unified_export_megatron.html">unified_export_megatron</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.fastgen.html">fastgen</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.fastgen.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.fastgen.discriminators.html">discriminators</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.fastgen.ema.html">ema</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.fastgen.factory.html">factory</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.fastgen.flow_matching.html">flow_matching</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.fastgen.loader.html">loader</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.fastgen.losses.html">losses</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.fastgen.methods.html">methods</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.fastgen.pipeline.html">pipeline</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.fastgen.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.fastgen.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.kernels.html">kernels</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.kernels.common.html">common</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.kernels.quantization.html">quantization</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.kernels.sparsity.html">sparsity</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.nas.html">nas</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.algorithms.html">algorithms</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.autonas.html">autonas</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.conversion.html">conversion</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.hparams.html">hparams</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.modules.html">modules</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.patch.html">patch</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.registry.html">registry</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.search_space.html">search_space</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.traced_hp.html">traced_hp</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.opt.html">opt</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.opt.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.opt.config_loader.html">config_loader</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.opt.conversion.html">conversion</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.opt.dynamic.html">dynamic</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.opt.hparam.html">hparam</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.opt.mode.html">mode</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.opt.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.opt.searcher.html">searcher</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.opt.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.peft.html">peft</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.peft.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.peft.conversion.html">conversion</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.peft.convert.html">convert</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.peft.custom.html">custom</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.peft.lora.html">lora</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.peft.mode.html">mode</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.prune.html">prune</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.prune.fastnas.html">fastnas</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.prune.importance_hooks.html">importance_hooks</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.prune.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.prune.pruning.html">pruning</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.puzzletron.html">puzzletron</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.activation_scoring.html">activation_scoring</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.anymodel.html">anymodel</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.block_config.html">block_config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.build_library_and_stats.html">build_library_and_stats</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.dataset.html">dataset</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.entrypoint.html">entrypoint</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.mip.html">mip</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.pruning.html">pruning</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.puzzletron_nas_plugin.html">puzzletron_nas_plugin</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.replacement_library.html">replacement_library</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.scoring.html">scoring</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.sewing_kit.html">sewing_kit</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.subblock_stats.html">subblock_stats</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.tools.html">tools</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.quantization.html">quantization</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.algorithms.html">algorithms</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.backends.html">backends</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.calib.html">calib</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.compress.html">modelopt.torch.quantization.compress</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.conversion.html">conversion</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.export_onnx.html">export_onnx</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.extensions.html">extensions</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.mode.html">mode</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.model_calib.html">model_calib</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.model_quant.html">model_quant</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.nn.html">nn</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.qtensor.html">qtensor</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.tensor_quant.html">tensor_quant</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3 current"><a class="reference internal" href="modelopt.torch.sparsity.html">sparsity</a><ul class="current">
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.sparsity.attention_sparsity.html">attention_sparsity</a></li>
+<li class="toctree-l4 current"><a class="current reference internal" href="#">state_sparsity</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.sparsity.weight_sparsity.html">weight_sparsity</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.speculative.html">speculative</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.dflash.html">dflash</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.eagle.html">eagle</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.medusa.html">medusa</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.mode.html">mode</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.speculative_decoding.html">speculative_decoding</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.trace.html">trace</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.trace.analyzer.html">analyzer</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.trace.modules.html">modules</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.trace.symbols.html">symbols</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.trace.tracer.html">tracer</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.utils.html">utils</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.cpp_extension.html">cpp_extension</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.dataset_utils.html">dataset_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.distributed.html">distributed</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.graph.html">graph</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.import_utils.html">import_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.list.html">list</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.logging.html">logging</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.loss_mask.html">loss_mask</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.memory_monitor.html">memory_monitor</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.mlflow.html">mlflow</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.nemotron_vlm_dataset_utils.html">nemotron_vlm_dataset_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.network.html">network</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.perf.html">perf</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.random.html">random</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.regex.html">regex</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.robust_json.html">robust_json</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.serialization.html">serialization</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.speech_dataset_utils.html">speech_dataset_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.tensor.html">tensor</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.vlm_dataset_utils.html">vlm_dataset_utils</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Support</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../support/1_contact.html">Contact us</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../support/2_faqs.html">FAQs</a></li>
+</ul>
+        </div>
+      </div>
+    </div>
+  </aside>
+  <div class="lside-overlay js-menu" role="button" aria-label="Close left sidebar" aria-controls="lside" aria-expanded="false"></div>
+  <aside id="rside" class="sy-rside pb-3 w-64 shrink-0 order-last">
+    <button class="rside-close js-menu xl:hidden" aria-label="Close Table of Contents" type="button" aria-controls="rside" aria-expanded="false">
+      <i class="i-lucide close"></i>
+    </button>
+    <div class="sy-scrollbar sy-rside-inner px-6 xl:top-16 xl:sticky xl:pl-0 pt-6 pb-4"><div class="localtoc"><h3>On this page</h3><ul>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCCalibrationMeasurement"><code class="docutils literal notranslate"><span class="pre">DASCCalibrationMeasurement</span></code></a><ul>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCCalibrationMeasurement.checkpoint_savings"><code class="docutils literal notranslate"><span class="pre">DASCCalibrationMeasurement.checkpoint_savings</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCCalibrationMeasurement.model_config"><code class="docutils literal notranslate"><span class="pre">DASCCalibrationMeasurement.model_config</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCCalibrationMeasurement.quality"><code class="docutils literal notranslate"><span class="pre">DASCCalibrationMeasurement.quality</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCCalibrationMeasurement.retained_heads"><code class="docutils literal notranslate"><span class="pre">DASCCalibrationMeasurement.retained_heads</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCCalibrationMeasurement.total_heads"><code class="docutils literal notranslate"><span class="pre">DASCCalibrationMeasurement.total_heads</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCCalibrationMeasurement.validate_unique_slices"><code class="docutils literal notranslate"><span class="pre">DASCCalibrationMeasurement.validate_unique_slices()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCCalibrationMeasurement.variant"><code class="docutils literal notranslate"><span class="pre">DASCCalibrationMeasurement.variant</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCCalibrationMeasurement.wmax"><code class="docutils literal notranslate"><span class="pre">DASCCalibrationMeasurement.wmax</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCConfig"><code class="docutils literal notranslate"><span class="pre">DASCConfig</span></code></a><ul>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCConfig.calibration_data_id"><code class="docutils literal notranslate"><span class="pre">DASCConfig.calibration_data_id</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCConfig.decay_parameter_storage_dtype"><code class="docutils literal notranslate"><span class="pre">DASCConfig.decay_parameter_storage_dtype</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCConfig.epsilon"><code class="docutils literal notranslate"><span class="pre">DASCConfig.epsilon</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCConfig.granularity"><code class="docutils literal notranslate"><span class="pre">DASCConfig.granularity</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCConfig.min_checkpoint_savings"><code class="docutils literal notranslate"><span class="pre">DASCConfig.min_checkpoint_savings</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCConfig.min_perplexity_retention"><code class="docutils literal notranslate"><span class="pre">DASCConfig.min_perplexity_retention</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCConfig.min_top1_agreement"><code class="docutils literal notranslate"><span class="pre">DASCConfig.min_top1_agreement</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCConfig.model_config"><code class="docutils literal notranslate"><span class="pre">DASCConfig.model_config</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCConfig.model_config_id"><code class="docutils literal notranslate"><span class="pre">DASCConfig.model_config_id</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCConfig.model_id"><code class="docutils literal notranslate"><span class="pre">DASCConfig.model_id</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCConfig.model_revision"><code class="docutils literal notranslate"><span class="pre">DASCConfig.model_revision</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCConfig.preserve_convolution_state"><code class="docutils literal notranslate"><span class="pre">DASCConfig.preserve_convolution_state</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCConfig.static_gate_input"><code class="docutils literal notranslate"><span class="pre">DASCConfig.static_gate_input</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCConfig.validate_epsilon"><code class="docutils literal notranslate"><span class="pre">DASCConfig.validate_epsilon()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCConfig.validate_perplexity_gate"><code class="docutils literal notranslate"><span class="pre">DASCConfig.validate_perplexity_gate()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCConfig.validate_provenance"><code class="docutils literal notranslate"><span class="pre">DASCConfig.validate_provenance()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCConfig.validate_savings_gate"><code class="docutils literal notranslate"><span class="pre">DASCConfig.validate_savings_gate()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCConfig.validate_static_gate_input"><code class="docutils literal notranslate"><span class="pre">DASCConfig.validate_static_gate_input()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCConfig.validate_top1_gate"><code class="docutils literal notranslate"><span class="pre">DASCConfig.validate_top1_gate()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCConfig.validate_wmax_candidates"><code class="docutils literal notranslate"><span class="pre">DASCConfig.validate_wmax_candidates()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCConfig.variant"><code class="docutils literal notranslate"><span class="pre">DASCConfig.variant</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCConfig.wmax_candidates"><code class="docutils literal notranslate"><span class="pre">DASCConfig.wmax_candidates</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCLayerPolicy"><code class="docutils literal notranslate"><span class="pre">DASCLayerPolicy</span></code></a><ul>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCLayerPolicy.model_config"><code class="docutils literal notranslate"><span class="pre">DASCLayerPolicy.model_config</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCLayerPolicy.num_heads"><code class="docutils literal notranslate"><span class="pre">DASCLayerPolicy.num_heads</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCLayerPolicy.omitted_heads"><code class="docutils literal notranslate"><span class="pre">DASCLayerPolicy.omitted_heads</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCLayerPolicy.retained_heads"><code class="docutils literal notranslate"><span class="pre">DASCLayerPolicy.retained_heads</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCLayerPolicy.static_horizons"><code class="docutils literal notranslate"><span class="pre">DASCLayerPolicy.static_horizons</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCLayerPolicy.validate_partition"><code class="docutils literal notranslate"><span class="pre">DASCLayerPolicy.validate_partition()</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCPolicy"><code class="docutils literal notranslate"><span class="pre">DASCPolicy</span></code></a><ul>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCPolicy.active_runtime_state"><code class="docutils literal notranslate"><span class="pre">DASCPolicy.active_runtime_state</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCPolicy.calibration_data_id"><code class="docutils literal notranslate"><span class="pre">DASCPolicy.calibration_data_id</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCPolicy.decay_parameter_storage_dtype"><code class="docutils literal notranslate"><span class="pre">DASCPolicy.decay_parameter_storage_dtype</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCPolicy.decay_parameters_sha256"><code class="docutils literal notranslate"><span class="pre">DASCPolicy.decay_parameters_sha256</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCPolicy.epsilon"><code class="docutils literal notranslate"><span class="pre">DASCPolicy.epsilon</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCPolicy.format_version"><code class="docutils literal notranslate"><span class="pre">DASCPolicy.format_version</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCPolicy.granularity"><code class="docutils literal notranslate"><span class="pre">DASCPolicy.granularity</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCPolicy.layers"><code class="docutils literal notranslate"><span class="pre">DASCPolicy.layers</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCPolicy.measurements"><code class="docutils literal notranslate"><span class="pre">DASCPolicy.measurements</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCPolicy.model_config"><code class="docutils literal notranslate"><span class="pre">DASCPolicy.model_config</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCPolicy.model_config_id"><code class="docutils literal notranslate"><span class="pre">DASCPolicy.model_config_id</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCPolicy.model_id"><code class="docutils literal notranslate"><span class="pre">DASCPolicy.model_id</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCPolicy.model_revision"><code class="docutils literal notranslate"><span class="pre">DASCPolicy.model_revision</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCPolicy.model_structure_sha256"><code class="docutils literal notranslate"><span class="pre">DASCPolicy.model_structure_sha256</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCPolicy.preserve_convolution_state"><code class="docutils literal notranslate"><span class="pre">DASCPolicy.preserve_convolution_state</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCPolicy.quality_gates"><code class="docutils literal notranslate"><span class="pre">DASCPolicy.quality_gates</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCPolicy.recovery"><code class="docutils literal notranslate"><span class="pre">DASCPolicy.recovery</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCPolicy.selected_wmax"><code class="docutils literal notranslate"><span class="pre">DASCPolicy.selected_wmax</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCPolicy.static_gate_input"><code class="docutils literal notranslate"><span class="pre">DASCPolicy.static_gate_input</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCPolicy.validate_policy"><code class="docutils literal notranslate"><span class="pre">DASCPolicy.validate_policy()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCPolicy.variant"><code class="docutils literal notranslate"><span class="pre">DASCPolicy.variant</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCPolicy.wmax_candidates"><code class="docutils literal notranslate"><span class="pre">DASCPolicy.wmax_candidates</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCQualityMeasurement"><code class="docutils literal notranslate"><span class="pre">DASCQualityMeasurement</span></code></a><ul>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCQualityMeasurement.convolution_state_exact"><code class="docutils literal notranslate"><span class="pre">DASCQualityMeasurement.convolution_state_exact</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCQualityMeasurement.finite_continuation_logits"><code class="docutils literal notranslate"><span class="pre">DASCQualityMeasurement.finite_continuation_logits</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCQualityMeasurement.model_config"><code class="docutils literal notranslate"><span class="pre">DASCQualityMeasurement.model_config</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCQualityMeasurement.omitted_state_matches_recovery"><code class="docutils literal notranslate"><span class="pre">DASCQualityMeasurement.omitted_state_matches_recovery</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCQualityMeasurement.perplexity_retention"><code class="docutils literal notranslate"><span class="pre">DASCQualityMeasurement.perplexity_retention</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCQualityMeasurement.retained_state_exact"><code class="docutils literal notranslate"><span class="pre">DASCQualityMeasurement.retained_state_exact</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCQualityMeasurement.slice_id"><code class="docutils literal notranslate"><span class="pre">DASCQualityMeasurement.slice_id</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCQualityMeasurement.top1_agreement"><code class="docutils literal notranslate"><span class="pre">DASCQualityMeasurement.top1_agreement</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.analyze_gdn_decay"><code class="docutils literal notranslate"><span class="pre">analyze_gdn_decay()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.calibrate"><code class="docutils literal notranslate"><span class="pre">calibrate()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.compute_gdn_decay_horizons"><code class="docutils literal notranslate"><span class="pre">compute_gdn_decay_horizons()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.export_policy"><code class="docutils literal notranslate"><span class="pre">export_policy()</span></code></a></li>
+</ul>
+</div><div id="ethical-ad-placement" data-ea-publisher="readthedocs"></div></div>
+  </aside>
+  <div class="rside-overlay js-menu" role="button" aria-label="Close Table of Contents" aria-controls="rside" aria-expanded="false"></div>
+  <main class="sy-main w-full max-sm:max-w-full print:pt-6">
+<div class="sy-breadcrumbs" role="navigation">
+  <div class="sy-breadcrumbs-inner flex items-center">
+    <div class="md:hidden mr-3">
+      <button class="js-menu" aria-label="Menu" type="button" aria-controls="lside" aria-expanded="false">
+        <i class="i-lucide menu"></i>
+      </button>
+    </div>
+    <ol class="flex-1" itemscope itemtype="https://schema.org/BreadcrumbList"><li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+        <a itemprop="item" href="../../index.html"><span itemprop="name">Model Optimizer</span></a>
+        <span>/</span>
+        <meta itemprop="position" content="1" />
+      </li><li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+        <a itemprop="item" href="../1_modelopt_api.html"><span itemprop="name">modelopt API</span></a>
+        <span>/</span>
+        <meta itemprop="position" content="2" />
+      </li><li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+        <a itemprop="item" href="modelopt.torch.html"><span itemprop="name">torch</span></a>
+        <span>/</span>
+        <meta itemprop="position" content="3" />
+      </li><li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+        <a itemprop="item" href="modelopt.torch.sparsity.html"><span itemprop="name">sparsity</span></a>
+        <span>/</span>
+        <meta itemprop="position" content="4" />
+      </li><li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+        <strong itemprop="name">state_sparsity</strong>
+        <meta itemprop="position" content="5" />
+      </li></ol>
+    <div class="xl:hidden ml-1">
+      <button class="js-menu" aria-label="Show table of contents" type="button" aria-controls="rside"
+        aria-expanded="false">
+        <i class="i-lucide outdent"></i>
+      </button>
+    </div>
+  </div>
+</div><div class="flex flex-col break-words justify-between">
+      <div class="relative min-w-0 max-w-6xl px-6 pb-6 pt-8 xl:px-12">
+  <article class="yue dark-code" role="main">
+          <section id="state-sparsity">
+<h1>state_sparsity<a class="headerlink" href="#state-sparsity" title="Link to this heading">#</a></h1>
+<p id="module-modelopt.torch.sparsity.state_sparsity">Decay-aware sparsity policies for persisted recurrent state.</p>
+<p class="rubric">Classes</p>
+<div class="table-wrapper autosummary longtable docutils container">
+<table class="autosummary longtable docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCCalibrationMeasurement" title="modelopt.torch.sparsity.state_sparsity.DASCCalibrationMeasurement"><code class="xref py py-obj docutils literal notranslate"><span class="pre">DASCCalibrationMeasurement</span></code></a></p></td>
+<td><p>Caller-supplied measurements for one candidate recovery window.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCConfig" title="modelopt.torch.sparsity.state_sparsity.DASCConfig"><code class="xref py py-obj docutils literal notranslate"><span class="pre">DASCConfig</span></code></a></p></td>
+<td><p>Configuration for GDN decay-aware state checkpoint sparsity.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCLayerPolicy" title="modelopt.torch.sparsity.state_sparsity.DASCLayerPolicy"><code class="xref py py-obj docutils literal notranslate"><span class="pre">DASCLayerPolicy</span></code></a></p></td>
+<td><p>Serializable whole-head policy for one GDN layer.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCPolicy" title="modelopt.torch.sparsity.state_sparsity.DASCPolicy"><code class="xref py py-obj docutils literal notranslate"><span class="pre">DASCPolicy</span></code></a></p></td>
+<td><p>Standalone JSON-safe DASC deployment policy.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCQualityMeasurement" title="modelopt.torch.sparsity.state_sparsity.DASCQualityMeasurement"><code class="xref py py-obj docutils literal notranslate"><span class="pre">DASCQualityMeasurement</span></code></a></p></td>
+<td><p>Quality and lifecycle measurements for one calibration slice.</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p class="rubric">Functions</p>
+<div class="table-wrapper autosummary longtable docutils container">
+<table class="autosummary longtable docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.analyze_gdn_decay" title="modelopt.torch.sparsity.state_sparsity.analyze_gdn_decay"><code class="xref py py-obj docutils literal notranslate"><span class="pre">analyze_gdn_decay</span></code></a></p></td>
+<td><p>Return deterministic per-head horizons for every GDN module in a model.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.calibrate" title="modelopt.torch.sparsity.state_sparsity.calibrate"><code class="xref py py-obj docutils literal notranslate"><span class="pre">calibrate</span></code></a></p></td>
+<td><p>Calibrate and attach a DASC policy without changing model execution.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.compute_gdn_decay_horizons" title="modelopt.torch.sparsity.state_sparsity.compute_gdn_decay_horizons"><code class="xref py py-obj docutils literal notranslate"><span class="pre">compute_gdn_decay_horizons</span></code></a></p></td>
+<td><p>Compute one static retention horizon per GDN head in CPU float64.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.export_policy" title="modelopt.torch.sparsity.state_sparsity.export_policy"><code class="xref py py-obj docutils literal notranslate"><span class="pre">export_policy</span></code></a></p></td>
+<td><p>Export a JSON-safe DASC policy after validating model structure and decay parameters.</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCCalibrationMeasurement">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">DASCCalibrationMeasurement</span></span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCCalibrationMeasurement" title="Link to this definition">#</a></dt>
+<dd><p>Bases: <a class="reference internal" href="modelopt.torch.opt.config.html#modelopt.torch.opt.config.ModeloptBaseConfig" title="modelopt.torch.opt.config.ModeloptBaseConfig"><code class="xref py py-class docutils literal notranslate"><span class="pre">ModeloptBaseConfig</span></code></a></p>
+<p>Caller-supplied measurements for one candidate recovery window.</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCCalibrationMeasurement.checkpoint_savings">
+<span class="sig-name descname"><span class="pre">checkpoint_savings</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">float</span></span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCCalibrationMeasurement.checkpoint_savings" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCCalibrationMeasurement.model_config">
+<span class="sig-name descname"><span class="pre">model_config</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">{'extra':</span> <span class="pre">'forbid',</span> <span class="pre">'validate_assignment':</span> <span class="pre">True}</span></span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCCalibrationMeasurement.model_config" title="Link to this definition">#</a></dt>
+<dd><p>Configuration for the model, should be a dictionary conforming to [<cite>ConfigDict</cite>][pydantic.config.ConfigDict].</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCCalibrationMeasurement.quality">
+<span class="sig-name descname"><span class="pre">quality</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">list</span><span class="p"><span class="pre">[</span></span><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCQualityMeasurement" title="modelopt.torch.sparsity.state_sparsity.config.DASCQualityMeasurement"><span class="pre">DASCQualityMeasurement</span></a><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCCalibrationMeasurement.quality" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCCalibrationMeasurement.retained_heads">
+<span class="sig-name descname"><span class="pre">retained_heads</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCCalibrationMeasurement.retained_heads" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCCalibrationMeasurement.total_heads">
+<span class="sig-name descname"><span class="pre">total_heads</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCCalibrationMeasurement.total_heads" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCCalibrationMeasurement.validate_unique_slices">
+<span class="property"><span class="k"><span class="pre">classmethod</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">validate_unique_slices</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">quality</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCCalibrationMeasurement.validate_unique_slices" title="Link to this definition">#</a></dt>
+<dd><p>Require one result per named calibration slice.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>quality</strong> (<em>list</em><em>[</em><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCQualityMeasurement" title="modelopt.torch.sparsity.state_sparsity.config.DASCQualityMeasurement"><em>DASCQualityMeasurement</em></a><em>]</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>list</em>[<a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCQualityMeasurement" title="modelopt.torch.sparsity.state_sparsity.config.DASCQualityMeasurement"><em>DASCQualityMeasurement</em></a>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCCalibrationMeasurement.variant">
+<span class="sig-name descname"><span class="pre">variant</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Literal</span><span class="p"><span class="pre">[</span></span><span class="s"><span class="pre">'dasc_nr'</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="s"><span class="pre">'dasc_wr'</span></span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCCalibrationMeasurement.variant" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCCalibrationMeasurement.wmax">
+<span class="sig-name descname"><span class="pre">wmax</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCCalibrationMeasurement.wmax" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCConfig">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">DASCConfig</span></span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCConfig" title="Link to this definition">#</a></dt>
+<dd><p>Bases: <a class="reference internal" href="modelopt.torch.opt.config.html#modelopt.torch.opt.config.ModeloptBaseConfig" title="modelopt.torch.opt.config.ModeloptBaseConfig"><code class="xref py py-class docutils literal notranslate"><span class="pre">ModeloptBaseConfig</span></code></a></p>
+<p>Configuration for GDN decay-aware state checkpoint sparsity.</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCConfig.calibration_data_id">
+<span class="sig-name descname"><span class="pre">calibration_data_id</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCConfig.calibration_data_id" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCConfig.decay_parameter_storage_dtype">
+<span class="sig-name descname"><span class="pre">decay_parameter_storage_dtype</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Literal</span><span class="p"><span class="pre">[</span></span><span class="s"><span class="pre">'float16'</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="s"><span class="pre">'bfloat16'</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="s"><span class="pre">'float32'</span></span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCConfig.decay_parameter_storage_dtype" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCConfig.epsilon">
+<span class="sig-name descname"><span class="pre">epsilon</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">float</span></span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCConfig.epsilon" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCConfig.granularity">
+<span class="sig-name descname"><span class="pre">granularity</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Literal</span><span class="p"><span class="pre">[</span></span><span class="s"><span class="pre">'gdn_head'</span></span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCConfig.granularity" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCConfig.min_checkpoint_savings">
+<span class="sig-name descname"><span class="pre">min_checkpoint_savings</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">float</span></span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCConfig.min_checkpoint_savings" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCConfig.min_perplexity_retention">
+<span class="sig-name descname"><span class="pre">min_perplexity_retention</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">float</span></span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCConfig.min_perplexity_retention" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCConfig.min_top1_agreement">
+<span class="sig-name descname"><span class="pre">min_top1_agreement</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">float</span></span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCConfig.min_top1_agreement" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCConfig.model_config">
+<span class="sig-name descname"><span class="pre">model_config</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">{'extra':</span> <span class="pre">'forbid',</span> <span class="pre">'protected_namespaces':</span> <span class="pre">(),</span> <span class="pre">'validate_assignment':</span> <span class="pre">True}</span></span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCConfig.model_config" title="Link to this definition">#</a></dt>
+<dd><p>Configuration for the model, should be a dictionary conforming to [<cite>ConfigDict</cite>][pydantic.config.ConfigDict].</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCConfig.model_config_id">
+<span class="sig-name descname"><span class="pre">model_config_id</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCConfig.model_config_id" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCConfig.model_id">
+<span class="sig-name descname"><span class="pre">model_id</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCConfig.model_id" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCConfig.model_revision">
+<span class="sig-name descname"><span class="pre">model_revision</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCConfig.model_revision" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCConfig.preserve_convolution_state">
+<span class="sig-name descname"><span class="pre">preserve_convolution_state</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Literal</span><span class="p"><span class="pre">[</span></span><span class="k"><span class="pre">True</span></span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCConfig.preserve_convolution_state" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCConfig.static_gate_input">
+<span class="sig-name descname"><span class="pre">static_gate_input</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">float</span></span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCConfig.static_gate_input" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCConfig.validate_epsilon">
+<span class="property"><span class="k"><span class="pre">classmethod</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">validate_epsilon</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">epsilon</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCConfig.validate_epsilon" title="Link to this definition">#</a></dt>
+<dd><p>Require a finite decay threshold strictly between zero and one.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>epsilon</strong> (<em>float</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>float</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCConfig.validate_perplexity_gate">
+<span class="property"><span class="k"><span class="pre">classmethod</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">validate_perplexity_gate</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">value</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCConfig.validate_perplexity_gate" title="Link to this definition">#</a></dt>
+<dd><p>Require a finite positive retention gate.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>value</strong> (<em>float</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>float</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCConfig.validate_provenance">
+<span class="property"><span class="k"><span class="pre">classmethod</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">validate_provenance</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">value</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCConfig.validate_provenance" title="Link to this definition">#</a></dt>
+<dd><p>Require explicit immutable provenance instead of inferred defaults.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>value</strong> (<em>str</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>str</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCConfig.validate_savings_gate">
+<span class="property"><span class="k"><span class="pre">classmethod</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">validate_savings_gate</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">value</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCConfig.validate_savings_gate" title="Link to this definition">#</a></dt>
+<dd><p>Require a finite physical checkpoint-savings gate in [0, 1).</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>value</strong> (<em>float</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>float</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCConfig.validate_static_gate_input">
+<span class="property"><span class="k"><span class="pre">classmethod</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">validate_static_gate_input</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">value</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCConfig.validate_static_gate_input" title="Link to this definition">#</a></dt>
+<dd><p>Require a finite representative gate input.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>value</strong> (<em>float</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>float</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCConfig.validate_top1_gate">
+<span class="property"><span class="k"><span class="pre">classmethod</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">validate_top1_gate</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">value</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCConfig.validate_top1_gate" title="Link to this definition">#</a></dt>
+<dd><p>Require a finite agreement gate in [0, 1].</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>value</strong> (<em>float</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>float</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCConfig.validate_wmax_candidates">
+<span class="property"><span class="k"><span class="pre">classmethod</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">validate_wmax_candidates</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">candidates</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCConfig.validate_wmax_candidates" title="Link to this definition">#</a></dt>
+<dd><p>Require unique positive integer windows without power-of-two restrictions.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>candidates</strong> (<em>object</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>object</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCConfig.variant">
+<span class="sig-name descname"><span class="pre">variant</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Literal</span><span class="p"><span class="pre">[</span></span><span class="s"><span class="pre">'dasc_nr'</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="s"><span class="pre">'dasc_wr'</span></span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCConfig.variant" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCConfig.wmax_candidates">
+<span class="sig-name descname"><span class="pre">wmax_candidates</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">list</span><span class="p"><span class="pre">[</span></span><span class="pre">int</span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCConfig.wmax_candidates" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCLayerPolicy">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">DASCLayerPolicy</span></span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCLayerPolicy" title="Link to this definition">#</a></dt>
+<dd><p>Bases: <a class="reference internal" href="modelopt.torch.opt.config.html#modelopt.torch.opt.config.ModeloptBaseConfig" title="modelopt.torch.opt.config.ModeloptBaseConfig"><code class="xref py py-class docutils literal notranslate"><span class="pre">ModeloptBaseConfig</span></code></a></p>
+<p>Serializable whole-head policy for one GDN layer.</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCLayerPolicy.model_config">
+<span class="sig-name descname"><span class="pre">model_config</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">{'extra':</span> <span class="pre">'forbid',</span> <span class="pre">'validate_assignment':</span> <span class="pre">True}</span></span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCLayerPolicy.model_config" title="Link to this definition">#</a></dt>
+<dd><p>Configuration for the model, should be a dictionary conforming to [<cite>ConfigDict</cite>][pydantic.config.ConfigDict].</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCLayerPolicy.num_heads">
+<span class="sig-name descname"><span class="pre">num_heads</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCLayerPolicy.num_heads" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCLayerPolicy.omitted_heads">
+<span class="sig-name descname"><span class="pre">omitted_heads</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">list</span><span class="p"><span class="pre">[</span></span><span class="pre">int</span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCLayerPolicy.omitted_heads" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCLayerPolicy.retained_heads">
+<span class="sig-name descname"><span class="pre">retained_heads</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">list</span><span class="p"><span class="pre">[</span></span><span class="pre">int</span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCLayerPolicy.retained_heads" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCLayerPolicy.static_horizons">
+<span class="sig-name descname"><span class="pre">static_horizons</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">list</span><span class="p"><span class="pre">[</span></span><span class="pre">float</span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCLayerPolicy.static_horizons" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCLayerPolicy.validate_partition">
+<span class="sig-name descname"><span class="pre">validate_partition</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCLayerPolicy.validate_partition" title="Link to this definition">#</a></dt>
+<dd><p>Validate that retained and omitted indices partition every GDN head.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCLayerPolicy" title="modelopt.torch.sparsity.state_sparsity.config.DASCLayerPolicy"><em>DASCLayerPolicy</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCPolicy">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">DASCPolicy</span></span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCPolicy" title="Link to this definition">#</a></dt>
+<dd><p>Bases: <a class="reference internal" href="modelopt.torch.opt.config.html#modelopt.torch.opt.config.ModeloptBaseConfig" title="modelopt.torch.opt.config.ModeloptBaseConfig"><code class="xref py py-class docutils literal notranslate"><span class="pre">ModeloptBaseConfig</span></code></a></p>
+<p>Standalone JSON-safe DASC deployment policy.</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCPolicy.active_runtime_state">
+<span class="sig-name descname"><span class="pre">active_runtime_state</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Literal</span><span class="p"><span class="pre">[</span></span><span class="s"><span class="pre">'dense'</span></span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCPolicy.active_runtime_state" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCPolicy.calibration_data_id">
+<span class="sig-name descname"><span class="pre">calibration_data_id</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCPolicy.calibration_data_id" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCPolicy.decay_parameter_storage_dtype">
+<span class="sig-name descname"><span class="pre">decay_parameter_storage_dtype</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Literal</span><span class="p"><span class="pre">[</span></span><span class="s"><span class="pre">'float16'</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="s"><span class="pre">'bfloat16'</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="s"><span class="pre">'float32'</span></span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCPolicy.decay_parameter_storage_dtype" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCPolicy.decay_parameters_sha256">
+<span class="sig-name descname"><span class="pre">decay_parameters_sha256</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCPolicy.decay_parameters_sha256" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCPolicy.epsilon">
+<span class="sig-name descname"><span class="pre">epsilon</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">float</span></span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCPolicy.epsilon" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCPolicy.format_version">
+<span class="sig-name descname"><span class="pre">format_version</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Literal</span><span class="p"><span class="pre">[</span></span><span class="m"><span class="pre">1</span></span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCPolicy.format_version" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCPolicy.granularity">
+<span class="sig-name descname"><span class="pre">granularity</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Literal</span><span class="p"><span class="pre">[</span></span><span class="s"><span class="pre">'gdn_head'</span></span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCPolicy.granularity" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCPolicy.layers">
+<span class="sig-name descname"><span class="pre">layers</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">dict</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCLayerPolicy" title="modelopt.torch.sparsity.state_sparsity.config.DASCLayerPolicy"><span class="pre">DASCLayerPolicy</span></a><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCPolicy.layers" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCPolicy.measurements">
+<span class="sig-name descname"><span class="pre">measurements</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">list</span><span class="p"><span class="pre">[</span></span><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCCalibrationMeasurement" title="modelopt.torch.sparsity.state_sparsity.config.DASCCalibrationMeasurement"><span class="pre">DASCCalibrationMeasurement</span></a><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCPolicy.measurements" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCPolicy.model_config">
+<span class="sig-name descname"><span class="pre">model_config</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">{'extra':</span> <span class="pre">'forbid',</span> <span class="pre">'protected_namespaces':</span> <span class="pre">(),</span> <span class="pre">'validate_assignment':</span> <span class="pre">True}</span></span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCPolicy.model_config" title="Link to this definition">#</a></dt>
+<dd><p>Configuration for the model, should be a dictionary conforming to [<cite>ConfigDict</cite>][pydantic.config.ConfigDict].</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCPolicy.model_config_id">
+<span class="sig-name descname"><span class="pre">model_config_id</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCPolicy.model_config_id" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCPolicy.model_id">
+<span class="sig-name descname"><span class="pre">model_id</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCPolicy.model_id" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCPolicy.model_revision">
+<span class="sig-name descname"><span class="pre">model_revision</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCPolicy.model_revision" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCPolicy.model_structure_sha256">
+<span class="sig-name descname"><span class="pre">model_structure_sha256</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCPolicy.model_structure_sha256" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCPolicy.preserve_convolution_state">
+<span class="sig-name descname"><span class="pre">preserve_convolution_state</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Literal</span><span class="p"><span class="pre">[</span></span><span class="k"><span class="pre">True</span></span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCPolicy.preserve_convolution_state" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCPolicy.quality_gates">
+<span class="sig-name descname"><span class="pre">quality_gates</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">dict</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">float</span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCPolicy.quality_gates" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCPolicy.recovery">
+<span class="sig-name descname"><span class="pre">recovery</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Literal</span><span class="p"><span class="pre">[</span></span><span class="s"><span class="pre">'zero'</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="s"><span class="pre">'suffix_replay'</span></span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCPolicy.recovery" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCPolicy.selected_wmax">
+<span class="sig-name descname"><span class="pre">selected_wmax</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCPolicy.selected_wmax" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCPolicy.static_gate_input">
+<span class="sig-name descname"><span class="pre">static_gate_input</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">float</span></span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCPolicy.static_gate_input" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCPolicy.validate_policy">
+<span class="sig-name descname"><span class="pre">validate_policy</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCPolicy.validate_policy" title="Link to this definition">#</a></dt>
+<dd><p>Reject inconsistent variant, candidate, measurement, or mask metadata.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCPolicy" title="modelopt.torch.sparsity.state_sparsity.config.DASCPolicy"><em>DASCPolicy</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCPolicy.variant">
+<span class="sig-name descname"><span class="pre">variant</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Literal</span><span class="p"><span class="pre">[</span></span><span class="s"><span class="pre">'dasc_nr'</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="s"><span class="pre">'dasc_wr'</span></span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCPolicy.variant" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCPolicy.wmax_candidates">
+<span class="sig-name descname"><span class="pre">wmax_candidates</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">list</span><span class="p"><span class="pre">[</span></span><span class="pre">int</span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCPolicy.wmax_candidates" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCQualityMeasurement">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">DASCQualityMeasurement</span></span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCQualityMeasurement" title="Link to this definition">#</a></dt>
+<dd><p>Bases: <a class="reference internal" href="modelopt.torch.opt.config.html#modelopt.torch.opt.config.ModeloptBaseConfig" title="modelopt.torch.opt.config.ModeloptBaseConfig"><code class="xref py py-class docutils literal notranslate"><span class="pre">ModeloptBaseConfig</span></code></a></p>
+<p>Quality and lifecycle measurements for one calibration slice.</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCQualityMeasurement.convolution_state_exact">
+<span class="sig-name descname"><span class="pre">convolution_state_exact</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCQualityMeasurement.convolution_state_exact" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCQualityMeasurement.finite_continuation_logits">
+<span class="sig-name descname"><span class="pre">finite_continuation_logits</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCQualityMeasurement.finite_continuation_logits" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCQualityMeasurement.model_config">
+<span class="sig-name descname"><span class="pre">model_config</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">{'extra':</span> <span class="pre">'forbid',</span> <span class="pre">'validate_assignment':</span> <span class="pre">True}</span></span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCQualityMeasurement.model_config" title="Link to this definition">#</a></dt>
+<dd><p>Configuration for the model, should be a dictionary conforming to [<cite>ConfigDict</cite>][pydantic.config.ConfigDict].</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCQualityMeasurement.omitted_state_matches_recovery">
+<span class="sig-name descname"><span class="pre">omitted_state_matches_recovery</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCQualityMeasurement.omitted_state_matches_recovery" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCQualityMeasurement.perplexity_retention">
+<span class="sig-name descname"><span class="pre">perplexity_retention</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">float</span></span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCQualityMeasurement.perplexity_retention" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCQualityMeasurement.retained_state_exact">
+<span class="sig-name descname"><span class="pre">retained_state_exact</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCQualityMeasurement.retained_state_exact" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCQualityMeasurement.slice_id">
+<span class="sig-name descname"><span class="pre">slice_id</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCQualityMeasurement.slice_id" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.DASCQualityMeasurement.top1_agreement">
+<span class="sig-name descname"><span class="pre">top1_agreement</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">float</span></span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.DASCQualityMeasurement.top1_agreement" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.analyze_gdn_decay">
+<span class="sig-name descname"><span class="pre">analyze_gdn_decay</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em>, <em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">epsilon</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0.001</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">static_gate_input</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">-0.3</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.analyze_gdn_decay" title="Link to this definition">#</a></dt>
+<dd><p>Return deterministic per-head horizons for every GDN module in a model.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>model</strong> (<em>Module</em>)</p></li>
+<li><p><strong>epsilon</strong> (<em>float</em>)</p></li>
+<li><p><strong>static_gate_input</strong> (<em>float</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>dict</em>[<em>str</em>, <em>list</em>[<em>float</em>]]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.calibrate">
+<span class="sig-name descname"><span class="pre">calibrate</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">config</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">measurements</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.calibrate" title="Link to this definition">#</a></dt>
+<dd><p>Calibrate and attach a DASC policy without changing model execution.</p>
+<p><code class="docutils literal notranslate"><span class="pre">measurements</span></code> must contain exactly one entry for every configured <code class="docutils literal notranslate"><span class="pre">Wmax</span></code> candidate.
+The largest candidate passing every quality, lifecycle, and storage gate is selected.
+Recalibrating replaces the existing DASC mode-state entry in place.</p>
+<p>Example:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="kn">import</span><span class="w"> </span><span class="nn">modelopt.torch.sparsity.state_sparsity</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">mtss</span>
+</span><span data-line="2">
+</span><span data-line="3"><span class="n">model</span> <span class="o">=</span> <span class="n">mtss</span><span class="o">.</span><span class="n">calibrate</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">config</span><span class="p">,</span> <span class="n">measurements</span><span class="p">)</span>
+</span><span data-line="4"><span class="n">deployment_policy</span> <span class="o">=</span> <span class="n">mtss</span><span class="o">.</span><span class="n">export_policy</span><span class="p">(</span><span class="n">model</span><span class="p">)</span>
+</span></pre></div>
+</div>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>model</strong> (<em>Module</em>) – Model containing GatedDeltaNet modules with one-dimensional <code class="docutils literal notranslate"><span class="pre">A_log</span></code> and
+<code class="docutils literal notranslate"><span class="pre">dt_bias</span></code> tensors.</p></li>
+<li><p><strong>config</strong> (<em>dict</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>] </em><em>| </em><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCConfig" title="modelopt.torch.sparsity.state_sparsity.config.DASCConfig"><em>DASCConfig</em></a>) – Checkpoint provenance, candidate windows, and quality gates.</p></li>
+<li><p><strong>measurements</strong> (<em>Iterable</em><em>[</em><a class="reference internal" href="#modelopt.torch.sparsity.state_sparsity.DASCCalibrationMeasurement" title="modelopt.torch.sparsity.state_sparsity.config.DASCCalibrationMeasurement"><em>DASCCalibrationMeasurement</em></a><em> | </em><em>dict</em><em>]</em>) – Quality and checkpoint-storage results produced by the caller’s paired
+dense-versus-DASC calibration workflow.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>The input model with a serializable DASC policy attached through ModelOpt state.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>Module</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.compute_gdn_decay_horizons">
+<span class="sig-name descname"><span class="pre">compute_gdn_decay_horizons</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">a_log</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">dt_bias</span></span></em>, <em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">epsilon</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0.001</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">static_gate_input</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">-0.3</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.compute_gdn_decay_horizons" title="Link to this definition">#</a></dt>
+<dd><p>Compute one static retention horizon per GDN head in CPU float64.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>a_log</strong> (<em>Tensor</em>)</p></li>
+<li><p><strong>dt_bias</strong> (<em>Tensor</em>)</p></li>
+<li><p><strong>epsilon</strong> (<em>float</em>)</p></li>
+<li><p><strong>static_gate_input</strong> (<em>float</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>Tensor</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.sparsity.state_sparsity.export_policy">
+<span class="sig-name descname"><span class="pre">export_policy</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.sparsity.state_sparsity.export_policy" title="Link to this definition">#</a></dt>
+<dd><p>Export a JSON-safe DASC policy after validating model structure and decay parameters.</p>
+<p>This policy does not implement checkpoint packing or recovery. A serving backend must preserve
+convolution state, store retained complete GDN heads, recover omitted heads according to the
+declared variant, and materialize the ordinary dense runtime state before continuation.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>model</strong> (<em>Module</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>dict</em>[<em>str</em>, <em>Any</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+</section>
+
+        </article><button class="back-to-top" type="button">
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+    <path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8v12z"></path>
+  </svg>
+  <span>Back to top</span>
+</button><div class="navigation flex print:hidden"><div class="navigation-prev">
+    <a href="modelopt.torch.sparsity.attention_sparsity.utils.html">
+      <i class="i-lucide chevron-left"></i>
+      <div class="page-info">
+        <span>Previous</span><div class="title">utils</div></div>
+    </a>
+  </div><div class="navigation-next">
+    <a href="modelopt.torch.sparsity.weight_sparsity.html">
+      <div class="page-info">
+        <span>Next</span>
+        <div class="title">weight_sparsity</div>
+      </div>
+      <i class="i-lucide chevron-right"></i>
+    </a>
+  </div></div></div>
+    </div>
+  </main>
+</div>
+<footer class="sy-foot">
+  <div class="sy-foot-inner sy-container mx-auto">
+    <div class="sy-foot-reserved md:flex justify-between items-center">
+      <div class="sy-foot-copyright"><p>2023-2025, NVIDIA Corporation</p>
+  
+  <p>
+    Made with
+    
+    <a href="https://www.sphinx-doc.org/">Sphinx</a> and
+    
+    <a href="https://shibuya.lepture.com">Shibuya theme</a>.
+  </p>
+</div>
+      <div class="sy-foot-socials"></div>
+    </div>
+  </div>
+</footer>
+      <script src="../../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../../_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="../../_static/sphinx_highlight.js?v=6ffebe34"></script>
+      <script src="../../_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="../../_static/copybutton.js?v=20d3d275"></script>
+      <script src="../../_static/tabs.js?v=3ee01567"></script>
+      <script>let toggleHintShow = 'Click to show';</script>
+      <script>let toggleHintHide = 'Click to hide';</script>
+      <script>let toggleOpenOnPrint = 'true';</script>
+      <script src="../../_static/togglebutton.js?v=b8b12719"></script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+      <script src="../../_static/shibuya.js?v=50760d75"></script>
+      <script src="../../_static/announcements.js?v=d94b986f"></script></body>
+</html>

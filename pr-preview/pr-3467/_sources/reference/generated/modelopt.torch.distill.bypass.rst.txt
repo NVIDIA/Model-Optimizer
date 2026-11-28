@@ -1,0 +1,6 @@
+modelopt.torch.distill.bypass
+=============================
+
+.. currentmodule:: modelopt.torch.distill
+
+.. autofunction:: bypass
