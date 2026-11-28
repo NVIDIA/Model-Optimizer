@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for _is_sparse_sequaential_moe_block and _QuantSparseSequentialMoe."""
+"""Tests for _is_sparse_sequaential_moe_block, _QuantSparseSequentialMoe and token forcing."""
 
 import copy
 
@@ -22,6 +22,8 @@ import torch
 import torch.nn as nn
 
 pytest.importorskip("transformers")
+
+from _test_utils.torch.transformers_models import get_tiny_deepseek_v3, get_tiny_mixtral
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.nn import QuantModuleRegistry, TensorQuantizer
@@ -316,3 +318,36 @@ def test_quantize_sequential_moe_with_token_forcing(block_cls):
     assert owner.top_k == 1  # routing restored after calibration
     with torch.no_grad():
         assert torch.isfinite(model(torch.randn(4, 8))).all()
+
+
+@pytest.mark.parametrize(
+    ("get_model", "forced_top_k"),
+    [
+        (lambda: get_tiny_mixtral(dtype=torch.float32), 3),  # round(4 * 0.75)
+        (
+            # 6 = round(8 * 0.75), more experts than the one group topk_group admits
+            lambda: get_tiny_deepseek_v3(
+                dtype=torch.float32, n_routed_experts=8, n_group=2, topk_group=1
+            ),
+            6,
+        ),
+    ],
+    ids=["mixtral", "deepseek_v3"],
+)
+def test_quantize_fused_moe_with_token_forcing(get_model, forced_top_k):
+    """transformers' own MoE blocks hold fused experts; token forcing must reach them too."""
+    model = get_model()
+    input_ids = torch.randint(0, model.config.vocab_size, (2, 8))
+    quant_cfg = copy.deepcopy(mtq.INT8_DEFAULT_CFG)
+    quant_cfg["algorithm"] = {"method": "max", "moe_calib_experts_ratio": 0.75}
+
+    mtq.quantize(model, quant_cfg, lambda m: m(input_ids))
+
+    blocks = [m for m in model.modules() if hasattr(m, "_moe_calib_experts_ratio")]
+    assert len(blocks) == model.config.num_hidden_layers
+    for block in blocks:
+        assert block._moe_calib_experts_ratio == 0.75
+        assert block.expert_token_count.sum().item() == input_ids.numel() * forced_top_k
+        # Older transformers keep DeepSeek-V3's top_k on the block rather than on its router.
+        owner = block.gate if hasattr(block.gate, "top_k") else block
+        assert owner.top_k == model.config.num_experts_per_tok  # restored

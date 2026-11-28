@@ -30,6 +30,7 @@ from modelopt.torch.opt.mode import (
     _ModeRegistryCls,
 )
 from modelopt.torch.opt.searcher import ForwardLoop
+from modelopt.torch.utils import warn_rank_0
 
 from .compress import compress_convert, compress_restore, update_compress_metadata
 from .config import (
@@ -246,9 +247,16 @@ def wrapped_calib_func(
         assert (
             isinstance(moe_calib_experts_ratio, (int, float)) and 0 < moe_calib_experts_ratio <= 1
         ), f"Invalid moe_calib_experts_ratio {moe_calib_experts_ratio!r}"
+        applied = False
         for module in model.modules():
             if hasattr(module, "_moe_calib_experts_ratio"):
                 module._moe_calib_experts_ratio = moe_calib_experts_ratio
+                applied = True
+        if not applied:
+            warn_rank_0(
+                f"moe_calib_experts_ratio={moe_calib_experts_ratio} has no effect: the model has no "
+                "MoE block whose routing ModelOpt can widen during calibration."
+            )
 
     if func is not None:
         reset_calib_forward_memory()

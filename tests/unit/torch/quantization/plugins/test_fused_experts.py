@@ -74,6 +74,7 @@ from modelopt.torch.quantization.plugins.huggingface import (
     _is_fused_experts_module,
     _is_sparse_sequaential_moe_block,
     _QuantFusedExperts,
+    _QuantSparseMoe,
     assert_fused_experts_intercepted,
     normalize_experts_impl_on_the_fly,
     register_fused_experts_on_the_fly,
@@ -452,8 +453,8 @@ class TestQuantFusedExperts:
         assert QuantModuleRegistry.get(expert_type) is not None
         self._cleanup_registry(expert_type)
 
-    def test_fused_experts_only_registration(self):
-        """Fused MoE: only the expert module is registered, not the block (non-iterable experts)."""
+    def test_fused_moe_block_registration(self):
+        """Fused MoE: the block gets _QuantSparseMoe, which has no per-expert amax sync."""
         model = _TinyMoEModel()
         expert_type = type(model.moe.experts)
         block_type = type(model.moe)
@@ -463,9 +464,11 @@ class TestQuantFusedExperts:
         register_fused_experts_on_the_fly(model)
         register_sparse_moe_on_the_fly(model)
         assert QuantModuleRegistry.get(expert_type) is not None
-        # Block is NOT registered because fused experts are not iterable
-        assert QuantModuleRegistry.get(block_type) is None
+        block = QuantModuleRegistry.convert(model.moe)
+        assert isinstance(block, _QuantSparseMoe)
+        assert not hasattr(block, "layer_sync_moe_local_experts_amax")
         self._cleanup_registry(expert_type)
+        self._cleanup_registry(block_type)
 
     @pytest.mark.parametrize("declared", [True, False], ids=["declared", "by-shape"])
     def test_transposed_fused_experts_are_left_unquantized(self, declared):

@@ -818,9 +818,10 @@ class QuantizeAlgorithmConfig(ModeloptBaseConfig):
             "If specified, we force forward tokens to % of experts during the calibration"
             " pass. This forward is for calibration purpose only and will not affect the"
             " actual inference. NOTE: when set, ``layer_sync_moe_local_experts_amax`` is"
-            " disabled so each expert maintains its own calibration statistics. Not"
-            " supported for all MoE architectures; currently works with a few HuggingFace"
-            " models such as Mixtral, Qwen3Moe, MiniMax."
+            " disabled so each expert maintains its own calibration statistics. Applies to"
+            " HuggingFace MoE blocks whose router (``gate``) or the block itself holds"
+            " ``top_k`` and the expert count, with sequential or fused experts (e.g. Mixtral,"
+            " Qwen3Moe, DeepseekV3, MiniMax); it warns when the model has none."
         ),
     )
 

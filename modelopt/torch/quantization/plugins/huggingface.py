@@ -646,13 +646,8 @@ class _TransposedExpertsCalibMixin:
             yield weight.transpose(-1, -2), getattr(self, f"{weight_name}_weight_quantizer")
 
 
-class _QuantSparseSequentialMoe(QuantModule):
-    """Quantization wrapper for HuggingFace sparse MoE blocks.
-
-    This base class is for Sequential MoEs (i.e each experts are implemented as standalone modules),
-    e.g. remote-code models; native transformers MoEs use fused experts instead.
-
-    Supports ``layer_sync_moe_local_experts_amax`` to sync input quantizer amax across experts.
+class _QuantSparseMoe(QuantModule):
+    """Quantization wrapper for HuggingFace sparse MoE blocks, sequential or fused experts alike.
 
     Optionally supports config-driven features (disabled by default):
     - ``_moe_calib_experts_ratio``: force-forward tokens to more experts during calibration.
@@ -708,9 +703,9 @@ class _QuantSparseSequentialMoe(QuantModule):
             counts = torch.bincount(indices.reshape(-1), minlength=self.expert_token_count.shape[0])
             self.expert_token_count += counts.to(self.expert_token_count.device)
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(self, *args, **kwargs):
         if self._moe_calib_experts_ratio is None:
-            return super().forward(hidden_states)
+            return super().forward(*args, **kwargs)
 
         is_calib = any(getattr(m, "_if_calib", False) for m in self.experts.modules())
 
@@ -730,20 +725,27 @@ class _QuantSparseSequentialMoe(QuantModule):
                 original_top_k, round(self._num_experts() * self._moe_calib_experts_ratio)
             )
             try:
-                super().forward(hidden_states)
+                super().forward(*args, **kwargs)
             finally:
                 top_k_owner.top_k = original_top_k
             self._count_expert_tokens = False
 
-        output = super().forward(hidden_states)
+        output = super().forward(*args, **kwargs)
         self._count_expert_tokens = False
         return output
+
+
+class _QuantSparseSequentialMoe(_QuantSparseMoe):
+    """:class:`_QuantSparseMoe` for blocks whose experts are standalone modules, e.g. remote code.
+
+    Adds ``layer_sync_moe_local_experts_amax``, which syncs input quantizer amax across experts.
+    Fused experts need no sync: each of their projections has one input quantizer for all experts.
+    """
 
     def layer_sync_moe_local_experts_amax(self, sync_weight_amax=False):
         """Sync input_quantizer amax across experts so all share the same amax per quantizer.
 
         Skipped when _moe_calib_experts_ratio is set, as each expert is calibrated independently.
-        Also skipped when experts is a fused module (e.g. Llama4TextExperts) with shared quantizers.
 
         Args:
             sync_weight_amax: If True, also sync weight quantizer amax across experts.
@@ -1546,22 +1548,18 @@ def _has_num_experts(obj):
     return hasattr(obj, "num_experts") or hasattr(obj, "n_routed_experts")
 
 
-def _is_sparse_sequaential_moe_block(module):
-    """Check if a module is structurally a sparse sequential MoE block compatible with _QuantSparseSequentialMoe.
+def _is_sparse_moe_block(module):
+    """Check if a module is structurally a sparse MoE block compatible with _QuantSparseMoe.
 
     All HuggingFace MoE blocks (Mixtral, Qwen3Moe, Qwen2Moe, Qwen3Next, Llama4, MiniMax,
-    NemotronH, etc.) share a common structural pattern: a ``gate`` (TopKRouter) sub-module with
-    routing attributes (``top_k`` and ``num_experts`` or ``n_routed_experts``), and an ``experts``
-    sub-module.
+    NemotronH, DeepseekV3, etc.) share a common structural pattern: a ``gate`` (TopKRouter)
+    sub-module with routing attributes (``top_k`` and ``num_experts`` or ``n_routed_experts``), and
+    an ``experts`` sub-module, sequential or fused.
 
     This function detects that pattern instead of relying on class names, making it forward-compatible
     with new MoE architectures.
     """
     if not hasattr(module, "experts"):
-        return False
-
-    if not hasattr(module.experts, "__iter__"):
-        # Fused (batched) experts, no per-expert quantizers
         return False
 
     # Primary: gate sub-module has topk/top_k + num_experts (standard TopKRouter pattern)
@@ -1579,11 +1577,21 @@ def _is_sparse_sequaential_moe_block(module):
     return False
 
 
+def _is_sparse_sequaential_moe_block(module):
+    """Check if a module is a sparse MoE block whose experts are standalone modules."""
+    return (
+        hasattr(module, "experts")
+        and hasattr(module.experts, "__iter__")
+        and _is_sparse_moe_block(module)
+    )
+
+
 def register_sparse_moe_on_the_fly(model):
-    """Auto-detect and register MOE modules as _QuantSparseSequentialMoe.
+    """Auto-detect and register MOE modules as _QuantSparseMoe.
 
     Walks the model tree, identifies MoE blocks by their structural attributes
-    (``gate`` + ``experts``), and registers unregistered ones with ``_QuantSparseSequentialMoe``.
+    (``gate`` + ``experts``), and registers unregistered ones: with ``_QuantSparseSequentialMoe``
+    when their experts are standalone modules, else with ``_QuantSparseMoe``.
     """
     visited_types = set()
     for name, module in model.named_modules():
@@ -1596,14 +1604,17 @@ def register_sparse_moe_on_the_fly(model):
 
         visited_types.add(mod_type)
 
-        if _is_sparse_sequaential_moe_block(module):
+        if _is_sparse_moe_block(module):
+            wrapper = (
+                _QuantSparseSequentialMoe
+                if _is_sparse_sequaential_moe_block(module)
+                else _QuantSparseMoe
+            )
             print(
                 f"\033[1mDetected MOE module '{name}' of type {mod_type.__name__}, "
-                f"registering with _QuantSparseSequentialMoe.\033[0m"
+                f"registering with {wrapper.__name__}.\033[0m"
             )
-            QuantModuleRegistry.register({mod_type: f"hf.{mod_type.__name__}"})(
-                _QuantSparseSequentialMoe
-            )
+            QuantModuleRegistry.register({mod_type: f"hf.{mod_type.__name__}"})(wrapper)
 
 
 def _fused_experts_wrapper(module):
