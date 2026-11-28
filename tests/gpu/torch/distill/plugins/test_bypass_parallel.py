@@ -317,6 +317,40 @@ def _context_preflight_worker(rank, size, failure):
                     restored()
                 assert len(forwards) == len(missing) + 2
                 assert not objects
+            elif failure == "mask_allocation":
+                # HF mask construction is tested on CPU before native SDPA executes.
+                from transformers.masking_utils import create_causal_mask
+
+                tokens = torch.arange(1, 9).reshape(1, 8)
+                expected_layout = CPSequenceLayout(mesh, 8)
+
+                def inspect_mask(model, args, kwargs):
+                    local_tokens = kwargs["input_ids"]
+                    positions = kwargs["position_ids"]
+                    attention = kwargs.get("attention_mask")
+                    embeddings = torch.zeros(
+                        *local_tokens.shape, config.hidden_size, dtype=torch.bfloat16
+                    )
+                    mask = create_causal_mask(
+                        config=config,
+                        inputs_embeds=embeddings,
+                        attention_mask=attention,
+                        past_key_values=None,
+                        position_ids=positions,
+                    )
+                    assert mask is None, "HF allocated a dense mask that native CP discards"
+                    assert attention is not None and attention.ndim == 2 and attention.all()
+                    torch.testing.assert_close(
+                        positions, expected_layout.shard(torch.arange(8).reshape(1, 8), 1)
+                    )
+                    raise OSError("stopped after actual HF mask construction")
+
+                with (
+                    teacher.register_forward_pre_hook(inspect_mask, with_kwargs=True),
+                    pytest.raises(OSError, match="actual HF mask construction"),
+                ):
+                    adapter._document_teacher(teacher, [], {"input_ids": tokens}, lambda *_: None)
+                restored()
             elif failure == "scope":
                 teacher.vision = torch.nn.Module()
                 teacher.vision.self_attn = torch.nn.Linear(16, 16)
@@ -373,7 +407,16 @@ def _context_preflight_worker(rank, size, failure):
 
 @pytest.mark.parametrize(
     "failure",
-    ["RuntimeError", "AttributeError", "setup", "api", "scope", "cleanup", "body_cleanup"],
+    [
+        "RuntimeError",
+        "AttributeError",
+        "setup",
+        "api",
+        "scope",
+        "cleanup",
+        "body_cleanup",
+        "mask_allocation",
+    ],
 )
 @pytest.mark.timeout(300)
 def test_native_cp_preflight_and_scope_failures(bypass_cpu_workers, failure):
@@ -2625,16 +2668,42 @@ def _context_worker(rank, size, fallback, output_dir=None, source=None):
                 else [[False, False, False, False, True, True, True]],
                 device=device,
             )
+            cp_group = mesh["cp"].get_group()
+            counts = torch.tensor(
+                [
+                    len(expected_masks),
+                    len(expected_records),
+                    len(actual_masks),
+                    len(actual_records),
+                ],
+                device=device,
+            )
+            peer_counts = [torch.empty_like(counts) for _ in range(mesh["cp"].size())]
+            dist.all_gather(peer_counts, counts, group=cp_group)
+            assert all(torch.equal(value, counts) for value in peer_counts)
             assert len(expected_masks) == len(expected_records)
             assert len(actual_masks) == len(actual_records)
+            stacked = torch.stack(actual_masks).to(torch.int32)
+            peer_masks = [torch.empty_like(stacked) for _ in peer_counts]
+            dist.all_gather(peer_masks, stacked, group=cp_group)
+            # Every rank has every observation before any per-mask assertion.
             for mask in expected_masks:
                 torch.testing.assert_close(mask, expected_mask, rtol=0, atol=0)
                 assert mask.sum().item() == 5
-            for mask in actual_masks:
+            for index, mask in enumerate(actual_masks):
+                for peer, observed in enumerate(peer_masks):
+                    expected_owned = torch.tensor(
+                        [[False, False, True, True, False, False, False]]
+                        if peer == 0
+                        else [[False, False, False, False, True, True, True]],
+                        device=device,
+                    )
+                    torch.testing.assert_close(
+                        observed[index], expected_owned.to(torch.int32), rtol=0, atol=0
+                    )
                 torch.testing.assert_close(mask, owned_mask, rtol=0, atol=0)
                 assert mask.sum().item() == (2 if mesh["cp"].get_local_rank() == 0 else 3)
-                owners = mask.to(torch.int32)
-                dist.all_reduce(owners, group=mesh["cp"].get_group())
+                owners = torch.stack(peer_masks).sum(0)[index]
                 torch.testing.assert_close(owners, expected_mask.to(torch.int32), rtol=0, atol=0)
             validity_receipt = {
                 "effective_valid_tokens_per_sample": 5,

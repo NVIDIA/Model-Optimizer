@@ -797,6 +797,9 @@ class TransformersBypassAdapter(ModuleBypassAdapter):
                     "position_ids": layout.shard(positions, 1),
                     "valid_mask": layout.shard(torch.ones_like(tokens, dtype=torch.bool), 1),
                 }
+                # Head-tail positions contain gaps that HF otherwise mistakes for
+                # packed documents, allocating a dense mask before native CP discards it.
+                batch["attention_mask"] = torch.ones_like(batch["input_ids"], dtype=torch.bool)
                 for model in (teacher, self.student):
                     if model is not None:
                         for reference in self._facts(model).attentions:
