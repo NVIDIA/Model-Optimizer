@@ -78,14 +78,12 @@ def _disable_tqdm():
     """
 
     def _patch(old_init):
-        def _new_init(self, *args, **kwargs):
-            # get the index of disable from function signature
-            index_disable = list(signature(old_init).parameters.keys()).index("disable") - 1
+        index_disable = list(signature(old_init).parameters).index("disable") - 1
 
-            if len(args) >= index_disable:
-                # if arg "disable" is passed as a positional arg,
-                # overwrite pos args with disable = False
-                args = (*args[: index_disable - 1], True, *args[index_disable:])
+        @wraps(old_init)
+        def _new_init(self, *args, **kwargs):
+            if len(args) > index_disable:
+                args = (*args[:index_disable], True, *args[index_disable + 1 :])
             else:
                 kwargs["disable"] = True
 
