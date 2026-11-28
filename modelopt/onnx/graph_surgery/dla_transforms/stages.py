@@ -23,6 +23,7 @@ from . import cleanup as _cleanup
 from .context import DlaGraph
 from .layout import passes as layout_passes
 from .layout import rules as layout_rules
+from .operators import passes as operator_passes
 from .operators import rules as operator_rules
 from .preprocessing import passes as preprocessing_passes
 from .preprocessing import rules as preprocessing_rules
@@ -102,7 +103,10 @@ def individual_op_rewrites(graph: DlaGraph) -> int:
         count += apply_rules(graph, definitions, views={})
     graph.apply_pass(ir.passes.common.RemoveUnusedNodesPass())
     count += layout(graph)
-    return count
+    count += apply_rules(graph, operator_rules.LOGICAL_RULES, views={})
+    consumers = operator_passes.FloatConsumerViews()
+    graph.apply_pass(consumers)
+    return count + consumers.transformed_nodes
 
 
 def cleanup(graph: DlaGraph, *, preserve_identities: Collection[ir.Node] | None = None) -> int:
