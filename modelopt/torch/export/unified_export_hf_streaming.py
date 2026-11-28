@@ -464,6 +464,7 @@ def _export_transformers_checkpoint_streaming(
 
     # Non-decoder modules whose weights are not directly readable (embed_tokens, norm,
     # lm_head, ...). Containers are skipped: their children get their own window.
+    packed_ids = set(decoder_owned_ids)
     for name, module in model.named_modules():
         if id(module) in decoder_owned_ids:
             continue
@@ -473,6 +474,7 @@ def _export_transformers_checkpoint_streaming(
             for sub_name, sub_mod in module.named_modules():
                 full_name = f"{name}.{sub_name}" if sub_name else name
                 _dispatch_export_handler(full_name, sub_mod, ctx)
+                packed_ids.add(id(sub_mod))
             prefix = f"{name}." if name else ""
             for key, tensor in module.state_dict().items():
                 full_key = prefix + key
@@ -480,6 +482,13 @@ def _export_transformers_checkpoint_streaming(
                     continue
                 seen_keys.add(full_key)
                 _stream_tensor(full_key, tensor)
+
+    # The modules that neither loop packed because their weights are resident, such as an lm_head
+    # kept on the GPU beside an offloaded decoder layer: pack them here, as the resident export
+    # does, so that the tensors streamed below are the ones that the quant config describes.
+    for name, module in model.named_modules():
+        if id(module) not in packed_ids:
+            _dispatch_export_handler(name, module, ctx)
 
     # GPU-resident parameters and persistent buffers (not covered by the above loops).
     # named_buffers() includes non-persistent buffers that state_dict() excludes; filter them.

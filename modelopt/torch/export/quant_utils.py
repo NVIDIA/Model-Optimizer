@@ -79,6 +79,7 @@ from .quant_format import (
     QUANTIZATION_W4A16_NVFP4,
     STATIC_INPUT_SCALE_FORMATS,
 )
+from .registry import ExportModuleRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -475,6 +476,10 @@ def get_weight_block_size(module: nn.Module, weight_name: str = "weight") -> int
     if not weight_quantizer.is_enabled:
         return 0
 
+    declared = ExportModuleRegistry.declared_format(module)
+    if declared is not None:
+        return declared.block_size
+
     block_sizes = weight_quantizer.block_sizes
 
     if block_sizes:
@@ -512,6 +517,10 @@ def _get_quantization_from_quantizers(
 ) -> str | None:
     if weight_quantizer is None or not weight_quantizer.is_enabled:
         return QUANTIZATION_NONE
+
+    declared = ExportModuleRegistry.declared_format(layer)
+    if declared is not None:
+        return declared.quantization_format
 
     if isinstance(weight_quantizer, SequentialQuantizer):
         assert (
@@ -607,7 +616,14 @@ def _get_quantization_from_quantizers(
         if scale_bits == (8, 0):
             return QUANTIZATION_MXFP4
 
-    raise NotImplementedError(f"Unsupported quantizer with num_bits: {weight_quantizer.num_bits}")
+    message = f"Unsupported quantizer with num_bits: {weight_quantizer.num_bits}"
+    if ExportModuleRegistry._find_declared_format(layer) is not None:
+        message += (
+            ". Its ExportModuleRegistry handler declares the format to export it in, but only "
+            "export_hf_checkpoint and _export_transformers_checkpoint read a declared format; the "
+            "other exporters, the layerwise export included, do not."
+        )
+    raise NotImplementedError(message)
 
 
 def get_quantization_format(module) -> str | None:
@@ -1925,7 +1941,10 @@ def get_quant_config(
 
             for weight_name in weight_names:
                 weight_block_size = get_weight_block_size(module, weight_name)
-                if quantization_format == QUANTIZATION_FP8_PB_WO:
+                if (
+                    quantization_format == QUANTIZATION_FP8_PB_WO
+                    and ExportModuleRegistry.declared_format(module) is None
+                ):
                     # One group size can describe only square two-dimensional blocks.
                     weight_quantizer = representative_weight_quantizer(module, weight_name)
                     if weight_quantizer is not None and weight_quantizer.is_enabled:
