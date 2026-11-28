@@ -1203,6 +1203,104 @@ def test_an_moe_the_expert_parallel_load_refuses_is_decided_without_it(
         assert resolve_distribution_plan(str(tmp_path))[0] == DistributionPlan(2)
 
 
+def _tiny_nemotron_h_moe():
+    native = pytest.importorskip("transformers.models.nemotron_h.configuration_nemotron_h")
+    return native.NemotronHConfig(
+        layers_block_type=["moe"],
+        n_routed_experts=8,
+        moe_intermediate_size=8,
+        moe_shared_expert_intermediate_size=8,
+        hidden_size=16,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        vocab_size=32,
+        use_mamba_kernels=False,
+    )
+
+
+def _index_checkpoint(path, mtp: bool = True) -> None:
+    """Index ``path``'s tensors, with a two-block Nemotron-H MTP head's when ``mtp``."""
+    keys = ["mtp.layers.0.eh_proj.weight", "mtp.layers.1.final_layernorm.weight"] if mtp else []
+    (path / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": dict.fromkeys([*keys, "lm_head.weight"], "model-1.safetensors")})
+    )
+
+
+@needs_ep_transformers
+@pytest.mark.parametrize(
+    ("knobs", "has_mtp", "gpu", "plan"),
+    [
+        ({}, False, None, DistributionPlan(4, 4)),
+        ({}, True, None, DistributionPlan(4)),
+        ({"MODELOPT_EP_DEGREE": "1"}, True, 1, DistributionPlan(4)),
+        ({"MODELOPT_EP_DEGREE": "1", "MODELOPT_FSDP_SIZE": "1"}, True, None, DistributionPlan(4)),
+        ({"MODELOPT_EP_DEGREE": "4"}, True, None, DistributionPlan(4, 4)),
+    ],
+    ids=["no-mtp", "auto", "too-big-for-one-gpu", "both-ask-to-replicate", "ep-asked"],
+)
+def test_a_checkpoint_carrying_an_mtp_head_is_decided_whole(
+    run_as, serve, monkeypatch, tmp_path, knobs, has_mtp, gpu, plan
+):
+    """Neither sharded load builds the MTP head a Nemotron-H checkpoint carries, and both refuse it.
+    Left to decide, the plan loads such a checkpoint whole on every rank, which builds and quantizes
+    the head, rather than an expert-parallel or, by GPU memory, FSDP2 plan the load then refuses; an
+    EP degree asked for is kept, for the load to refuse naming the way out."""
+    for knob, value in knobs.items():
+        monkeypatch.setenv(knob, value)
+    run_as(4)
+    serve(_tiny_nemotron_h_moe())
+    _index_checkpoint(tmp_path, has_mtp)
+    monkeypatch.setattr(model_load_utils, "_gpu_memory", lambda: gpu)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        assert resolve_distribution_plan(str(tmp_path))[0] == plan
+    warned = [w for w in caught if "MTP head" in str(w.message)]
+    # A replication both knobs ask for is the caller's choice, and gets no warning.
+    assert bool(warned) is (plan == DistributionPlan(4) and "MODELOPT_FSDP_SIZE" not in knobs)
+
+
+class _WholeLoadReachedError(Exception):
+    """Stops a whole-model load at its loading hook."""
+
+
+@needs_ep_transformers
+@pytest.mark.parametrize(
+    ("checkpoint_type", "model_type", "whole"),
+    [("nemotron_h", "toy_moe", False), ("qwen3_moe", "nemotron_h", True)],
+    ids=["hook-free-override", "mtp-hook-override"],
+)
+def test_the_mtp_decision_follows_the_loading_hook_load_pretrained_runs(
+    run_as, serve, loaders, a_gpu, monkeypatch, tmp_path, checkpoint_type, model_type, whole
+):
+    """``load_pretrained``'s ``model_type`` picks the loading hook, which says whether the load
+    builds an MTP head, so the plan follows it rather than the checkpoint config's type: a
+    checkpoint whose hook builds none still shards, and one whose hook builds it loads whole."""
+    run_as(4)
+    if checkpoint_type == "nemotron_h":
+        serve(_tiny_nemotron_h_moe())
+    else:
+        serve(Qwen3MoeConfig(**{**_TINY, "num_experts": 8, "moe_intermediate_size": 8}))
+    _index_checkpoint(tmp_path)
+    monkeypatch.setattr(model_load_utils, "_gpu_memory", lambda: None)
+    hooked = []
+
+    def whole_load(hook_type, *args, **kwargs):
+        hooked.append(hook_type)
+        raise _WholeLoadReachedError
+
+    monkeypatch.setattr(models_hf, "prepare_model_for_loading", whole_load)
+
+    if whole:
+        with pytest.raises(_WholeLoadReachedError):
+            load_pretrained(str(tmp_path), model_type=model_type)
+        assert hooked == [model_type]
+        assert loaders == {}
+    else:
+        load_pretrained(str(tmp_path), model_type=model_type)
+        assert set(loaders) == {"ep"}
+
+
 def _prepares_as_its_spec_states(model_type):
     """A stand-in for ``model_type``'s spec ``prepare`` that patches nothing: it puts the plan the spec
     states on the text config, where the real ``prepare`` attaches it, and returns the config, as the
@@ -3015,25 +3113,18 @@ def test_an_automatic_expert_parallel_layout_says_so_when_it_refuses_a_placement
     assert loaders == {}
 
 
-@pytest.mark.parametrize(
-    ("checkpoint", "match"),
-    [("quantized", "dequantize"), ("mtp", "MTP head")],
-    ids=["quantized", "mtp"],
-)
 def test_a_measured_layout_names_the_way_back_when_it_refuses_a_checkpoint(
-    run_as, serve, loaders, process_group, monkeypatch, tmp_path, checkpoint, match
+    run_as, serve, loaders, process_group, monkeypatch, tmp_path
 ):
     """Nothing asked for the layout rank 0's GPU memory chose, so a checkpoint the FSDP2 load cannot
-    take is refused with the way to load it whole, as every refusal of that load says."""
+    take is refused with the way to load it whole, as every refusal of that load says. (One carrying
+    an MTP head is planned whole instead: test_a_checkpoint_carrying_an_mtp_head_is_decided_whole.)"""
     run_as(2, rank=1)
     config = serve(LlamaConfig(**_TINY))
     monkeypatch.setattr(model_load_utils, "_gpu_memory", lambda: 1)
-    if checkpoint == "quantized":
-        config.quantization_config = {"quant_method": "fp8"}
-    else:
-        monkeypatch.setattr(models_hf, "checkpoint_has_mtp", lambda *a: True)
+    config.quantization_config = {"quant_method": "fp8"}
 
-    with pytest.raises(NotImplementedError, match=match) as refused:
+    with pytest.raises(NotImplementedError, match="dequantize") as refused:
         load_pretrained(str(tmp_path))
     assert "MODELOPT_FSDP_SIZE=1" in str(refused.value)
     assert loaders == {}

@@ -83,7 +83,10 @@ Sharded loads
 * Each keeps the checkpoint's dtype, so it refuses a ``dtype``. The FSDP2 load reads the tensors as
   stored, so it refuses a quantized checkpoint; the expert-parallel load loads unquantized ones
   only. Neither can run the model type's loading hook, so each refuses a checkpoint the hook would
-  build modules for, such as a Nemotron-H MTP head.
+  build modules for, such as a Nemotron-H MTP head. Left to decide, the plan loads such a
+  checkpoint whole on every rank instead, by the hook ``model_type`` selects. Each rank's GPU then
+  holds a whole copy, and each node's host memory the copies its ranks stage while they load (about
+  225 GiB per rank for Nemotron-3-Super-120B in BF16), so fewer ranks per node may be needed.
 * Each shards onto every rank's own GPU, and a rank without one is refused with the others. The
   expert-parallel load runs with one GPU per process, each bound to ``cuda:0``, too.
 * A single process, or a group of one, reads no knob: it takes the FSDP2 load only from a plan
