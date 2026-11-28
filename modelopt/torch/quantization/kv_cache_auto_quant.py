@@ -821,10 +821,8 @@ class AutoQuantizeKVSearcher(BaseSearcher):
     def _validate_distributed_state(self, signature: dict[str, Any]) -> None:
         if size() == 1:
             return
-        # Unlike the weight search's, a rank's checkpoint is not tied to its rank or the distribution
-        # plan: the K/V scales and scores in it are reduced over the ranks, alike on every rank, and
-        # each rank checks the quantizers before them, its experts' included, against its own model.
-        # The world size, which shards the data, must match.
+        # A rank's file holds the K/V scales and scores every rank shares, and each rank checks the
+        # quantizers before them against its own model, so only the world size must match.
         signature["distributed_world_size"] = size()
         # Each rank of an expert-parallel model holds only its own experts' quantizers: those must
         # match across the ranks holding the same experts, and everything else across every rank.

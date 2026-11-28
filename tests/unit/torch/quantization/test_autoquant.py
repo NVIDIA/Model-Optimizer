@@ -1800,7 +1800,7 @@ def _test_expert_parallel_weight_search_resumes(rank, size, directory, files):
         spare.rename(second)
     if files == "other_plan":  # as one with another expert-parallel degree or dense layout records
         path = directory / f"rank{rank}.pth"
-        safe_save({**safe_load(path), "distribution_plan": repr(DistributionPlan(size))}, path)
+        safe_save({**safe_load(path), "distribution_plan": (size, 1, "replicate")}, path)
     # Each rank's file holds its own experts' quantizer states, and the same scores and costs.
     with bounded_collectives():
         if files in ("swapped", "other_plan"):  # the scores agree, but not whose experts they hold

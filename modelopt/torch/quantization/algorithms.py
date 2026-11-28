@@ -281,7 +281,8 @@ def _check_restorable(model: nn.Module, params: dict) -> None:
         if param.is_meta or isinstance(param, DTensor):
             raise NotImplementedError(
                 f"Weight-rewriting AutoQuantize candidates need materialized, unsharded "
-                f"weights; {name}'s are on the meta device (offloaded) or a DTensor (FSDP2)."
+                f"weights; {name}'s are on the meta device (offloaded) or a DTensor (FSDP2, or "
+                "routed experts sharded expert-parallel from transformers 5.16)."
             )
         # GPTQ and imatrix encode the stored values and the selected codes decode into their
         # dtype, so a packed or scaled weight (a native FP8 checkpoint's) is refused.
@@ -991,10 +992,10 @@ def _refuse_unlike_layouts(by_group_of_rank: list) -> None:
             )
 
 
-def _plan_signature(model: nn.Module) -> str | None:
-    """The distribution plan recorded on ``model``, as a checkpoint records it."""
+def _plan_signature(model: nn.Module) -> tuple | None:
+    """The world size, expert-parallel degree and dense layout of ``model``'s recorded plan."""
     plan = recorded_distribution_plan(model)
-    return None if plan is None else repr(plan)
+    return None if plan is None else (plan.world_size, plan.ep_size, plan.dense)
 
 
 def _resume_together(progresses: list) -> None:
@@ -1185,9 +1186,9 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                 and state["distribution_plan"] not in (None, plan)
             ):
                 raise ValueError(
-                    f"The AutoQuantize checkpoint was written under {state['distribution_plan']}, "
-                    f"not {plan}. Resume with the same world size, expert-parallel degree and "
-                    "dense layout, or use a new checkpoint path."
+                    "The AutoQuantize checkpoint was written under (world size, expert-parallel "
+                    f"degree, dense layout) {state['distribution_plan']}, not {plan}. Resume "
+                    "with the same ones, or use a new checkpoint path."
                 )
             # Everything restored but the solved result, which the search solves again, the writer's
             # rank, checked above, and the calibrated quantizer states, each rank's own, by format.
@@ -1205,12 +1206,8 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             )
 
         if is_distributed_run():
-            # Each rank resumes from its own file and checks and branches on what it holds. Read in
-            # one collective, a file that fails to load (e.g. truncated by an interrupted save) makes
-            # every rank raise, and the ranks go on only from the same point, so each check of it
-            # below raises on all of them or on none, before they enter the search's collectives.
-            # Every rank searches the same layers, as data, FSDP2 and expert parallelism leave them,
-            # so the ranks' points compare whole; pipeline stages, which would not, are unsupported.
+            # In one collective, so a file failing to load or a rank at another point (every rank
+            # searches the same layers) makes every rank raise before the search's collectives.
             all_reduce("AutoQuantize checkpoint", resume_point, _resume_together)
         else:
             resume_point()

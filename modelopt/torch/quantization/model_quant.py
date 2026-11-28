@@ -789,11 +789,8 @@ def _auto_quantize_kv_cache(
         ep_mesh = (
             expert_parallel_mesh(model) if plan is not None and plan.is_expert_parallel else None
         )
-        # From transformers 5.16 the expert-parallel load leaves the routed experts' weights
-        # DTensors: only theirs, on the layout the load gives them, and FSDP2's own are exempt, so a
-        # dense layer a caller shards with tensor parallelism stays refused, as does an expert
-        # resharded on another axis. Without expert parallelism an FSDP2 model is exempt whole, as
-        # on main.
+        # The routed experts' DTensors on the expert-parallel load's layout and FSDP2's own are
+        # not tensor parallelism; without expert parallelism an FSDP2 model is exempt whole.
         if (
             dist.size() > 1
             and (ep_mesh is not None or not dist.is_fsdp2_model(model))
