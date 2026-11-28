@@ -1,0 +1,107 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Source: https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4#quick-start
+# Image: vllm/vllm-openai:nightly-cf5cea2da37d3dfed27d2e0aa3041c3e553c2d57
+test_nemotron_lilicorr:
+  - model_id: nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4-LiLiCorr
+    base_model: nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4
+    require_speculation: true
+    tensor_parallel_size: 1
+    mini_sm: 100
+    input_config:
+      prompt: Explain what a compiler does in two sentences.
+    backends:
+      vllm:
+        # Blackwell candidates; execution results establish validated coverage.
+        sm_versions: [100, 103, 121]
+        engine_kwargs:
+          trust_remote_code: true
+          disable_log_stats: false
+          max_num_seqs: 1
+          gpu_memory_utilization: 0.75
+          max_num_batched_tokens: 8192
+          speculative_config:
+            method: dflash
+            num_speculative_tokens: 7
+          mamba_backend: flashinfer
+          mamba_ssm_cache_dtype: float16
+          enable_mamba_cache_stochastic_rounding: true
+          mamba_cache_philox_rounds: 5
+          enable_mamba_shared_prefix_checkpoint: true
+          block_size: 64
+          prefix_match_unit: 64
+          # Smaller context and bounded decoding exercise the drafter without a long-context test.
+          max_model_len: 8192
+        sampling_kwargs:
+          temperature: 0
+          min_tokens: 16
+          max_tokens: 128
+        chat_kwargs:
+          chat_template_kwargs:
+            enable_thinking: false
+      sglang:
+        # Model-card LiLiCorr recipe: lmsysorg/sglang:nemotron3-5-super.
+        engine_kwargs:
+          trust_remote_code: true
+          kv_cache_dtype: fp8_e4m3
+          attention_backend: flashinfer
+          mamba_backend: flashinfer
+          # This SGLang image requires FP16 state for stochastic rounding.
+          mamba_ssm_dtype: float16
+          enable_mamba_cache_stochastic_rounding: true
+          mamba_cache_philox_rounds: 5
+          mamba_radix_cache_strategy: extra_buffer
+          speculative_algorithm: DFLASH
+          context_length: 8192
+          max_running_requests: 1
+        sampling_kwargs:
+          temperature: 0
+          min_new_tokens: 16
+          max_new_tokens: 128
+        chat_kwargs:
+          chat_template_kwargs:
+            enable_thinking: false
+      trtllm:
+        # https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4#tensorrt-llm
+        # TRT-LLM 1.4.0rc3 DFlash attention uses SM100/103; keep the external LiLiCorr drafter.
+        sm_versions: [100, 103]
+        engine_kwargs:
+          trust_remote_code: true
+          dtype: bfloat16
+          moe_expert_parallel_size: 1
+          max_batch_size: 1
+          max_num_tokens: 4096
+          max_seq_len: 8192
+          enable_chunked_prefill: true
+          disable_overlap_scheduler: false
+          # Explicit null: use the engine's default CUDA graph configuration.
+          cuda_graph_config:
+          attn_backend: TRTLLM
+          kv_cache_config:
+            dtype: fp8
+            free_gpu_memory_fraction: 0.9
+            max_gpu_total_bytes: 5368709120
+            host_cache_size: 0
+            mamba_ssm_cache_dtype: float16
+            mamba_ssm_stochastic_rounding: false
+            enable_block_reuse: true
+            use_kv_cache_manager_v2: true
+            mamba_state_config:
+              enable_branch_snapshot: true
+          nvfp4_gemm_config:
+            allowed_backends: [cutlass, cublaslt, cuda_core]
+          moe_config:
+            backend: CUTEDSL
+          speculative_config:
+            decoding_type: DFlash
+            max_draft_len: 7
+            attention_backend: TRTLLM
+            context_recompute_tail: 0
+        sampling_kwargs:
+          temperature: 0
+          max_tokens: 128
+          return_perf_metrics: true
+        chat_kwargs:
+          chat_template_kwargs:
+            enable_thinking: false

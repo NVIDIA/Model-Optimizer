@@ -14,11 +14,6 @@
 # limitations under the License.
 """Tests for the example-command runner shared by the example tests."""
 
-import contextlib
-import os
-import signal
-import time
-
 import pytest
 from _test_utils.examples import run_command
 from _test_utils.transient_errors import TransientError
@@ -43,37 +38,3 @@ def test_run_example_command_flags_only_transient_errors(monkeypatch, error, tra
     assert isinstance(excinfo.value, TransientError) == transient
     original = excinfo.value.__cause__ if transient else excinfo.value
     assert str(original) == error
-
-
-def test_run_capturing_does_not_block_on_a_survivor_holding_the_pipe(
-    skip_on_windows, monkeypatch, tmp_path
-):
-    """A killed command whose descendant inherited the output pipe must not hang the caller."""
-    monkeypatch.setattr(run_command, "_ORPHAN_PIPE_TIMEOUT_S", 1)
-    pid_file = tmp_path / "survivor.pid"
-
-    started = time.monotonic()
-    with pytest.warns(UserWarning, match="descendants holding its output pipe"):
-        returncode, output = run_command._run_capturing(
-            ["bash", "-c", f"sleep 60 & echo $! > {pid_file}; echo out; sleep 0.3; kill -9 $$"],
-            tmp_path,
-            os.environ.copy(),
-        )
-
-    survivor = int(pid_file.read_text())
-    try:
-        assert returncode == -9
-        assert "out" in output  # captured despite the survivor
-        assert time.monotonic() - started < 10  # the patched grace period is 1s
-
-        for _ in range(50):  # the group kill is asynchronous
-            try:
-                os.kill(survivor, 0)
-            except ProcessLookupError:
-                break
-            time.sleep(0.1)
-        else:
-            pytest.fail(f"survivor {survivor} outlived _run_capturing")
-    finally:
-        with contextlib.suppress(ProcessLookupError):
-            os.kill(survivor, signal.SIGKILL)

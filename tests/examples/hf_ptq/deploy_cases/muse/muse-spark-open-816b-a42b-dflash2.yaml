@@ -1,0 +1,56 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# TP4/EP4 recipe: https://huggingface.co/nvidia/Muse-Spark-Open-816B-A42B-DFlash2
+test_muse_spark_dflash2:
+  - model_id: nvidia/Muse-Spark-Open-816B-A42B-DFlash2
+    base_model: meta-models/Muse-Spark-Open-816B-A42B-NVFP4
+    tensor_parallel_size: 4
+    mini_sm: 100
+    require_speculation: true
+    backends:
+      trtllm:
+        # TRT-LLM 1.4.0rc3 on B300, TP4/EP4.
+        sm_versions: [100, 103]
+        engine_kwargs:
+          trust_remote_code: true
+          moe_expert_parallel_size: 4
+          moe_config:
+            backend: TRTLLM
+          kv_cache_config:
+            dtype: fp8
+          attn_backend: TRTLLM
+          allreduce_strategy: NCCL
+          max_batch_size: 1
+          max_seq_len: 8192
+          max_num_tokens: 8192
+          speculative_config:
+            decoding_type: DFlash
+            max_draft_len: 7
+            attention_backend: TRTLLM
+        sampling_kwargs:
+          temperature: 0
+          max_tokens: 128
+          return_perf_metrics: true
+      sglang:
+        # Uses lmsysorg/sglang:dev-muse-spark-open or a build with equivalent Muse/DFlash2 support.
+        engine_kwargs:
+          quantization: modelopt_fp4
+          moe_runner_backend: flashinfer_trtllm
+          ep_size: 4
+          attention_backend: trtllm_mha
+          page_size: 128
+          kv_cache_dtype: fp8_e4m3
+          mem_fraction_static: 0.8
+          reasoning_parser: muse
+          tool_call_parser: muse
+          enable_layernorm_sp: true
+          enable_megamoe_for_layernorm_sp: true
+          speculative_algorithm: DFLASH
+          speculative_draft_attention_backend: fa4
+          speculative_num_draft_tokens: 8
+          # This functional check does not exercise the target's full context capacity.
+          context_length: 8192
+        sampling_kwargs:
+          temperature: 0.0
+          max_new_tokens: 128

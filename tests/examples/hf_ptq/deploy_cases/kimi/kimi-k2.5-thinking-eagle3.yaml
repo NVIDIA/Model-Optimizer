@@ -1,0 +1,37 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+test_eagle:
+  - base_model: nvidia/Kimi-K2.5-NVFP4
+    model_id: nvidia/Kimi-K2.5-Thinking-Eagle3
+    tensor_parallel_size: 8
+    mini_sm: 100
+    backends:
+      trtllm:
+        engine_kwargs:
+          kv_cache_config:
+            enable_block_reuse: true
+            free_gpu_memory_fraction: 0.8
+            mamba_ssm_cache_dtype: float32
+          enable_attention_dp: false
+          attn_backend: TRTLLM
+          trust_remote_code: true
+          max_batch_size: 8
+          disable_overlap_scheduler: true
+          enable_autotuner: false
+          speculative_config:
+            max_draft_len: 3
+            eagle3_one_model: false
+          cuda_graph_config:
+            max_batch_size: 1
+        sampling_kwargs:
+          max_tokens: 32
+      sglang:
+        engine_kwargs:
+          speculative_algorithm: EAGLE3
+          speculative_num_steps: 3
+          speculative_eagle_topk: 1
+          speculative_num_draft_tokens: 4
+          trust_remote_code: true
+          mem_fraction_static: 0.7
+          context_length: 1024

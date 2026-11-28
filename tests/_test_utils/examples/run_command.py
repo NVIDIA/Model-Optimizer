@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2023-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -17,12 +17,15 @@
 import contextlib
 import os
 import signal
+import socket
 import subprocess
+import sys
 import threading
+import time
 import warnings
 from pathlib import Path
+from typing import TextIO
 
-from _test_utils.torch.distributed.utils import get_free_port
 from _test_utils.transient_errors import TransientError, find_transient_marker
 
 MODELOPT_ROOT = Path(__file__).parents[3]
@@ -43,69 +46,179 @@ _ORPHAN_PIPE_TIMEOUT_S = 30
 _KILLED_PIPE_TIMEOUT_S = 5
 
 
-def _run_capturing(cmd_parts: list[str], cwd: Path, env: dict[str, str]) -> tuple[int, str]:
+class ProcessGroupCleanupError(RuntimeError):
+    """A deployment's workers could not be confirmed stopped before the next case."""
+
+
+class DetachedWorkerError(subprocess.SubprocessError):
+    """The supervisor confirmed cleanup but had to stop workers detached from the deploy group."""
+
+
+def _wait_without_reaping(
+    process: subprocess.Popen, timeout: float | None, capture_failed: threading.Event
+) -> None:
+    # Keep the group leader's PID reserved until its workers have been cleaned up.
+    deadline = None if timeout is None else time.monotonic() + timeout
+    while not capture_failed.is_set():
+        if os.name == "posix":
+            if os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOWAIT | os.WNOHANG) is not None:
+                return
+        elif process.poll() is not None:
+            return
+        delay = 0.1
+        if deadline is not None:
+            delay = min(delay, deadline - time.monotonic())
+            if delay <= 0:
+                raise subprocess.TimeoutExpired(process.args, timeout)
+        capture_failed.wait(delay)
+
+
+def _finish_deployment(process, control, executable):
+    # Closing the write half requests cancellation; the read half receives the child's status.
+    with contextlib.suppress(OSError):
+        control.shutdown(socket.SHUT_WR)
+    try:
+        process.wait(timeout=_KILLED_PIPE_TIMEOUT_S + 2)
+    except subprocess.TimeoutExpired as exc:
+        process.kill()
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            process.wait(timeout=_KILLED_PIPE_TIMEOUT_S)
+        raise ProcessGroupCleanupError("Deployment supervisor timed out") from exc
+    try:
+        with control.makefile("rb") as status:
+            result = status.read()
+    except OSError as exc:
+        raise ProcessGroupCleanupError("Lost deployment supervisor status") from exc
+    if not result or process.returncode:
+        raise ProcessGroupCleanupError("Could not confirm deployment workers stopped")
+    if result.startswith(b"escaped "):
+        raise DetachedWorkerError(
+            f"{executable} left workers outside its process group; the supervisor stopped "
+            f"them (command exit {int(result.split()[1])})"
+        )
+    if result.startswith(b"errno "):
+        err = int(result.split()[1])
+        raise OSError(err, os.strerror(err), executable)
+    return int(result)
+
+
+def _run_capturing(
+    cmd_parts: list[str],
+    cwd: Path,
+    env: dict[str, str],
+    *,
+    cleanup_process_group: bool = False,
+    timeout: float | None = None,
+    log: TextIO | None = None,
+    discard_output: bool = False,
+) -> tuple[int, str]:
     """Run a command, streaming and capturing combined stdout/stderr to catch transient errors.
 
     Drained by a reader thread rather than ``subprocess.run``, which waits for EOF: a descendant
     outliving the command keeps the pipe open, hanging the read and discarding every log line.
+    When a log is supplied, capture to that file instead of accumulating output in memory.
+    Use discard_output when a backend may echo credentials; still drain its pipe for cleanup proof.
     """
-    chunks: list[str] = []
-    process = subprocess.Popen(
-        cmd_parts,
-        cwd=cwd,
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        start_new_session=True,
-    )
-    # start_new_session makes the child its own group leader, so the group id is its pid (read now:
-    # os.getpgid() stops resolving it once wait() reaps the child).
-    pgid = process.pid
+    with contextlib.ExitStack() as resources:
+        control = None
+        command = cmd_parts
+        pass_fds: tuple[int, ...] = ()
+        if cleanup_process_group:
+            if sys.platform != "linux":
+                raise ProcessGroupCleanupError("Deployment process supervision requires Linux")
+            control, child_channel = socket.socketpair()
+            resources.enter_context(control)
+            resources.enter_context(child_channel)
+            fd = child_channel.fileno()
+            command = [
+                sys.executable,
+                "-I",
+                "-S",
+                str(Path(__file__).with_name("deployment_supervisor.py").resolve()),
+                str(fd),
+                str(_KILLED_PIPE_TIMEOUT_S),
+                *cmd_parts,
+            ]
+            pass_fds = (fd,)
+        process = subprocess.Popen(
+            command,
+            cwd=cwd,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8" if log is not None else None,
+            errors="replace",
+            start_new_session=True,
+            pass_fds=pass_fds,
+        )
+        if control is not None:
+            child_channel.close()
+        return _capture_output(
+            process, cmd_parts[0], control, cleanup_process_group, timeout, log, discard_output
+        )
 
-    def _kill_process_group():
-        with contextlib.suppress(ProcessLookupError, PermissionError):
-            if os.name == "posix":
-                os.killpg(pgid, signal.SIGKILL)
-            else:  # no process groups; the command itself is the best we can reach
-                process.kill()
+
+def _capture_output(
+    process, executable, control, cleanup_process_group, timeout, log, discard_output
+):
+    chunks: list[str] = []
+    capture_failed = threading.Event()
+    capture_error: Exception | None = None
 
     def _drain():
-        with contextlib.suppress(ValueError):  # the stream is closed under us on the escape path
-            for line in process.stdout:  # type: ignore[union-attr]
-                print(line, end="")
-                chunks.append(line)
+        nonlocal capture_error
+        assert process.stdout is not None
+        try:
+            with process.stdout as stream:
+                for line in stream:
+                    if discard_output:
+                        continue
+                    print(line, end="", flush=log is not None)
+                    if log is None:
+                        chunks.append(line)
+                    else:
+                        log.write(line)
+                        log.flush()
+        except Exception as exc:
+            capture_error = exc
+            capture_failed.set()
 
     reader = threading.Thread(target=_drain, daemon=True)
-    reader.start()
+    clean_pipe = False
     try:
-        if os.name == "posix":
-            # Wait *without* reaping: a reaped pid can be recycled, and pgid == the child's pid, so
-            # reaping before the kill below would risk signalling an unrelated group.
-            os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOWAIT)
-        else:  # no process groups, so nothing to protect the pid for
-            process.wait()
-    except BaseException:
-        # Interrupted (most likely pytest-timeout) while the command runs: its own process group is
-        # not swept up with pytest's, so take the descendants down rather than leak them.
-        _kill_process_group()
-        with contextlib.suppress(Exception):
-            process.wait(timeout=_KILLED_PIPE_TIMEOUT_S)  # reap: WNOWAIT left it waitable
-        raise
-    reader.join(_ORPHAN_PIPE_TIMEOUT_S)
-
+        reader.start()
+        _wait_without_reaping(process, timeout, capture_failed)
+        if control is None and not capture_failed.is_set():
+            reader.join(_ORPHAN_PIPE_TIMEOUT_S)
+            clean_pipe = not reader.is_alive()
+            if not clean_pipe:
+                warnings.warn(
+                    f"{executable} left descendants holding its output pipe open; killing the "
+                    "process group. Output may be truncated."
+                )
+    finally:
+        try:
+            if control is not None:
+                returncode = _finish_deployment(process, control, executable)
+            else:
+                # On interruption or a stuck reader the entire original group needs to stop.
+                if not clean_pipe or capture_failed.is_set():
+                    with contextlib.suppress(ProcessLookupError, PermissionError):
+                        if os.name == "posix":
+                            os.killpg(process.pid, signal.SIGKILL)
+                        else:
+                            process.kill()
+                returncode = process.wait(timeout=_KILLED_PIPE_TIMEOUT_S)
+        finally:
+            if reader.ident is not None:
+                reader.join(_KILLED_PIPE_TIMEOUT_S)
+        if cleanup_process_group and reader.is_alive():
+            raise ProcessGroupCleanupError("Output pipe is still open after deployment cleanup")
     if reader.is_alive():
-        warnings.warn(
-            f"{cmd_parts[0]} left descendants holding its output pipe open; killing the process "
-            "group. Output may be truncated."
-        )
-        _kill_process_group()
-        reader.join(_KILLED_PIPE_TIMEOUT_S)
-
-    returncode = process.wait()
-
-    with contextlib.suppress(Exception):
-        process.stdout.close()  # type: ignore[union-attr]
+        raise OSError("Timed out draining subprocess output")
+    if capture_error is not None:
+        raise OSError("Failed to capture subprocess output") from capture_error
     return returncode, "".join(chunks)
 
 
@@ -163,6 +276,9 @@ def run_example_command(
         return result
 
     if setup_free_port:
+        # The port helper imports torch.distributed, which standalone runners do not need.
+        from _test_utils.torch.distributed.utils import get_free_port
+
         # Subprocess steps only: an in-process runner picks its own free port, since env is a
         # copy it never sees.
         env["MASTER_PORT"] = str(get_free_port())

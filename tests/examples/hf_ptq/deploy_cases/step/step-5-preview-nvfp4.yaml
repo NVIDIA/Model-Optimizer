@@ -1,0 +1,49 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Source: https://github.com/vllm-project/vllm/blob/cab3f26ab24e5442387dead34a4aa627ae661664/recipes/models/stepfun-ai/Step-5-Preview.yaml
+# Image: vllm/vllm-openai:step-5-preview; B300 TP4 NVFP4 recipe, awaiting GPU validation here.
+test_step5_preview:
+  - model_id: stepfun-ai/Step-5-Preview-NVFP4
+    tensor_parallel_size: 4
+    mini_sm: 100
+    input_config:
+      prompt: Describe this image briefly.
+      image: ../../data/color-grid.png
+    backends:
+      vllm:
+        engine_kwargs:
+          data_parallel_backend: mp
+          distributed_executor_backend: mp
+          disable_custom_all_reduce: true
+          gpu_memory_utilization: 0.85
+          enable_prefix_caching: true
+          # TP4 uses automatic mixed-precision MoE selection; MegaMoE requires EP.
+          # Context, batch and output limits bound this functional workload.
+          max_model_len: 8192
+          max_num_batched_tokens: 8192
+          max_num_seqs: 1
+          limit_mm_per_prompt:
+            image: 1
+        sampling_kwargs:
+          temperature: 0
+          max_tokens: 128
+      sglang:
+        # https://docs.sglang.io/cookbook/autoregressive/StepFun/Step-5-Preview
+        # lmsysorg/sglang:step-5-preview supplies the required FlashInfer patches.
+        engine_kwargs:
+          trust_remote_code: true
+          moe_runner_backend: flashinfer_trtllm
+          kv_cache_dtype: bfloat16
+          mem_fraction_static: 0.85
+          page_size: 64
+          swa_full_tokens_ratio: 0.03
+          context_length: 8192
+          chunked_prefill_size: 8192
+          max_running_requests: 1
+        sampling_kwargs:
+          temperature: 0
+          max_new_tokens: 128
+        chat_kwargs:
+          chat_template_kwargs:
+            reasoning_effort: low

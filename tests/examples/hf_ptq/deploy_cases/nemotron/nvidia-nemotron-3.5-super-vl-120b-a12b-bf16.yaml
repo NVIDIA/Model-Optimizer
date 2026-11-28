@@ -1,0 +1,67 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Source: https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16#vllm
+test_nemotron:
+  - model_id: nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16
+    tensor_parallel_size: 2
+    mini_sm: 100
+    input_config:
+      prompt: Describe this image briefly.
+      image: ../../data/color-grid.png
+    backends:
+      trtllm:
+        # TRT-LLM 1.4.0rc3 on B300, TP2.
+        engine_kwargs:
+          trust_remote_code: true
+          dtype: bfloat16
+          max_batch_size: 1
+          max_seq_len: 8192
+          max_num_tokens: 4096
+          kv_cache_config:
+            free_gpu_memory_fraction: 0.3
+            host_cache_size: 0
+        sampling_kwargs:
+          temperature: 0
+          max_tokens: 128
+        chat_kwargs:
+          chat_template_kwargs:
+            enable_thinking: false
+      vllm:
+        # Image: vllm/vllm-openai:v0.32.0; GB200 TP2 recipe, awaiting GPU validation here.
+        engine_kwargs:
+          trust_remote_code: true
+          async_scheduling: true
+          enable_mamba_shared_prefix_checkpoint: true
+          limit_mm_per_prompt:
+            image: 1
+            video: 0
+          # Bounded functional workload, not the model's maximum supported context.
+          max_model_len: 8192
+          max_num_seqs: 1
+        sampling_kwargs:
+          temperature: 0
+          max_tokens: 128
+        chat_kwargs:
+          chat_template_kwargs:
+            enable_thinking: false
+      sglang:
+        # Model-card SGLang recipe: lmsysorg/sglang:nemotron3-5-super.
+        engine_kwargs:
+          trust_remote_code: true
+          kv_cache_dtype: fp8_e4m3
+          attention_backend: trtllm_mha
+          mamba_backend: flashinfer
+          # This SGLang image requires FP16 state for stochastic rounding.
+          mamba_ssm_dtype: float16
+          enable_mamba_cache_stochastic_rounding: true
+          mamba_cache_philox_rounds: 5
+          mamba_radix_cache_strategy: extra_buffer
+          context_length: 8192
+          max_running_requests: 1
+        sampling_kwargs:
+          temperature: 0
+          max_new_tokens: 128
+        chat_kwargs:
+          chat_template_kwargs:
+            enable_thinking: false
