@@ -287,10 +287,12 @@ _WILDCARD_RE = re.compile(r"[*?[]")
 _CASE_SENSITIVE_NAMES = os.path.normcase("A") == "A"
 _SINGULAR_QUANTIZER_ATOM_RE = re.compile(r"(?:weight|input)_quantizer$")
 # The classes, by id so that checking a value never hashes its class, of values whose use runs no
-# other code; nothing follows a weak reference, such as a weight cache's.
-_PLAIN_TYPE_IDS = frozenset(
-    map(id, (type(None), bool, int, float, str, torch.dtype, torch.device, torch.Size, weakref.ref))
+# other code. Configuring a quantizer follows no weak reference in its state, such as a weight
+# cache's, but an entry's can be its calibrator's constructor, which calling follows.
+_ENTRY_PLAIN_TYPE_IDS = frozenset(
+    map(id, (type(None), bool, int, float, str, torch.dtype, torch.device, torch.Size))
 )
+_PLAIN_TYPE_IDS = _ENTRY_PLAIN_TYPE_IDS | {id(weakref.ref)}
 _CONTAINER_TYPES = frozenset({dict, list, tuple, set, frozenset, slice})
 # A modelopt config's metaclass, pydantic's, whose classes the scan can hash and read without running
 # other code, as it can those of type.
@@ -376,7 +378,9 @@ def _slot(obj: Any, name: str) -> Any:
         return None
 
 
-def _runs_callers_code(obj: Any, seen: dict[int, Any]) -> bool:
+def _runs_callers_code(
+    obj: Any, seen: dict[int, Any], plain_type_ids: frozenset[int] = _PLAIN_TYPE_IDS
+) -> bool:
     """Whether ``set_quantizer_by_cfg`` can run the caller's code as it uses ``obj``.
 
     Applying an entry, and configuring a quantizer, copies, compares, reads and replaces config
@@ -393,7 +397,7 @@ def _runs_callers_code(obj: Any, seen: dict[int, Any]) -> bool:
     while stack:
         obj = stack.pop()
         kind: type = type(obj)
-        if id(kind) in _PLAIN_TYPE_IDS or id(obj) in seen:
+        if id(kind) in plain_type_ids or id(obj) in seen:
             continue
         metaclass = type(kind)
         if (
@@ -664,7 +668,9 @@ def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: RawQuantizeQuantCfgT
                 # A model the check cannot read, such as one holding a non-module child, is walked
                 # whole, which raises as it reaches that child, after the entry's earlier matches.
                 subtree = False
-        if subtree and (parent_class is not None or _runs_callers_code(entry, scanned)):
+        if subtree and (
+            parent_class is not None or _runs_callers_code(entry, scanned, _ENTRY_PLAIN_TYPE_IDS)
+        ):
             # Matching a parent_class entry runs the __getattr__ of the modules on a match's path,
             # such as a DynamicModule's, and an entry holding the caller's code runs it as it
             # applies, between its matches too: either can rewire the model, so it is walked whole

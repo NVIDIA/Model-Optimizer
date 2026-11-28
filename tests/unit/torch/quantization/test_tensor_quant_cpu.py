@@ -691,6 +691,7 @@ def test_preserve_quantizer_attributes_context_restores_type_and_properties():
     [
         (True, "plain"),
         (True, "cached-weight"),
+        (True, "fused-experts"),
         (True, "shared-layer"),
         (True, "dotted-name"),
         (True, "empty-name"),
@@ -727,6 +728,7 @@ def test_preserve_quantizer_attributes_context_restores_type_and_properties():
     ids=[
         "subtree",
         "cached-weight",
+        "fused-experts",
         "shared-layer",
         "dotted-name",
         "empty-name",
@@ -937,6 +939,13 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_in_one_walk(
             holder.inner.weight_quantizer = TensorQuantizer()
             holder.named_modules = holder.inner.named_modules
             model.add_module("8", holder)
+        elif layout == "fused-experts":
+            # A fused experts block keeps one weight quantizer per expert in a list.
+            experts = torch.nn.Module()
+            experts.gate_up_proj_weight_quantizers = torch.nn.ModuleList(
+                TensorQuantizer() for _ in range(4)
+            )
+            model.add_module("8", experts)
         elif layout == "newline-name":
             # Or a name ending in a newline, which normalizing a fused-experts name keeps.
             experts = torch.nn.Module()
@@ -1012,6 +1021,12 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_in_one_walk(
     if layout == "changing-equality":
         quant_cfg.append({"quantizer_name": "8.weight_quantizer", "cfg": {"num_bits": 4}})
         quant_cfg.append({"quantizer_name": "9.weight_quantizer", "enable": True})
+    elif layout == "fused-experts":
+        # The singular name every expert's quantizer normalizes to, then one expert by index.
+        quant_cfg.append(
+            {"quantizer_name": "8.gate_up_proj_weight_quantizer", "cfg": {"num_bits": 4}}
+        )
+        quant_cfg.append({"quantizer_name": "8.gate_up_proj_weight_quantizers.2", "enable": False})
     elif layout == "bound-traversal":
         # The name the delegated named_modules lists, which the holder's _modules lack.
         quant_cfg.append({"quantizer_name": "8.weight_quantizer", "enable": True})
@@ -1091,6 +1106,7 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_in_one_walk(
     fast = (
         "plain",
         "cached-weight",
+        "fused-experts",
         "offload-hooks",
         "calibrator-state",
         "device-context",
@@ -1132,7 +1148,7 @@ def test_set_quantizer_by_cfg_stores_an_opaque_config_value(monkeypatch, weight_
     monkeypatch.setattr(
         quant_conversion,
         "_runs_callers_code",
-        lambda obj, seen: scans.append(obj) or scan(obj, seen),
+        lambda obj, *args: scans.append(obj) or scan(obj, *args),
     )
     policy = policy_class()
     model = torch.nn.Sequential(torch.nn.Linear(4, 4))
@@ -1564,14 +1580,27 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_after_a_calibrator_aliases_
 @pytest.mark.usefixtures("check_at_the_first_named_entry")
 @pytest.mark.parametrize(
     ("kind", "same_call"),
-    [("calibrator", False), ("axis-property", False), ("rotation", False), ("rotation", True)],
-    ids=["installed-calibrator", "axis-property", "installed-rotation", "rotation-entry"],
+    [
+        ("calibrator", False),
+        ("axis-property", False),
+        ("weakref", True),
+        ("rotation", False),
+        ("rotation", True),
+    ],
+    ids=[
+        "installed-calibrator",
+        "axis-property",
+        "weakref-calibrator",
+        "installed-rotation",
+        "rotation-entry",
+    ],
 )
 def test_set_quantizer_by_cfg_finds_named_quantizers_after_a_configured_object_shares_a_layer(
     kind, same_call
 ):
     """A named entry acts as its wildcard does after a calibrator or rotation config of the caller's
-    class, set by an earlier call or entry, shares a layer when a later entry calls into it."""
+    class, set by an earlier call or entry, or an entry whose calibrator constructor is a weak
+    reference to one, shares a layer when a later entry calls into it."""
     model = None
 
     def share():
@@ -1603,10 +1632,14 @@ def test_set_quantizer_by_cfg_finds_named_quantizers_after_a_configured_object_s
         nonlocal model
         model = torch.nn.Sequential(torch.nn.Linear(4, 4), torch.nn.Linear(4, 4))
         model = mtq.quantize(model, mtq.INT8_DEFAULT_CFG, lambda m: m(torch.randn(2, 4)))
-        if kind in ("calibrator", "axis-property"):
-            setting = {
-                "calibrator": SharingCalibrator if kind == "calibrator" else AxisSharingCalibrator
-            }
+        installed = AxisSharingCalibrator()  # what a weak reference to it constructs
+        if kind in ("calibrator", "axis-property", "weakref"):
+            constructor = {
+                "calibrator": SharingCalibrator,
+                "axis-property": AxisSharingCalibrator,
+                "weakref": weakref.ref(installed),
+            }[kind]
+            setting = {"calibrator": constructor}
             # The quantizer keeps its calibrator until after an entry sets its axis.
             trigger = {"cfg": {"num_bits": 4, "axis": 0}}
         else:
