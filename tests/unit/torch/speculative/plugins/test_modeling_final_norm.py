@@ -24,6 +24,7 @@ from transformers import GptOssConfig, GptOssForCausalLM
 
 from modelopt.torch.speculative.plugins.modeling_fakebase import FakeBaseModel
 from modelopt.torch.speculative.plugins.modeling_final_norm import (
+    _FINAL_NORM_CLASSES,
     _FinalRMSNorm,
     _maybe_apply_base_final_norm,
     _select_final_norm_type,
@@ -41,6 +42,9 @@ _HIDDEN_SIZE = 16
         ("kimi_k2", "rmsnorm"),
         ("kimi_k25", "rmsnorm"),
         ("gpt_oss", "gpt_oss_rmsnorm"),
+        ("qwen3_next", "gemma_rmsnorm"),
+        ("qwen3_5_text", "gemma_rmsnorm"),
+        ("qwen3_5_moe_text", "gemma_rmsnorm"),
         ("gemma", None),  # unlisted model
         ("", None),
         (None, None),
@@ -111,6 +115,20 @@ def test_gpt_oss_fakebase_final_norm_matches_transformers(tmp_path, dtype, check
     assert restored.norm.weight.dtype == reference.model.norm.weight.dtype
     restored_logits = restored.lm_head(restored.norm(hidden.detach()))
     torch.testing.assert_close(restored_logits, expected_logits.detach(), rtol=0, atol=0)
+
+
+def test_qwen3_5_final_norm_matches_transformers():
+    """Qwen3.5's final norm scales by (1 + weight); the Llama-style norm would drop the 1."""
+    qwen3_5 = pytest.importorskip("transformers.models.qwen3_5.modeling_qwen3_5")
+    generator = torch.Generator().manual_seed(0)
+    reference = qwen3_5.Qwen3_5RMSNorm(_HIDDEN_SIZE, eps=1e-6)
+    reference.weight.data = torch.randn(_HIDDEN_SIZE, generator=generator) * 0.1
+    norm = _FINAL_NORM_CLASSES[_select_final_norm_type("qwen3_5_text")](
+        _HIDDEN_SIZE, eps=1e-6, dtype=torch.float32
+    )
+    norm.weight.data.copy_(reference.weight.data)
+    hidden = torch.randn(2, 4, _HIDDEN_SIZE, generator=generator)
+    torch.testing.assert_close(norm(hidden), reference(hidden), rtol=0, atol=0)
 
 
 def test_maybe_apply_norm_postnorm_is_noop():

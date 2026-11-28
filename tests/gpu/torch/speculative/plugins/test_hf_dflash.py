@@ -317,6 +317,7 @@ class TestDFlashFlexAttentionGPU:
     @classmethod
     def _model(cls, **cfg_overrides):
         model = get_tiny_llama(**cls.BASE_KWARGS)
+        model.config.num_orig_hidden_layers = cls.BASE_KWARGS["num_hidden_layers"]
         config = get_dflash_config()
         config.update(cfg_overrides)
         mtsp.convert(model, [("dflash", config)])
@@ -381,6 +382,55 @@ class TestDFlashFlexAttentionGPU:
 
         assert torch.isfinite(out_flex.loss), "flex produced a non-finite loss"
         torch.testing.assert_close(out_flex.loss, out_dense.loss, rtol=2e-2, atol=2e-2)
+
+    def test_matches_dense_mask_path_with_rejection_memory(self):
+        """Rollout rounds with rejection memory: flex's loss and gradients match the dense path.
+
+        In fp32, with enough rounds that the block mask spans several query and key tiles.
+        """
+        seq, n_rounds, prompt, mem_rows = 128, 52, 8, BLOCK_SIZE - 1
+        dense, flex = (
+            model.float()
+            for model in self._pair(
+                dflash_offline=True,
+                dflash_swa_window_size=2 * BLOCK_SIZE,
+                dflash_num_anchors=n_rounds,
+            )
+        )
+        # Rounds as spec decoding makes them: the anchor advances by the accepted drafts + 1
+        # and the next round remembers the rejected rest; rounds past the end are padding.
+        accepted = (torch.arange(n_rounds) + torch.arange(2).unsqueeze(1)) % BLOCK_SIZE
+        anchors = prompt + (accepted + 1).cumsum(1) - (accepted + 1)
+        counts = (mem_rows - accepted).roll(1, dims=1).int()
+        counts[:, 0] = 0
+        hidden = self.BASE_KWARGS["hidden_size"]
+        aux = len(dense.target_layer_ids) * hidden
+        input_ids = torch.randint(0, self.BASE_KWARGS["vocab_size"], (2, seq), device="cuda")
+        loss_mask = torch.ones(2, seq, device="cuda")
+        loss_mask[:, :prompt] = 0
+        batch = {
+            "input_ids": input_ids,
+            "attention_mask": torch.ones_like(input_ids),
+            "loss_mask": loss_mask,
+            "base_model_outputs": {
+                "aux_hidden_states": torch.randn(2, seq, aux, device="cuda"),
+                "base_model_hidden_states": torch.randn(2, seq, hidden, device="cuda"),
+            },
+            "rejmem_anchor_pos": anchors.cuda(),
+            "rejmem_anchor_valid": (anchors < seq).cuda(),
+            "rejmem_mem_count": counts.cuda(),
+            "rejmem_mem_aux_hidden": torch.randn(2, n_rounds, mem_rows, aux, device="cuda"),
+        }
+
+        steps = []
+        for model in (dense, flex):
+            loss = model(**batch).loss
+            loss.backward()
+            grads = {
+                n: p.grad for n, p in model.dflash_module.named_parameters() if p.grad is not None
+            }
+            steps.append((loss, grads))
+        torch.testing.assert_close(steps[1], steps[0], rtol=1e-4, atol=1e-5)
 
     def test_backward_produces_finite_grads(self):
         """The flex path is differentiable and its grads are finite."""

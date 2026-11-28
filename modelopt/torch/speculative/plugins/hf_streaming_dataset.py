@@ -551,10 +551,12 @@ class EagleVllmStreamingDataset(StreamingDataset):
         return self._nixl
 
     def _remote(self, host, port):
-        if host not in self._remote_by_host:
+        # One producer agent per server, and a node can run several servers (one sidecar each).
+        key = (host, port)
+        if key not in self._remote_by_host:
             m = self._http_rdma.get(f"http://{host}:{port}/meta").json()["agent_metadata"]
-            self._remote_by_host[host] = self._nixl.add_remote_agent(base64.b64decode(m))
-        return self._remote_by_host[host]
+            self._remote_by_host[key] = self._nixl.add_remote_agent(base64.b64decode(m))
+        return self._remote_by_host[key]
 
     def _fetch(self, sample: dict) -> EagleFetchPayload | None:
         """Fetch one sample's hidden states from the server over NIXL RDMA.
