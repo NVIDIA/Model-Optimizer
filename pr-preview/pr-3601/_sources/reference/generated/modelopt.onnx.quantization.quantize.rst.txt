@@ -1,0 +1,6 @@
+modelopt.onnx.quantization.quantize
+===================================
+
+.. currentmodule:: modelopt.onnx.quantization
+
+.. autofunction:: quantize
