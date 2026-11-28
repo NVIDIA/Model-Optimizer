@@ -160,7 +160,9 @@ def compress_restore(
     model, _ = compress_convert(
         model,
         config,
-        skip_real_quantize_weight=("q_tensor_state" not in metadata),
+        skip_real_quantize_weight=(
+            "q_tensor_state" not in metadata or bool(metadata.get("native_tp_staged_weights"))
+        ),
     )
     # restore scale state in weight quantizer
     if "real_quantizer_state" in metadata:
@@ -184,6 +186,22 @@ def compress_restore(
                     ),
                     metadata=metadata["q_tensor_state"][name]["metadata"],
                 )
+    # TP staging keeps native bytes in the quantizer and loads a frozen logical
+    # master. Do not recompress dummy initialization or rewrap that master on load.
+    for name, module in model.named_modules():
+        staged = metadata.get("native_tp_staged_weights", {}).get(name)
+        if isinstance(module, RealQuantLinear) and staged is not None:
+            dict.__setitem__(
+                module._parameters,
+                "weight",
+                nn.Parameter(
+                    torch.empty(
+                        staged["shape"], dtype=staged["dtype"], device=module.weight.device
+                    ),
+                    requires_grad=False,
+                ),
+            )
+            module._use_real_quant_gemm = False
     return model
 
 
@@ -202,6 +220,15 @@ def update_compress_metadata(model: nn.Module, config: CompressConfig, metadata:
 
     metadata["real_quantizer_state"] = real_quantizer_state
     metadata["q_tensor_state"] = q_tensor_state
+    metadata["native_tp_staged_weights"] = {
+        name: {"shape": tuple(module.weight.shape), "dtype": module.weight.dtype}
+        for name, module in model.named_modules()
+        if isinstance(module, RealQuantLinear)
+        and not isinstance(module.weight, QTensorWrapper)
+        and (getattr(module.weight_quantizer, "_native_weight_meta", None) or {}).get(
+            "native_scale_buffers"
+        )
+    }
 
 
 def compress(model, config: CompressCfgType = None):

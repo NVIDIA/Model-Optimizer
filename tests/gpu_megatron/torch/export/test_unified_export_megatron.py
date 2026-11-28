@@ -894,8 +894,10 @@ def _test_qkv_slicing_gqa_tp2(tmp_path, rank, size):
         "num_key_value_heads": num_query_groups,
         "torch_dtype": "bfloat16",
     }
-    with open(tmp_path / "config.json", "w") as f:
-        json.dump(pretrained_config, f)
+    if rank == 0:
+        with open(tmp_path / "config.json", "w") as f:
+            json.dump(pretrained_config, f)
+    torch.distributed.barrier()
 
     export_dir = tmp_path / "export"
     export_mcore_gpt_to_hf(

@@ -83,13 +83,21 @@ class _Session:
             self.stats.invalidations += 1
 
 
-class _CachedIdentity(torch.autograd.Function):
-    """Return the cached payload, passing the gradient straight through to the weight."""
+class _NativeIdentity(torch.autograd.Function):
+    """Return native values with the ordinary straight-through derivative."""
 
     @staticmethod
     def forward(ctx, weight, payload):
         ctx.set_materialize_grads(False)
         return payload
+
+    @staticmethod
+    def backward(ctx, grad):
+        return grad, None
+
+
+class _CachedIdentity(_NativeIdentity):
+    """Shared cached values do not support higher-order gradients."""
 
     @staticmethod
     def backward(ctx, grad):
@@ -241,6 +249,38 @@ def _suspend_weight_cache(model: nn.Module):
         _ACTIVE.update(sessions)
 
 
+def _pinned_native_value(quantizer, inputs, source):
+    if (
+        getattr(quantizer, "_native_weight_meta", None)
+        and not getattr(quantizer, "_local_repair_active", False)
+        and quantizer._pass_through_bwd
+        and not getattr(quantizer, "_lsq", False)
+        and not any(p.requires_grad for p in quantizer.parameters())
+    ):
+        # Deferred: native_weight imports GGML metadata through the quantization package.
+        from .native_weight import dequantize_pinned_native, get_pinned_native_weight
+
+        native = get_pinned_native_weight(quantizer, source)
+        if native is not None:
+            value = dequantize_pinned_native(quantizer, native, inputs.dtype)
+            if quantizer.is_static_block_quant:
+                value = quantizer._process_for_blockquant(value)
+            return value.reshape(inputs.shape)
+    meta = getattr(quantizer, "_native_weight_meta", None)
+    if (
+        meta
+        and getattr(quantizer, "_amax", None) is None
+        and not quantizer._use_constant_amax
+        and not quantizer._dynamic
+        and not quantizer.is_mx_format
+        and not getattr(quantizer, "_local_repair_active", False)
+    ):
+        raise ValueError(
+            "Native pin no longer applies; calibrate thresholds before fake-quant fallback."
+        )
+    return None
+
+
 def cached_fake_quantize(quantizer, inputs: torch.Tensor, source: torch.Tensor) -> torch.Tensor:
     """``quantizer._fake_quantize(inputs)``, reused while ``quantizer`` is in an open scope.
 
@@ -251,7 +291,12 @@ def cached_fake_quantize(quantizer, inputs: torch.Tensor, source: torch.Tensor) 
         return quantizer._fake_quantize(inputs)
     session = _ACTIVE.get(quantizer) if _num_open_scopes else None
     if session is None:
-        return quantizer._fake_quantize(inputs)
+        value = _pinned_native_value(quantizer, inputs, source)
+        return (
+            quantizer._fake_quantize(inputs)
+            if value is None
+            else _NativeIdentity.apply(inputs, value)
+        )
 
     key = _input_key(source)
     entry = session.entries.get(quantizer)
@@ -260,7 +305,9 @@ def cached_fake_quantize(quantizer, inputs: torch.Tensor, source: torch.Tensor) 
         entry = None
     if entry is None:
         with torch.no_grad():
-            value = quantizer._fake_quantize(inputs)
+            value = _pinned_native_value(quantizer, inputs, source)
+            if value is None:
+                value = quantizer._fake_quantize(inputs)
         if (value.shape, value.dtype, value.device) != (inputs.shape, inputs.dtype, inputs.device):
             raise ValueError("A cached fake quant must keep the weight's shape, dtype and device.")
         if value.untyped_storage().data_ptr() == inputs.untyped_storage().data_ptr():
