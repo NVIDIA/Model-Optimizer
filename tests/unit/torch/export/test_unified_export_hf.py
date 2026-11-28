@@ -29,9 +29,11 @@ from _test_utils.torch.quantization.tied_modules import (
     wrap_in_parent_with_tied_keys,
 )
 from packaging.version import Version
-from safetensors.torch import save_file
+from safetensors.torch import load_file, save_file
+from torch.distributed.fsdp import fully_shard
 
 import modelopt.torch.quantization as mtq
+from modelopt.recipe import load_recipe
 from modelopt.torch.export import distributed_writer, unified_export_hf
 from modelopt.torch.export.model_utils import (
     TiedWeightMap,
@@ -45,6 +47,7 @@ from modelopt.torch.export.quant_utils import (
 )
 from modelopt.torch.export.unified_export_hf import (
     _copy_non_model_files_from_source,
+    _export_transformers_checkpoint,
     _fuse_shared_input_modules,
     _resolve_export_dtype,
     _source_checkpoint,
@@ -55,6 +58,7 @@ from modelopt.torch.export.unified_export_hf import (
     read_unplaced_weights,
 )
 from modelopt.torch.quantization.nn import TensorQuantizer
+from modelopt.torch.quantization.qtensor import MXFP4QTensor
 from modelopt.torch.utils.distributed import DistributionPlan, set_distribution_plan
 
 
@@ -1430,4 +1434,156 @@ def test_an_expert_parallel_export_it_cannot_write_is_refused_before_folding(
     after = model.state_dict()
     assert after.keys() == before.keys()
     assert all(torch.equal(after[k], v) for k, v in before.items())
+    assert not (tmp_path / "export").exists()
+
+
+def _tiny_gpt_oss():
+    """A tiny GPT-OSS whose expert in and out dims differ, so a transposed layout cannot pass."""
+    # Local import: it imports transformers, an optional dependency its callers importorskip.
+    from _test_utils.torch.transformers_models import get_tiny_gpt_oss
+
+    return get_tiny_gpt_oss(
+        hidden_size=64, intermediate_size=96, num_hidden_layers=2, dtype=torch.float32
+    )
+
+
+def _quantize_experts_mxfp4(model, extra_quant_cfg=()):
+    config = load_recipe("general/ptq/mxfp4_mlp_weight_only").quantize.model_dump()
+    config["quant_cfg"] = [*config["quant_cfg"], *extra_quant_cfg]
+    return mtq.quantize(model, config)
+
+
+@pytest.mark.parametrize("placement", ["resident", "offloaded", "fsdp2"])
+def test_gpt_oss_mxfp4_experts_export_as_openai_releases_them(tmp_path, request, placement):
+    """Runtimes read GPT-OSS's MXFP4 experts only as openai/gpt-oss-* store them. Transformers reads
+    the export back to the weights the experts quantize to in their forward, blocked along in_dim."""
+    pytest.importorskip("transformers")
+    # Local imports: optional dependencies, guarded by the importorskip above.
+    from accelerate import init_empty_weights, load_checkpoint_and_dispatch
+    from transformers import AutoConfig, AutoModelForCausalLM, Mxfp4Config
+
+    model = _tiny_gpt_oss()
+    expected = {}
+    for weight_name in ("gate_up_proj", "down_proj"):
+        weight = getattr(model.model.layers[0].mlp.experts, weight_name)
+        codes, scales = MXFP4QTensor.quantize(weight.detach().transpose(-1, -2).contiguous(), 32)
+        expected[weight_name] = codes.dequantize(scale=scales, block_sizes={-1: 32})
+    if placement == "offloaded":
+        model.save_pretrained(tmp_path / "source")
+        config = AutoConfig.from_pretrained(tmp_path / "source")
+        with init_empty_weights():
+            model = AutoModelForCausalLM.from_config(config, dtype=torch.float32)
+        device_map = {
+            "model.embed_tokens": "cpu",
+            "model.layers.0": "disk",
+            "model.layers.1": "cpu",
+        }
+        device_map |= {"model.norm": "cpu", "model.rotary_emb": "cpu", "lm_head": "cpu"}
+        model = load_checkpoint_and_dispatch(
+            model, tmp_path / "source", device_map, offload_folder=tmp_path / "offload"
+        )
+    elif placement == "fsdp2":
+        mesh = request.getfixturevalue("gloo_world_of_one")
+        for layer in model.model.layers:
+            fully_shard(layer, mesh=mesh)
+        fully_shard(model, mesh=mesh)
+        set_distribution_plan(model, DistributionPlan(1, dense="fsdp"))
+    export_dir = tmp_path / "export"
+    export_dir.mkdir()
+    (export_dir / "hf_quant_config.json").write_text("{}")  # an earlier export's
+    model = _quantize_experts_mxfp4(model)
+    export_hf_checkpoint(model, export_dir=export_dir)
+
+    if placement != "resident":
+        # The layer-by-layer exports release what they pack once it is written.
+        assert not [n for n, _ in model.named_buffers() if n.endswith(("_blocks", "_scales"))]
+    if placement == "fsdp2":
+        # The FSDP2 export restores the experts' weights, which still fake-quantize.
+        experts = model.model.layers[0].mlp.experts
+        assert {"gate_up_proj", "down_proj"} <= set(experts._parameters)
+        assert {"gate_up_proj", "down_proj"} <= experts._get_dm_attribute_manager().da_keys()
+    assert not (export_dir / "hf_quant_config.json").exists()
+    assert json.loads((export_dir / "config.json").read_text())["quantization_config"] == {
+        "quant_method": "mxfp4",
+        "modules_to_not_convert": [
+            "model.layers.*.self_attn",
+            "model.layers.*.mlp.router",
+            "model.embed_tokens",
+            "lm_head",
+        ],
+    }
+    tensors = load_file(export_dir / "model.safetensors")
+    prefix = "model.layers.0.mlp.experts."
+    assert {k.removeprefix(prefix) for k in tensors if k.startswith(prefix)} == {
+        "gate_up_proj_blocks",
+        "gate_up_proj_scales",
+        "gate_up_proj_bias",
+        "down_proj_blocks",
+        "down_proj_scales",
+        "down_proj_bias",
+    }
+    assert tensors[prefix + "gate_up_proj_blocks"].shape == (8, 192, 2, 16)
+    assert tensors[prefix + "down_proj_scales"].shape == (8, 64, 3)
+
+    reloaded = AutoModelForCausalLM.from_pretrained(
+        export_dir, quantization_config=Mxfp4Config(dequantize=True)
+    )
+    for weight_name, weight in expected.items():
+        actual = getattr(reloaded.model.layers[0].mlp.experts, weight_name)
+        torch.testing.assert_close(
+            actual.transpose(-1, -2), weight.to(actual.dtype), rtol=0, atol=0
+        )
+
+
+@pytest.mark.parametrize(
+    ("extra_quant_cfg", "refusal"),
+    [
+        (
+            [{"quantizer_name": "*[kv]_bmm_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}}],
+            "cannot carry other quantized modules",
+        ),
+        (
+            [{"quantizer_name": "*layers.1.mlp*weight_quantizer", "enable": False}],
+            r"every layer's experts .* \['model.layers.1.mlp.experts'\]",
+        ),
+        (
+            [
+                {
+                    "quantizer_name": "*mlp.experts*weight_quantizer",
+                    "cfg": {
+                        "num_bits": (2, 1),
+                        "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (8, 0)},
+                    },
+                }
+            ],
+            "holds 32-element blocks, not 16",
+        ),
+    ],
+    ids=["kv-cache", "unquantized-layer", "16-element-blocks"],
+)
+@pytest.mark.parametrize("entry", ["export_hf_checkpoint", "_export_transformers_checkpoint"])
+def test_gpt_oss_mxfp4_experts_export_refuses_what_openai_layout_cannot_describe(
+    tmp_path, entry, extra_quant_cfg, refusal
+):
+    """OpenAI's MXFP4 config cannot describe an FP8 KV cache, nor one layer's experts left in BF16,
+    so the export refuses both before it writes anything or changes the model."""
+    pytest.importorskip("transformers")
+    # Local import: accelerate is optional, like transformers above.
+    from accelerate.hooks import ModelHook, add_hook_to_module
+
+    model = _quantize_experts_mxfp4(_tiny_gpt_oss(), extra_quant_cfg)
+    # An export that goes ahead removes every accelerate hook.
+    add_hook_to_module(model.model.layers[0], ModelHook())
+    before = {k: v.clone() for k, v in model.state_dict().items()}
+
+    with pytest.raises(NotImplementedError, match=refusal):
+        if entry == "export_hf_checkpoint":
+            export_hf_checkpoint(model, export_dir=tmp_path / "export")
+        else:
+            _export_transformers_checkpoint(model)
+
+    after = model.state_dict()
+    assert after.keys() == before.keys()
+    assert all(torch.equal(after[k], v) for k, v in before.items())
+    assert hasattr(model.model.layers[0], "_hf_hook")
     assert not (tmp_path / "export").exists()
