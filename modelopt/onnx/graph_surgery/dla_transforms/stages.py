@@ -76,6 +76,8 @@ def layout(graph: DlaGraph) -> int:
     graph.begin_layout()
     try:
         count = apply_rules(graph, layout_rules.SHAPE_RULES, controls={})
+        count += apply_rules(graph, layout_rules.INDEXING_RULES, controls={}, views={})
+        count += apply_rules(graph, layout_rules.AXIS_RULES)
         split = layout_passes.SplitAxisLayout(graph)
         graph.apply_pass(split)
         count += split.transformed_nodes
