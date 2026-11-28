@@ -1698,6 +1698,22 @@ def test_expert_parallel_cost_counts_each_projection_by_its_own_layout(
     )
 
 
+def _test_tensor_parallel_cost_counts_a_dtensor_weight_once(rank, size):
+    linear = mtq.quantize(torch.nn.Linear(8, 8), mtq.INT8_DEFAULT_CFG)
+    mesh = init_device_mesh("cpu", (size,))
+    parallelize_module(linear, mesh, ColwiseParallel())  # its weight a DTensor, whole over the mesh
+    linear.parallel_state = ParallelState(-1, tensor_parallel_group=mesh.get_group())
+    hparam = QuantRecipeHparam([QuantRecipe(mtq.INT8_DEFAULT_CFG)], quant_modules=[linear])
+    assert isinstance(linear.weight, DTensor)
+    assert hparam.get_cost(QuantRecipe(quant_cfg=None)) == linear.weight.numel()
+
+
+def test_tensor_parallel_cost_counts_a_dtensor_weight_once(cpu_dist_workers):
+    """A linear sharded tensor-parallel as a DTensor, as transformers shards one from 5.16, counts
+    its whole size once, not once per rank of its tensor-parallel group."""
+    cpu_dist_workers.run(_test_tensor_parallel_cost_counts_a_dtensor_weight_once)
+
+
 def _test_weight_layout_on_one_rank(rank, size, layout):
     register_torch_a2a()
     input_ids = torch.randint(0, 64, (2, 8), generator=torch.Generator().manual_seed(rank))

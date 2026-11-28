@@ -1164,9 +1164,8 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                     f"{state['checkpoint_rank']}. Restore each rank's own file from the same search, "
                     "or use a new checkpoint path."
                 )
-            # A run of another size wrote its files for its own ranks, e.g. each with its own
-            # experts, also with no plan recorded (Megatron records none): one process too refuses
-            # them before converting the model. Files that do not record it resume as before.
+            # A run of another size wrote its files for its own ranks, e.g. their own experts, plan
+            # or none (Megatron's); one process refuses them too. Older files, unrecorded, resume.
             world_size = torch.distributed.get_world_size() if is_distributed_run() else 1
             if (state["quantizer_states"] or state["candidate_stats"]) and state[
                 "checkpoint_world_size"
@@ -1190,9 +1189,8 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                     f"degree, dense layout) {state['distribution_plan']}, not {plan}. Resume "
                     "with the same ones, or use a new checkpoint path."
                 )
-            # Everything restored but the solved result, which the search solves again, the writer's
-            # rank, checked above, and the calibrated quantizer states, each rank's own, by format;
-            # as a digest, since the ranks compare it only for equality.
+            # Everything restored but the solved result, the writer's rank and the ranks' own
+            # calibrations (by format), as a digest: the ranks compare it only for equality.
             restored = _comparable(
                 {
                     **{
@@ -1826,9 +1824,8 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         self.checkpoint_rank = rank()
         self.checkpoint_world_size = world_size
         self.distribution_plan = plan
-        # Rank and plan say whose shard a file holds, not which search calibrated it. A resume keeps
-        # the ID every rank restored alike (checked in validate_search_input); a new search, or one
-        # resumed from files saved without an ID, takes rank 0's.
+        # Rank and plan say whose shard a file holds, not which run wrote it: a resume keeps the ID
+        # every rank restored alike, and a new search, or files saved without one, takes rank 0's.
         if self.search_id is None:
             self.search_id = (
                 broadcast_from("AutoQuantize search ID", lambda: uuid.uuid4().hex)
@@ -1905,9 +1902,8 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             )
         self.resolved_search_setup_signature = resolved_search_setup_signature
         if is_distributed_run():
-            # A layout the cost refuses on some ranks alone, or ranks of a group laying a weight out
-            # unlike each other, would leave some ranks in a sum or pair it with another: every rank
-            # tells its own in one collective first, so all of them raise.
+            # A layout refused, or laid out unlike a peer's, on some ranks alone would leave the
+            # others in a cost sum or pair it with another: every rank tells its own here first.
             module_names = {id(module): name for name, module in self.model.named_modules()}
             all_reduce(
                 "AutoQuantize weight layouts",
