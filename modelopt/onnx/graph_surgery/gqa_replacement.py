@@ -344,7 +344,6 @@ def _fuse_qkv_and_create_gqa(
     num_attention_heads: int,
     num_kv_heads: int,
     head_dim: int,
-    hidden_size: int,
     seqlens_k_output: str,
     total_seq_len_output: str,
     onnx_dtype: int,
@@ -360,7 +359,6 @@ def _fuse_qkv_and_create_gqa(
         num_attention_heads: Number of attention heads.
         num_kv_heads: Number of key-value heads.
         head_dim: Dimension per head.
-        hidden_size: Hidden dimension.
         seqlens_k_output: Name of seqlens_k tensor.
         total_seq_len_output: Name of total_seq_len tensor.
         onnx_dtype: ONNX dtype constant.
@@ -370,6 +368,7 @@ def _fuse_qkv_and_create_gqa(
     Returns:
         Tuple of (qkv_matmul_nodes, gqa_nodes, nodes_to_remove).
     """
+    attention_size = num_attention_heads * head_dim
     qkv_matmul_nodes = []
     gqa_nodes = []
     qkv_nodes_to_remove = []
@@ -457,7 +456,7 @@ def _fuse_qkv_and_create_gqa(
 
             # Add value_info for GQA output
             gqa_output_info = helper.make_tensor_value_info(
-                gqa_output, onnx_dtype, ["batch_size", "sequence_length", hidden_size]
+                gqa_output, onnx_dtype, ["batch_size", "sequence_length", attention_size]
             )
             graph.value_info.append(gqa_output_info)
 
@@ -610,7 +609,7 @@ def _fuse_qkv_and_create_gqa(
 
         # Add value_info for GQA output
         gqa_output_info = helper.make_tensor_value_info(
-            gqa_output, onnx_dtype, ["batch_size", "sequence_length", hidden_size]
+            gqa_output, onnx_dtype, ["batch_size", "sequence_length", attention_size]
         )
         graph.value_info.append(gqa_output_info)
 
@@ -772,7 +771,7 @@ def _fuse_qkv_and_create_gqa(
 
     # Add value_info for GQA output
     gqa_output_info = helper.make_tensor_value_info(
-        gqa_output, onnx_dtype, ["batch_size", "sequence_length", hidden_size]
+        gqa_output, onnx_dtype, ["batch_size", "sequence_length", attention_size]
     )
     graph.value_info.append(gqa_output_info)
 
@@ -904,7 +903,9 @@ def replace_attention_with_gqa(
     num_layers = config.num_hidden_layers
     num_attention_heads = config.num_attention_heads
     num_kv_heads = getattr(config, "num_key_value_heads", num_attention_heads)
-    head_dim = config.hidden_size // num_attention_heads
+    head_dim = getattr(config, "head_dim", None)
+    if head_dim is None:
+        head_dim = config.hidden_size // num_attention_heads
     hidden_size = config.hidden_size
 
     # Auto-detect attention namespace: "self_attn" vs "attn"
@@ -1115,7 +1116,6 @@ def replace_attention_with_gqa(
             num_attention_heads,
             num_kv_heads,
             head_dim,
-            hidden_size,
             seqlens_k_output,
             total_seq_len_output,
             onnx_dtype,

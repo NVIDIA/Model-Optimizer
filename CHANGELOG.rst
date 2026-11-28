@@ -55,6 +55,7 @@ Changelog
 
 *ONNX*
 
+- Fix ONNX RoPE caches, attention graph surgery and LLM export to honor configured attention-head dimensions when they differ from the hidden size divided by the head count.
 - Fix ONNX AutoCast retaining one full-graph activation dump per calibration sample during inference: samples are now folded into the running per-tensor statistics as they arrive, so this retention no longer scales with the number of samples in ``calibration_data``. Loading the input data itself (a JSON input list, or a single NPZ holding multiple samples) still materializes every sample's inputs.
 - ONNX AutoCast now keeps the variance of decomposed RMSNorm and unfused LayerNorm in FP32 for both FP16 and BF16 conversion, so FP16 models converted without calibration data no longer give wrong outputs on execution providers such as TensorRT-RTX. Reconvert affected models.
 - Fix ``--dq_only`` ONNX export producing a model that ONNX Runtime cannot load when the weights are quantized to an unsigned type. Such exports now load and match the source model.
