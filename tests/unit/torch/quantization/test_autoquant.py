@@ -955,6 +955,13 @@ def test_format_shards_merge_into_the_unsharded_search(tmp_path, monkeypatch, me
     search(fewer, (1, 2), score_steps=1)
     with pytest.raises(ValueError, match="num_score_steps"):
         model_quant.merge_auto_quantize_checkpoints([shards[0], fewer], str(tmp_path / "x.pth"))
+    # A shard another rank wrote holds that rank's calibration, e.g. its own experts'.
+    other_rank = tmp_path / "other_rank.pth"
+    safe_save({**safe_load(shards[1]), "checkpoint_rank": 1}, other_rank)
+    with pytest.raises(ValueError, match=r"search setups \(checkpoint_rank\)"):
+        model_quant.merge_auto_quantize_checkpoints(
+            [shards[0], other_rank], str(tmp_path / "w.pth")
+        )
     # So are shards that recorded no counts, as earlier versions saved them.
     unlabeled = [tmp_path / f"unlabeled{i}.pth" for i in range(2)]
     for shard, path in zip(shards, unlabeled):

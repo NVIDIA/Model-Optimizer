@@ -41,6 +41,8 @@ Changelog
 
 **Backward Breaking Changes**
 
+- A distributed ``mtq.auto_quantize`` weight search now resumes only when every rank holds its own file from the same run, world size and distribution plan and searches the same layers, so pipeline-parallel searches no longer resume, and one process no longer resumes a file that a run of several ranks wrote. Use a new checkpoint path, or re-solve the saved scores with ``mtq.get_auto_quantize_config()``.
+
 **Deprecations**
 
 **Bug Fixes**

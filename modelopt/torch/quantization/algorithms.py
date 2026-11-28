@@ -2213,6 +2213,10 @@ _SHARD_INVARIANT_STATE = (
     "resolved_search_setup_signature",
     "num_calib_steps",
     "num_score_steps",
+    # Each rank's shards hold that rank's calibration, e.g. its own experts': merged per rank.
+    "checkpoint_rank",
+    "checkpoint_world_size",
+    "distribution_plan",
 )
 
 
