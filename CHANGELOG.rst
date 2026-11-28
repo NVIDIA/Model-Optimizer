@@ -159,6 +159,8 @@ Changelog
 
 **Backward Breaking Changes**
 
+- Remove the legacy DLA helpers from ``graph_surgery.utils.graph_utils``, including graph-cache and graph-mutation helpers, ``resolve_reshape_shape``, and ``parse_qdq_quantized_dtype_list``. Update direct imports of removed helpers and use ONNXScript IR APIs for new transformations.
+
 - Offline speculative-training ``.pt`` files now use ``training.data_seed`` (falling back to ``training.seed``) to shuffle before applying ``data.sample_size``, and model initialization now follows ``training.seed``. Runs resumed from earlier versions may see a different sample order or selected subset.
 - ``QDQAutotunerBase.export_onnx(output_path=...)`` now returns ``None`` instead of serialized bytes. Omit ``output_path`` to keep the bytes-returning behavior, which remains subject to protobuf size limits.
 - ``examples/hf_ptq/hf_ptq.py`` launched by ``torchrun`` on more than one rank without ``--use_fsdp2`` now runs one distributed job instead of one independent run per process: an MoE that can shard its experts runs expert-parallel, any other model is replicated with each rank calibrating its own share of the data, and only rank 0 exports a replicated model. Such a launch refuses ``--low_memory_mode``, ``--use_seq_device_map``, ``--offload_folder``, AutoQuantize recipes and, under expert parallelism, ``--vllm_fakequant_export`` and ``--experts_implementation``, and any multi-rank launch now refuses layerwise-export recipes, the TensorRT-LLM checkpoint export and a ``--device`` other than ``cuda``: launch without ``torchrun`` for them.
