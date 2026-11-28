@@ -105,12 +105,15 @@ REMOTE_CODE_MODEL_TYPES = sorted(
     s.model_type for s in get_specs() if s.modeling_source == "remote_code"
 )
 VERSIONED_MOE_MODEL_TYPES = sorted(
-    mt for mt in MOE_MODEL_TYPES if get_spec(mt).min_transformers_version is not None
+    mt
+    for mt in MOE_MODEL_TYPES
+    if get_spec(mt).min_transformers_version is not None
+    and get_spec(mt).modeling_source == "transformers"
 )
 
 
 def test_version_claim_matches_modeling_source():
-    """A spec names a transformers release exactly when its code ships in transformers.
+    """A native implementation or local port declares its required Transformers release.
 
     Pure bookkeeping over the registry, so it means the same thing on every version in
     the CI matrix. It is what makes the checks below exhaustive: a new spec cannot land
@@ -118,7 +121,7 @@ def test_version_claim_matches_modeling_source():
     """
     for spec in get_specs():
         has_version = spec.min_transformers_version is not None
-        in_transformers = spec.modeling_source == "transformers"
+        in_transformers = spec.modeling_source in ("transformers", "modelopt")
         assert has_version == in_transformers, (
             f"{spec.model_type!r}: modeling_source={spec.modeling_source!r} but "
             f"min_transformers_version={spec.min_transformers_version!r}. A transformers "
@@ -174,3 +177,16 @@ def test_moe_block_resolves_from_its_declared_version(model_type):
         f"block_names, and min_transformers_version if the rename landed in a later "
         f"release."
     )
+
+
+@pytest.mark.parametrize(
+    "model_type", [s.model_type for s in get_specs() if s.modeling_source == "modelopt"]
+)
+def test_modelopt_moe_blocks_resolve_from_local_port(model_type):
+    spec = get_spec(model_type)
+    if _installed_version() < Version(spec.min_transformers_version):
+        pytest.skip(f"needs transformers >= {spec.min_transformers_version}")
+    port = importlib.import_module(f"modelopt.torch.models.{model_type}")
+    for name in spec.moe_spec.block_names:
+        cls = getattr(port, name)
+        assert isinstance(cls, type)

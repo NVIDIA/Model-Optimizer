@@ -265,6 +265,7 @@ def bypass(session):
         [
             "tests/unit/torch/distill/test_bypass.py",
             "tests/unit/torch/models/test_model_specs.py",
+            "tests/unit/torch/models/test_specs_vs_transformers.py",
             *(
                 f"tests/unit/torch/models/test_{name}_hf.py"
                 for name in ("deepseek_v41", "kimi_k31", "step5", "mimo_v2")
