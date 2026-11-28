@@ -304,6 +304,17 @@ class ExportSpec(SpecSection):
     pre_quant_scale fusion). A structural fallback (``zero_centered_gamma``) stays
     in the engine."""
 
+    remote_config_rejects_native: bool = False
+    """Whether the config class a checkpoint of this model ships cannot read the
+    ``config.json`` that transformers' own config class writes for it.
+
+    An export of the model built from transformers' classes writes that ``config.json``
+    and keeps the checkpoint's ``auto_map``, which a reload trusting remote code follows
+    back to the checkpoint's classes. When this is set, the export drops the
+    ``AutoConfig``, ``AutoModel`` and ``AutoModelForCausalLM`` entries and keeps the
+    others, such as the tokenizer's. Nemotron-H's legacy config class, for one, makes
+    ``layers_block_type``, which the built-in class writes, a read-only property."""
+
 
 @dataclass(kw_only=True)
 class PTQSpec(SpecSection):

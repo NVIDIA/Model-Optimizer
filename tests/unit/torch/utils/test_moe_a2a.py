@@ -523,14 +523,13 @@ _STOCK_PLAN = {
     [
         _STOCK_PLAN,
         {"layers.*.mlp.experts": "moe_tp_experts"},
-        {"layers.*.mlp.experts": "nemotron_experts_ep"},
         {k: v for k, v in _STOCK_PLAN.items() if v == "grouped_gemm"},
         {
             "layers.*.block_sparse_moe.experts": "moe_tp_experts",
             "layers.*.mlp.experts.gate_up_proj": "grouped_gemm",
         },
     ],
-    ids=["stock", "experts-style-only", "nemotron-style-only", "grouped-gemm-only", "hybrid"],
+    ids=["stock", "experts-style-only", "grouped-gemm-only", "hybrid"],
 )
 @pytest.mark.parametrize(
     "prefix",

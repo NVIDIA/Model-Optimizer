@@ -3683,9 +3683,9 @@ def test_the_model_keeps_the_plan_its_checkpoint_declares(
     """The load shards by the torch_a2a styles, but the config the model keeps goes back to the
     plan its checkpoint's config.json declares: an export writes it out, and nothing without
     ModelOpt knows those styles. A plan the config class ships (transformers' own, e.g.
-    Qwen3-MoE's) stays off the instance, and so does one the model's spec attached to the config,
-    which names styles only ModelOpt registers (Nemotron-H's nemotron_experts_ep). A config.json
-    the load cannot read declares none, with a warning, since an export then loses the plan."""
+    Qwen3-MoE's) stays off the instance, and so does one the model's spec attached to the config
+    (Nemotron-H's), which the checkpoint does not declare. A config.json the load cannot read
+    declares none, with a warning, since an export then loses the plan."""
     declared = isinstance(source, dict) and "base_model_ep_plan" in source
 
     class _PastError(Exception):

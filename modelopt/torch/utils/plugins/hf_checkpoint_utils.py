@@ -182,21 +182,37 @@ def _sanitize_llama3_rope_config(config_data: dict[str, Any], model: Any) -> Non
             rope_config["rope_theta"] = rope_theta
 
 
+def _remote_config_rejects_native(model_config: Any) -> bool:
+    """Whether ``model_config`` is a built-in class its checkpoint's own config class cannot read.
+
+    The model's spec says so in ``ExportSpec.remote_config_rejects_native``.
+    """
+    if not type(model_config).__module__.startswith("transformers.models."):
+        return False
+    # Imported here: importing modelopt.torch.models registers every model spec, which importing
+    # this module should not do.
+    from modelopt.torch.models import get_spec, hf_model_type
+
+    model_type = hf_model_type(model_config)
+    spec = get_spec(model_type) if model_type else None
+    export_spec = spec.export_spec if spec is not None else None
+    return export_spec is not None and export_spec.remote_config_rejects_native
+
+
 def sanitize_hf_config_for_deployment(config_data: dict[str, Any], model: Any) -> None:
     """Sanitize exported Hugging Face config metadata for deployment runtimes.
 
     Fix conservative deployment-only config incompatibilities:
 
-    * remove legacy config/model auto mappings from native NemotronH exports;
+    * remove legacy config/model auto mappings from native exports of models whose
+      checkpoint config class cannot read the native one (e.g. NemotronH);
     * add missing llama3 ``rope_theta`` metadata when available;
     * trim trailing MTP/next-token-prediction ``layer_types`` entries only when
       the mismatch is exactly explained by next-token-prediction metadata.
     """
     model_config = getattr(model, "config", None)
     auto_map = config_data.get("auto_map")
-    if isinstance(auto_map, dict) and type(model_config).__module__.startswith(
-        "transformers.models.nemotron_h."
-    ):
+    if isinstance(auto_map, dict) and _remote_config_rejects_native(model_config):
         # The native schema cannot reload through the source's legacy read-only config.
         for auto_class in ("AutoConfig", "AutoModel", "AutoModelForCausalLM"):
             auto_map.pop(auto_class, None)
