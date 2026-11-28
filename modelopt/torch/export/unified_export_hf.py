@@ -669,6 +669,25 @@ def _export_quantized_weight(
     """
     quantization_format = get_quantization_format(sub_module)
     if quantization_format == QUANTIZATION_NONE:
+        quantizer_attrs = quantizer_attr_names(weight_name)
+        wq = getattr(sub_module, quantizer_attrs.weight_quantizer, None)
+        iq = getattr(sub_module, quantizer_attrs.input_quantizer, None)
+        lora_a = getattr(wq, "svdquant_lora_a", None) if wq is not None else None
+        lora_b = getattr(wq, "svdquant_lora_b", None) if wq is not None else None
+        pqs = getattr(iq, "_pre_quant_scale", None) if iq is not None else None
+        if (lora_a is not None and lora_b is not None) or pqs is not None:
+            weight = getattr(sub_module, weight_name)
+            w_fp32 = weight.detach().float()
+            if lora_a is not None and lora_b is not None:
+                lb_f = lora_b.detach().float().to(w_fp32.device)
+                la_f = lora_a.detach().float().to(w_fp32.device)
+                w_fp32 = w_fp32 + lb_f @ la_f
+                delattr(wq, "_svdquant_lora_a")
+                delattr(wq, "_svdquant_lora_b")
+            if pqs is not None:
+                w_fp32 = w_fp32 * pqs.detach().float().to(w_fp32.device).view(1, -1)
+                delattr(iq, "_pre_quant_scale")
+            setattr(sub_module, weight_name, nn.Parameter(w_fp32.to(dtype), requires_grad=False))
         return
 
     block_size = get_weight_block_size(sub_module, weight_name)
@@ -922,6 +941,8 @@ def _dispatch_export_handler(name: str, sub_module: nn.Module, ctx: ExportContex
         # unquantized is written as-is, so cast it to the export dtype like the rest of the model.
         if get_quantization_format(sub_module) == QUANTIZATION_NONE:
             sub_module.weight = nn.Parameter(sub_module.weight.to(ctx.dtype), requires_grad=False)
+    if is_quantlinear(sub_module) and get_quantization_format(sub_module) == QUANTIZATION_NONE:
+        _export_quantized_weight(sub_module, ctx.dtype)
     handler = ExportModuleRegistry.match(sub_module)
     if handler is not None:
         handler(name, sub_module, ctx)
@@ -2207,6 +2228,7 @@ def export_hf_checkpoint(
     # expert params across the EP group. Computed here rather than with the other predicates below
     # because the carry-over gate needs it and runs ahead of them (the layerwise and diffusers paths
     # return before those are reached).
+    model = getattr(model, "_orig_mod", model)
     _fsdp2_sharded, _ep_sharded = _hf_shard_flags(model)
     # Under expert parallelism each rank holds only its own experts' ModelOpt state, so the
     # rank-0 save would write an incomplete one. Refused before any collective, alike on every rank.
