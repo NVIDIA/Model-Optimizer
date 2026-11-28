@@ -156,13 +156,11 @@ def document_batches(batch):
 
 
 def empty_document_batch(batch):
-    """Execute a zero-valid token when another distributed rank has more documents."""
-    # A single isolated token has no cross-token attention to preserve. Its explicit
-    # all-invalid loss mask makes caller attention/position metadata unnecessary.
-    tokens = batch["input_ids"][:1, :1]
-    return {
-        "input_ids": tokens,
-        "position_ids": torch.zeros_like(tokens),
-        "_packed_seq_ids": torch.ones_like(tokens),
-        "valid_mask": torch.zeros_like(tokens, dtype=torch.bool),
-    }
+    """Reuse a forwardable document with no valid loss targets for a padding slot."""
+    # A vision placeholder, mRoPE position or recurrent context cannot be replaced
+    # by an arbitrary first token. Preserve the document's complete forward inputs.
+    document = dict(batch)
+    document["valid_mask"] = torch.zeros_like(batch["input_ids"], dtype=torch.bool)
+    if "loss_mask" in document:
+        document["loss_mask"] = torch.zeros_like(document["loss_mask"], dtype=torch.bool)
+    return document

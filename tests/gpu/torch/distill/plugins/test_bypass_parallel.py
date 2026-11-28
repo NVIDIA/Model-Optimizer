@@ -143,7 +143,9 @@ def _measurement_metadata_worker(rank, size, path):
             with pytest.raises(ValueError, match="TP boundary loss ownership"):
                 runtime.reduce_statistics(statistics, list(statistics))
         elif path == "window":
-            assert runner._window(iter([batch]))[0] is batch
+            saved = runner._window(iter([batch]))[0]
+            torch.testing.assert_close(saved, batch, rtol=0, atol=0)
+            assert saved.untyped_storage().data_ptr() != batch.untyped_storage().data_ptr()
             assert not objects
             # Equal sample totals with different microbatch schedules still refuse.
             batches = [batch] if rank == 0 else [batch[:1], batch[1:]]
@@ -984,7 +986,7 @@ def _unequal_documents_worker(rank, size, padding_failure=False):
             original_zeros = torch.zeros_like
 
             def fail_padding(value, *args, **kwargs):
-                if rank == 1 and value.shape == (1, 1) and value.dtype == tokens.dtype:
+                if rank == 1 and value.shape == (1, 4) and value.dtype == tokens.dtype:
                     raise torch.OutOfMemoryError("Simulated padded document allocation failure")
                 return original_zeros(value, *args, **kwargs)
 
@@ -1024,8 +1026,8 @@ def _unequal_documents_worker(rank, size, padding_failure=False):
         Lion.step = original_step
     for actual, expected in zip(expected_gradients[1], expected_gradients[0], strict=True):
         torch.testing.assert_close(actual, expected, rtol=2e-5, atol=1e-10)
-    # Rank 1's second forward is one safe all-invalid token with no caller mask.
-    assert teacher.seen == ([(2, False), (2, False)] if rank == 0 else [(4, False), (1, False)])
+    # Rank 1 reuses its real document with no valid loss targets.
+    assert teacher.seen == ([(2, False), (2, False)] if rank == 0 else [(4, False), (4, False)])
     for name, expected in reference.state_dict().items():
         torch.testing.assert_close(student.state_dict()[name], expected, rtol=0, atol=0)
 
@@ -1261,7 +1263,7 @@ def _validation_refusal_worker(rank, size, problem):
     class Training:
         def __iter__(self):
             if problem == "train_advance" and rank == 1:
-                raise RuntimeError()
+                raise RuntimeError("injected training reader failure")
             if problem == "train_mask" and rank == 1:
                 yield {"hidden_states": batch, "valid_mask": torch.ones(1, 4, dtype=torch.bool)}
             else:
@@ -1278,6 +1280,8 @@ def _validation_refusal_worker(rank, size, problem):
                 validation_dataloader=validation,
                 device_mesh=mesh,
             )
+        if problem == "train_advance":
+            assert "injected training reader failure" in str(refusal.value)
         if problem == "finalization_format":
             assert "native IQ format changed during repair" in str(refusal.value)
             assert bool(mutations) == (rank == 1)
@@ -1821,6 +1825,7 @@ def _native_projection_worker(rank, size, frozen_format, layout=None):
 @pytest.mark.parametrize("frozen_format", ["fp8", "nvfp4"])
 @pytest.mark.timeout(300)
 def test_native_iq_placement_preserves_projection(native_workers, frozen_format):
+    pytest.importorskip("transformers", minversion="5.23")
     native_workers.run(_native_projection_worker, frozen_format)
 
 
@@ -1828,6 +1833,7 @@ def test_native_iq_placement_preserves_projection(native_workers, frozen_format)
 @pytest.mark.parametrize("frozen_format", ["fp8", "nvfp4"])
 @pytest.mark.timeout(300)
 def test_native_owner_updates_match_reference(native_workers, layout, frozen_format):
+    pytest.importorskip("transformers", minversion="5.23")
     native_workers.run(_native_projection_worker, frozen_format, layout)
 
 
@@ -1981,3 +1987,61 @@ def _native_context_replica_worker(rank, size):
 def test_native_context_combines_cp_and_data_replicas(bypass_cpu_workers):
     pytest.importorskip("transformers", minversion="5.23")
     bypass_cpu_workers.run(_native_context_replica_worker)
+
+
+def test_padded_document_retains_forward_context():
+    # Optional HF-backed helper import follows the test's integration admission.
+    pytest.importorskip("transformers", minversion="5.23")
+    from modelopt.torch.distill.plugins.transformers.packing import empty_document_batch
+
+    batch = {
+        "input_ids": torch.tensor([[255, 3, 5, 7]]),
+        "position_ids": torch.arange(4).reshape(1, 1, 4).expand(3, 1, 4),
+        "pixel_values": torch.randn(1, 3, 2, 2),
+        "attention_mask": torch.ones(1, 4, dtype=torch.bool),
+        "valid_mask": torch.tensor([[False, True, True, True]]),
+        "loss_mask": torch.tensor([[False, True, True, True]]),
+    }
+    padded = empty_document_batch(batch)
+    # Vision placeholders need their image data; mRoPE must retain its three axes.
+    for name in ("input_ids", "position_ids", "pixel_values", "attention_mask"):
+        assert padded[name] is batch[name]
+    assert not padded["valid_mask"].any() and not padded["loss_mask"].any()
+    assert batch["valid_mask"].any() and batch["loss_mask"].any()
+
+
+def _torch_mesh_axis_order_worker(rank, size, axes, accepted):
+    mesh = init_device_mesh("cpu", (1, size, 1), mesh_dim_names=axes)
+    if accepted:
+        context = torch_mesh_context(mesh)
+        assert context.data_context_mesh.size() == size
+    else:
+        with pytest.raises(ValueError, match="contiguous"):
+            torch_mesh_context(mesh)
+
+
+@pytest.mark.parametrize(
+    ("axes", "accepted"),
+    [
+        (("dp", "tp", "cp"), False),
+        (("tp", "cp", "dp"), True),
+        (("cp", "dp", "tp"), True),
+    ],
+)
+def test_torch_mesh_axis_order_is_validated(bypass_cpu_workers, axes, accepted):
+    bypass_cpu_workers.run(_torch_mesh_axis_order_worker, axes, accepted)
+
+
+def test_native_tp_output_registry_aliases():
+    # Optional native-HF imports follow stable5.23 admission.
+    pytest.importorskip("transformers", minversion="5.23")
+    from transformers.distributed.tensor_parallel import ALL_PARALLEL_STYLES
+
+    from modelopt.torch.distill.plugins.transformers.parallel import _tp_output_layouts
+
+    model = torch.nn.Sequential(torch.nn.Linear(2, 2))
+    with patch.dict(ALL_PARALLEL_STYLES, {"bypass_test_alias": ALL_PARALLEL_STYLES["colwise"]}):
+        outputs = _tp_output_layouts(model, {"0": "bypass_test_alias"})
+        assert outputs["0"] == Shard(-1)
+    with pytest.raises(ValueError, match="Unregistered native TP style"):
+        _tp_output_layouts(model, {"0": "bypass_unregistered_style"})

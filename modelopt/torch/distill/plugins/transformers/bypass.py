@@ -182,8 +182,11 @@ class TransformersBypassAdapter(ModuleBypassAdapter):
                             "Prepared native HF model lacks retained TP output declarations"
                         )
                 else:
-                    tp_plan = model._expand_parallel_plan(model.tp_plan)
-                    validate_hf_tensor_parallelism(model, self.context.tensor_mesh)
+                    tp_rules = dict(model.tp_plan)
+                    tp_plan = model._expand_parallel_plan(tp_rules)
+                    validate_hf_tensor_parallelism(
+                        model, self.context.tensor_mesh, tp_plan, rules=tp_rules
+                    )
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
         _synchronize_validation(self.context, error)
@@ -694,7 +697,9 @@ class TransformersBypassAdapter(ModuleBypassAdapter):
                 document, error = None, None
                 try:
                     document = (
-                        documents[index] if index < len(documents) else empty_document_batch(batch)
+                        documents[index]
+                        if index < len(documents)
+                        else empty_document_batch(documents[0] if documents else batch)
                     )
                 except Exception as exc:
                     if self.context is None or self.context.device_mesh.size() == 1:

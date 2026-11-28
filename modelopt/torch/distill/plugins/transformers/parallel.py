@@ -127,15 +127,10 @@ def _tp_output_layouts(model, plan):
     for path, name in plan.items():
         if path not in modules:
             continue
+        if name not in ALL_PARALLEL_STYLES:
+            raise ValueError(f"Unregistered native TP style {name!r}.")
         style = ALL_PARALLEL_STYLES[name]
-        if name in (
-            "colwise",
-            "colwise_rep",
-            "colwise_gather_output",
-            "rowwise",
-            "rowwise_rep",
-            "rowwise_split_input",
-        ):
+        if isinstance(getattr(style, "output_layouts", None), (Replicate, Shard)):
             layout = style.output_layouts
         elif name == "packed_colwise":
             layout = Shard(-1)
@@ -154,14 +149,18 @@ def _tp_output_layouts(model, plan):
     return outputs
 
 
-def validate_hf_tensor_parallelism(model, mesh, plan=None):
+def validate_hf_tensor_parallelism(model, mesh, plan=None, *, rules=None):
     """Validate resolved HF physical ownership before packed staging or native hooks."""
     from transformers.distributed.tensor_parallel import ALL_PARALLEL_STYLES
 
     modules = dict(model.named_modules(remove_duplicate=False))
-    expanded = plan is None
-    if expanded:
-        plan = model._expand_parallel_plan(model.tp_plan)
+    expanded = plan is None or rules is not None
+    if plan is None:
+        rules = dict(model.tp_plan)
+        plan = model._expand_parallel_plan(rules)
+    for style in plan.values():
+        if style not in ALL_PARALLEL_STYLES:
+            raise ValueError(f"Unregistered native TP style {style!r}.")
     parameters = dict(model.named_parameters(remove_duplicate=False))
     aliases, placed_inputs = {}, set()
     for full, style in plan.items():
@@ -177,9 +176,7 @@ def validate_hf_tensor_parallelism(model, mesh, plan=None):
                 placed_inputs=placed_inputs,
             )
     validate_tp_replicated_inputs(model, placed_inputs, aliases, metadata_only=True)
-    _validate_hf_plan_aliases(
-        model, plan, modules, parameters, rules=model.tp_plan if expanded else None
-    )
+    _validate_hf_plan_aliases(model, plan, modules, parameters, rules=rules)
     for name in plan:
         if name in parameters:
             continue

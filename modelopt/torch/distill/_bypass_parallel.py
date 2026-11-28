@@ -56,12 +56,16 @@ def torch_mesh_context(mesh):
         raise ValueError("Use TransformersDeviceMesh for overlapping expert parallelism")
 
     def combine(names, alias):
-        names = [name for name in names if name in axes]
+        names = [name for name in axes if name in names]
         if not names:
             return None
         return mesh[names[0]] if len(names) == 1 else mesh[tuple(names)]._flatten(alias)
 
     data = ("dp", "fsdp", "dp_replicate", "dp_shard")
+    for names in (data, (*data, "cp")):
+        indices = [index for index, name in enumerate(axes) if name in names]
+        if indices and indices != list(range(indices[0], indices[-1] + 1)):
+            raise ValueError("Bypass data/context Torch mesh axes must be contiguous.")
     context = BypassMeshContext(
         device_mesh=mesh,
         data_mesh=combine(data, "modelopt_bypass_data"),
