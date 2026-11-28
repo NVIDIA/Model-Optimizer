@@ -3,32 +3,9 @@
 Diagnose a failure in the draft-training pipeline: identify the failing task, find
 the root cause, and give a fix plus a re-run command.
 
-## Step 0 — Locate the experiment
+## Step 1 — Find the first failed task
 
-Ask the user for one of:
-
-- The experiment directory (e.g. the `--job-dir` passed to `launch.py` / `slurm.py`)
-- The model name / YAML they ran
-
-Find recent experiments under the job directory:
-
-```bash
-ls -td experiments/cicd/cicd_* | head -10
-# or wherever --job-dir was pointed
-```
-
-Each experiment directory contains one subdirectory per task, each with a log file
-whose name varies by launch mode (Slurm: `sbatch_*.out`, local Docker: `*.log`).
-
-## Step 1 — Fetch logs for the failed task
-
-Match the log files generally and read the tail of each — errors appear at the end:
-
-```bash
-find experiments/<exp_id>/ -type f \( -name '*.out' -o -name '*.log' \) | sort | while read -r f; do
-  echo "=== $f ==="; tail -200 "$f"; echo
-done
-```
+Use [shared log access](common-log-access.md) with 200 lines per log.
 
 Find the first task with a non-zero exit code or an error message. Later tasks
 usually fail only because an upstream artifact is missing, so fix the first one.

@@ -1,0 +1,27 @@
+[
+  {
+    "id": "eagle3-training-validation-plan",
+    "question": "Plan an offline EAGLE3 draft-training workflow for Qwen3-8B with ModelOpt. Include the main stages and artifacts, relevant source references, the launcher preview command, and how to decide whether a completed run is valid. Identify evidence still needed before approval. Keep the plan under 500 words. Read available references, but do not download models, execute the preview, submit jobs, start services, train, benchmark or invent results.",
+    "expected_skill": "modelopt-speculative-decoding",
+    "expected_script": null,
+    "ground_truth": "Plan offline Qwen3-8B EAGLE3 as target-generated conversations, target hidden-state dumps, draft training/export, then exported-draft benchmarking. Cite the configure-stage, EAGLE3 and validation references and the launcher example or recipe. Show launch.py --yaml examples/Qwen/Qwen3-8B/hf_offline_eagle3.yaml --dryrun from tools/launcher without executing it. Documented alternative synthesis/dump backends are valid. Require healthy training and nonempty readable artifacts; when storage or source files are unavailable, disclose unverified checks. Manually extract the MT-Bench Average Acceptance Length ratio and compare it to the documented >=2.1 gate: successful benchmark exit does not enforce this threshold. Identify missing configuration, logs, artifact checks and measured AR before approval. Throughput may be reported, but the skill defines no throughput pass threshold. Keep a concise plan without model work or invented measurements.",
+    "expected_behavior": [
+      "Outlines target-generated conversations, offline hidden-state dumps, draft training/export and exported-draft benchmarking with their artifacts; accepts documented backend alternatives.",
+      "Cites relevant configure/EAGLE3/validation references and the launcher example or recipe, and shows the launcher --dryrun command without executing it; discloses unavailable source checks.",
+      "Requires manually reading MT-Bench acceptance-length ratio and comparing it to >=2.1; explains that a completed benchmark task does not enforce the gate.",
+      "Requires healthy training and usable nonempty artifacts, and identifies missing configuration, logs, artifact verification and measured acceptance evidence before approval; discloses inaccessible storage.",
+      "Keeps a concise planning response without model downloads, preview execution, job submission, service startup, training, benchmarking or invented results."
+    ]
+  },
+  {
+    "id": "serving-without-draft-training",
+    "question": "I already have a quantized checkpoint and only need a serving plan. Which ModelOpt workflow owns that task? Reply in two sentences; do not configure or train a speculative draft, execute commands or invent runtime details.",
+    "expected_skill": null,
+    "expected_script": null,
+    "ground_truth": "Route serving an existing quantized checkpoint to modelopt-deployment or an unambiguous deployment alias. Do not configure or train a draft or execute commands. Answer in two sentences without fabricated runtime details.",
+    "expected_behavior": [
+      "Identifies deployment as the workflow for serving the existing quantized checkpoint.",
+      "Does not configure or train a speculative draft, execute commands or invent runtime details; replies in two sentences."
+    ]
+  }
+]

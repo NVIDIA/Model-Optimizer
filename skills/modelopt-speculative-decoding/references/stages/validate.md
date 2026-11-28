@@ -3,26 +3,9 @@
 Verify that a pipeline run completed successfully end-to-end and meets its quality
 gate.
 
-## Step 0 — Identify the experiment
-
-Find the most recent experiment directory (or ask the user for the path):
-
-```bash
-ls -td experiments/cicd/cicd_* | head -5
-```
-
-Each experiment directory has one subdirectory per task, each containing a log file
-whose name varies by launch mode (Slurm: `sbatch_*.out`, local Docker: `*.log`).
-
 ## Step 1 — Check task outcomes
 
-Match the log files generally and read the tail of each:
-
-```bash
-find experiments/<exp_id>/ -type f \( -name '*.out' -o -name '*.log' \) | sort | while read -r f; do
-  echo "=== $f ==="; tail -50 "$f"; echo
-done
-```
+Use [shared log access](common-log-access.md) with 50 lines per log.
 
 Every task must complete without error. Look for:
 
