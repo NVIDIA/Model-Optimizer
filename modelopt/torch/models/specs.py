@@ -379,6 +379,12 @@ class BypassSpec(SpecSection):
     """
     batch_packed_documents: bool = False
     """Permit independent documents in padded rows when activation and position policies agree."""
+    functional_children: tuple[str, ...] = ()
+    """Paths relative to each decoder block whose parent reads their parameters without calling them.
+
+    When native/caller FSDP placement separates a child, enter its forward lifecycle
+    around the parent math. The enclosing owner otherwise gathers it normally.
+    """
     adapter_path: str | None = None
     """Optional qualified ModuleBypassAdapter factory for model-owned replay side inputs."""
 

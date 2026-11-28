@@ -43,7 +43,14 @@ def bypass(
     Args:
         student: Existing ModelOpt IQ PTQ model; frozen formats may coexist.
         teacher: Separate original-weight callable with matching boundary paths.
-        train_dataloader: Unique sample batches that exactly fill each global update.
+        train_dataloader: Per-rank batches that exactly fill each update's sample budget:
+            ``config.global_batch_size`` without a mesh, or ``global_batch_size // dp_size``
+            with a mesh, where ``dp_size`` counts actual data lanes (including FSDP,
+            excluding TP and CP). The global batch must divide exactly over those lanes.
+            Data lanes supply unique samples; TP peers supply identical samples and masks.
+            CP peers replay identical full sequences and masks; valid-token ownership is
+            partitioned across CP ranks, so CP does not create additional sample lanes.
+            Ranks must execute the same number of microbatches per update.
             Dict batches accept boolean/integer ``valid_mask`` or ``loss_mask``,
             in that order, with nonzero meaning valid rather than a token weight.
             Otherwise, ``attention_mask`` must be 2D boolean/integer. Floating or
@@ -60,9 +67,25 @@ def bypass(
             HF 2D attention masks must be Boolean/integer; floating additive bias uses 4D.
         config: A :class:`BypassConfig`, a dict, or None for the established defaults.
         validation_dataloader: Optional held-out batches for finalized-student valid-token MSE.
+            Batches obey the same sequence length, nonempty batch and validity-mask rules
+            as training, with identical TP/CP samples and unique samples across data lanes.
+            Ranks must have matching batch-presence and microbatch-count schedules;
+            validation need not fill the training global-batch budget.
             Diagnostic failures propagate after committing training updates to the student.
             Zero-step preflight skips validation as well as training.
         device_mesh: Caller-owned placement mesh, adopted by supported integrations.
+            It determines the per-rank data-lane budget and TP/CP replication contract
+            described above; use a data-lane sampler, rather than sharding across TP/CP.
+            TP DTensor boundary targets must be Replicate or sharded along the final
+            feature dimension; token/batch shards and partial sums refuse before replay.
+            Plain ordinary/composite TP outputs promise full replicated targets; custom
+            local-shard/partial composites must preserve DTensor placement. This producer
+            contract cannot be inferred from arbitrary Python output values. Exact native
+            HF output declarations are honored. Generic directly distributed owners must
+            keep DTensor outputs (use_local_output=False), including local-full owners
+            whose erased output declaration is unavailable. Only the selected boundary
+            module itself is checked; distributed descendants remain subject to the
+            composite producer contract above.
 
     Finalization commits boundaries in order. Any failure during finalization may
     leave earlier boundaries committed; reload a saved checkpoint before retrying.
@@ -82,8 +105,12 @@ def bypass(
         and teacher gradient flags are restored on every exit.
     """
     config = config if isinstance(config, BypassConfig) else BypassConfig(**(config or {}))
-    if torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1:
-        raise ValueError("Distributed Bypass requires its native placement integration")
+    if (
+        torch.distributed.is_initialized()
+        and torch.distributed.get_world_size() > 1
+        and device_mesh is None
+    ):
+        raise ValueError("Distributed Bypass requires the caller's actual device_mesh")
     adapter: ModuleBypassAdapter
     if getattr(getattr(student, "config", None), "model_type", None):
         from .plugins.transformers import TransformersBypassAdapter
@@ -91,16 +118,46 @@ def bypass(
         adapter = TransformersBypassAdapter(device_mesh)
         adapter.adopt(student)
     else:
-        if device_mesh is not None:
-            raise ValueError("Generic Torch mesh adoption requires the distributed Bypass runtime")
         adapter = ModuleBypassAdapter()
-    units = adapter.resolve_units(student, teacher, config)
-    plan = plan_iq_repair(
-        [student.get_submodule(u.student_path) for u in units], root_model=student
-    )
+        if device_mesh is not None:
+            from ._bypass_parallel import torch_mesh_context
+
+            adapter.context = torch_mesh_context(device_mesh)
+    context = getattr(adapter, "context", None)
+    runtime = None
+    error = None
+    try:
+        if context is not None:
+            from ._bypass_runtime import DistributedBypassRuntime
+
+            runtime = DistributedBypassRuntime(context, config)
+        units = adapter.resolve_units(student, teacher, config)
+        plan = plan_iq_repair(
+            [student.get_submodule(u.student_path) for u in units], root_model=student
+        )
+    except Exception as exc:
+        if context is None:
+            raise
+        error = f"{type(exc).__name__}: {exc}"
+    if context is not None:
+        from ._bypass_parallel import _all_rank_values
+
+        # Constructor refusals must agree even on ranks that have no runtime yet.
+        errors = sorted({value for value in _all_rank_values(context, error) if value})
+        if errors:
+            raise ValueError("; ".join(errors))
+        assert runtime is not None
+        schedules = runtime.gather_values(
+            (config.model_dump(), [u.name for u in units], validation_dataloader is not None)
+        )
+        runtime.synchronize_error(
+            "Bypass recipes, boundaries and validation presence must agree across model ranks"
+            if any(value != schedules[0] for value in schedules)
+            else None
+        )
     logging.getLogger(__name__).info("Bypass selected boundaries: %s", [u.name for u in units])
     if config.num_steps == 0:
         return student
-    return _BypassRunner(student, teacher, units, plan, config, adapter).run(
+    return _BypassRunner(student, teacher, units, plan, config, adapter, runtime).run(
         train_dataloader, validation_dataloader
     )

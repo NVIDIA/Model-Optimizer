@@ -45,6 +45,40 @@ def _submesh(mesh, axis):
         return None
 
 
+def torch_mesh_context(mesh):
+    """Describe an actual dense Torch mesh without importing Transformers."""
+    axes = mesh.mesh_dim_names
+    if not axes or not set(axes).issubset(
+        {"dp", "fsdp", "dp_replicate", "dp_shard", "tp", "pp", "cp", "ep"}
+    ):
+        raise ValueError("Bypass needs explicit supported Torch mesh axis names")
+    if _size(_submesh(mesh, "ep")) > 1:
+        raise ValueError("Use TransformersDeviceMesh for overlapping expert parallelism")
+
+    def combine(names, alias):
+        names = [name for name in axes if name in names]
+        if not names:
+            return None
+        return mesh[names[0]] if len(names) == 1 else mesh[tuple(names)]._flatten(alias)
+
+    data = ("dp", "fsdp", "dp_replicate", "dp_shard")
+    for names in (data, (*data, "cp")):
+        indices = [index for index, name in enumerate(axes) if name in names]
+        if indices and indices != list(range(indices[0], indices[-1] + 1)):
+            raise ValueError("Bypass data/context Torch mesh axes must be contiguous.")
+    context = BypassMeshContext(
+        device_mesh=mesh,
+        data_mesh=combine(data, "modelopt_bypass_data"),
+        data_context_mesh=combine((*data, "cp"), "modelopt_bypass_data_context"),
+        tensor_mesh=_submesh(mesh, "tp"),
+        pipeline_mesh=_submesh(mesh, "pp"),
+        context_mesh=_submesh(mesh, "cp"),
+        fsdp_mesh=_submesh(mesh, "fsdp"),
+    )
+    context.expert_replica_mesh = context.data_context_mesh
+    return context
+
+
 @dataclass
 class BypassMeshContext:
     """Real data lanes, disjoint weight owners and replica groups, with no launcher sizes."""
@@ -92,6 +126,24 @@ def _all_rank_values(context, value):
     values = [None] * dist.get_world_size(group)
     dist.all_gather_object(values, value, group=group)
     return values
+
+
+def _all_rank_max(context, value):
+    """Reduce an integer scalar or packed integer sequence without object serialization."""
+    if not dist.is_initialized() or context is None or _size(context.device_mesh) == 1:
+        return value
+    group = _model_group(context)
+    # Bare NCCL requires current-device CUDA; Gloo and combined CPU backends accept CPU.
+    device = torch.device("cuda" if dist.get_backend(group) == "nccl" else "cpu")
+    maximum = torch.tensor(value, dtype=torch.int64, device=device)
+    dist.all_reduce(maximum, op=dist.ReduceOp.MAX, group=group)
+    return maximum.tolist() if maximum.ndim else maximum.item()
+
+
+def _synchronize_error(context, error):
+    if _all_rank_max(context, int(error is not None)):
+        errors = sorted({value for value in _all_rank_values(context, error) if value})
+        raise ValueError("; ".join(errors))
 
 
 def apply_tp_quantizer_fields(quantizer, fields):

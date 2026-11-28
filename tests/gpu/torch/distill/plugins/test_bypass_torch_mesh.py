@@ -18,6 +18,7 @@
 import copy
 from datetime import timedelta
 from functools import cache
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -444,7 +445,7 @@ def _torch_mesh_validation_worker(rank, size, failure):
                     rotate={"enable": True, "block_size": 32},
                 )
             )
-    if rank == 0 and failure != "biased_rotation":
+    if rank == 0 and failure not in ("biased_rotation", "changing_plan"):
         if failure == "wrong_shape":
             quantizer._native_weight_meta["source_shape"] = (30, 32)
         else:
@@ -452,7 +453,17 @@ def _torch_mesh_validation_worker(rank, size, failure):
     snapshot = _snapshot(model)
     metadata = copy.deepcopy(quantizer._native_weight_meta)
     error = None
-    with bounded_collectives(10):
+    expansions = []
+    original_expand = model._expand_parallel_plan
+
+    def expand(rules):
+        plan = original_expand(rules)
+        if failure == "changing_plan" and rank == 0 and not expansions:
+            plan["model.layers.0.self_attn.q_proj.weight"] = "bypass_unregistered_style"
+        expansions.append(plan)
+        return plan
+
+    with bounded_collectives(10), patch.object(model, "_expand_parallel_plan", expand):
         try:
             TransformersBypassAdapter(mesh).parallelize(model)
         except Exception as exc:
@@ -464,12 +475,17 @@ def _torch_mesh_validation_worker(rank, size, failure):
     assert errors[0] == errors[1], errors
     if failure == "biased_rotation":
         assert "after bias addition" in errors[0][1]
+    if failure == "changing_plan":
+        assert "Unregistered native TP style" in errors[0][1]
+        assert len(expansions) == 1
     assert not hasattr(model, "_modelopt_bypass_torch_mesh")
     assert quantizer._native_weight_meta == metadata
     _assert_unchanged(model, snapshot)
 
 
-@pytest.mark.parametrize("failure", ["wrong_shape", "missing_codes", "biased_rotation"])
+@pytest.mark.parametrize(
+    "failure", ["wrong_shape", "missing_codes", "biased_rotation", "changing_plan"]
+)
 @pytest.mark.timeout(180)
 def test_raw_torch_mesh_validation_is_collective(bypass_cpu_workers, failure):
     pytest.importorskip("transformers", minversion="5.23")

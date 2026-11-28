@@ -32,6 +32,7 @@ from modelopt.torch.export.hf_export_handlers import (
     _prepare_fused_experts,
     _prepare_iterable_experts,
 )
+from modelopt.torch.export.layer_utils import is_quantlinear
 from modelopt.torch.export.registry import (
     ExportContext,
     ExportModuleRegistry,
@@ -39,6 +40,7 @@ from modelopt.torch.export.registry import (
     _ExportHandlerRegistryCls,
 )
 from modelopt.torch.export.unified_export_hf import _process_quantized_modules
+from modelopt.torch.quantization.nn import QuantLinearConvBase
 
 
 class _Experts(nn.Module):
@@ -265,6 +267,36 @@ def test_builtin_registry_dispatches_quantized_modules():
     embedding = nn.Embedding(4, 4)
     embedding.weight_quantizer = None
     assert ExportModuleRegistry.match(embedding) is _export_quant_embedding
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("QuantLinear", True),
+        ("QuantCompressedLinear", True),
+        ("QuantFP8Linear", True),
+        ("QuantLinearLoRA", False),
+        ("QuantLineards_kernel", False),
+    ],
+)
+def test_quantlinear_keeps_legacy_names_and_exclusions(name, expected):
+    assert is_quantlinear(_named_module(name)) is expected
+
+
+@pytest.mark.parametrize("name", ["LoRAProjection", "ds_kernelProjection"])
+def test_semantic_quantlinear_keeps_exclusions(name):
+    module = type(name, (nn.Linear,), {})(4, 4, bias=False)
+    mtq.quantize(module, mtq.FP8_DEFAULT_CFG, lambda m: m(torch.randn(1, 4)))
+    assert isinstance(module, nn.Linear) and isinstance(module, QuantLinearConvBase)
+    assert not is_quantlinear(module)
+    assert ExportModuleRegistry.match(module) is None
+
+
+def test_quantized_convolution_is_not_a_dense_linear():
+    module = nn.Conv1d(4, 4, 1, bias=False)
+    mtq.quantize(module, mtq.FP8_DEFAULT_CFG, lambda m: m(torch.randn(1, 4, 4)))
+    assert not is_quantlinear(module)
+    assert ExportModuleRegistry.match(module) is None
 
 
 def test_process_quantized_modules_exports_via_registry():

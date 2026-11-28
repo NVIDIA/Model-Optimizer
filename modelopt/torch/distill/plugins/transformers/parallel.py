@@ -19,7 +19,7 @@ import copy
 import re
 
 import torch
-from torch.distributed.tensor import DTensor
+from torch.distributed.tensor import DTensor, Replicate, Shard
 
 from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.qtensor import QTensorWrapper
@@ -40,6 +40,7 @@ from ..._bypass_parallel import (
     validate_tp_quantizer_aliases,
     validate_tp_replicated_inputs,
 )
+from ..._bypass_parallel import torch_mesh_context as torch_mesh_context
 
 __all__ = []
 
@@ -110,32 +111,6 @@ def native_mesh_context(manager):
     )
 
 
-def torch_mesh_context(mesh):
-    """Adopt explicit Torch dense meshes without inferring an independent EP multiplier."""
-    from ..._bypass_parallel import _submesh
-
-    if not mesh.mesh_dim_names or not set(mesh.mesh_dim_names).issubset(
-        {"dp", "fsdp", "dp_replicate", "dp_shard", "tp", "pp", "cp", "ep"}
-    ):
-        raise ValueError("Bypass needs explicit supported Torch mesh axis names")
-    if _size(_submesh(mesh, "ep")) > 1:
-        raise ValueError("Use TransformersDeviceMesh for overlapping expert parallelism")
-    data_axes = tuple(
-        axis for axis in ("dp", "fsdp", "dp_replicate", "dp_shard") if axis in mesh.mesh_dim_names
-    )
-    data = _combine(mesh, data_axes, "modelopt_bypass_torch_data") if data_axes else None
-    return BypassMeshContext(
-        device_mesh=mesh,
-        data_mesh=data,
-        data_context_mesh=data,
-        tensor_mesh=_submesh(mesh, "tp"),
-        expert_replica_mesh=data,
-        pipeline_mesh=_submesh(mesh, "pp"),
-        context_mesh=_submesh(mesh, "cp"),
-        fsdp_mesh=_submesh(mesh, "fsdp"),
-    )
-
-
 def apply_hf_tensor_parallelism(model, mesh, plan=None):
     """Apply the exact stable-5.23 native TP interface."""
     from transformers.distributed.tensor_parallel import apply_tensor_parallelism
@@ -144,14 +119,48 @@ def apply_hf_tensor_parallelism(model, mesh, plan=None):
     return apply_tensor_parallelism(model, mesh, plan)
 
 
-def validate_hf_tensor_parallelism(model, mesh, plan=None):
+def _tp_output_layouts(model, plan):
+    """Normalize exact native module output declarations, never weight ownership."""
+    from transformers.distributed.tensor_parallel import ALL_PARALLEL_STYLES
+
+    modules, outputs = dict(model.named_modules()), {}
+    for path, name in plan.items():
+        if path not in modules:
+            continue
+        if name not in ALL_PARALLEL_STYLES:
+            raise ValueError(f"Unregistered native TP style {name!r}.")
+        style = ALL_PARALLEL_STYLES[name]
+        if isinstance(getattr(style, "output_layouts", None), (Replicate, Shard)):
+            layout = style.output_layouts
+        elif name == "packed_colwise":
+            layout = Shard(-1)
+        elif name == "sequence_parallel":
+            layout = Shard(style.sequence_dim)
+        elif name in (
+            "all_reduce",
+            "moe_tp_experts",
+            "replicate",
+            "replicated_with_grad_allreduce",
+        ):
+            layout = Replicate()
+        else:
+            layout = f"Unsupported native TP boundary output style {name!r}"
+        outputs[path] = layout
+    return outputs
+
+
+def validate_hf_tensor_parallelism(model, mesh, plan=None, *, rules=None):
     """Validate resolved HF physical ownership before packed staging or native hooks."""
     from transformers.distributed.tensor_parallel import ALL_PARALLEL_STYLES
 
     modules = dict(model.named_modules(remove_duplicate=False))
-    expanded = plan is None
-    if expanded:
-        plan = model._expand_parallel_plan(model.tp_plan)
+    expanded = plan is None or rules is not None
+    if plan is None:
+        rules = dict(model.tp_plan)
+        plan = model._expand_parallel_plan(rules)
+    for style in plan.values():
+        if style not in ALL_PARALLEL_STYLES:
+            raise ValueError(f"Unregistered native TP style {style!r}.")
     parameters = dict(model.named_parameters(remove_duplicate=False))
     aliases, placed_inputs = {}, set()
     for full, style in plan.items():
@@ -167,9 +176,7 @@ def validate_hf_tensor_parallelism(model, mesh, plan=None):
                 placed_inputs=placed_inputs,
             )
     validate_tp_replicated_inputs(model, placed_inputs, aliases, metadata_only=True)
-    _validate_hf_plan_aliases(
-        model, plan, modules, parameters, rules=model.tp_plan if expanded else None
-    )
+    _validate_hf_plan_aliases(model, plan, modules, parameters, rules=rules)
     for name in plan:
         if name in parameters:
             continue
@@ -405,7 +412,6 @@ def parallelize_native_transformers(model, context, *, initialize=None):
                 raise ValueError("Native HF config sizes must match the caller's realized meshes.")
         plans = model._resolve_parallel_plans(config)
         tp_plan, ep_plan, fsdp_plan = plans
-        plans = tp_plan, ep_plan, fsdp_plan
         for axis, plan, mesh in (
             ("TP", tp_plan, context.tensor_mesh),
             ("EP", ep_plan, context.expert_mesh),
@@ -540,6 +546,9 @@ def parallelize_native_transformers(model, context, *, initialize=None):
         model.config.distributed_config = config
     if not adopted and context.data_mesh.size() > 1:
         apply_fully_sharded_data_parallelism(model, context.mesh_manager, fsdp_plan, ep_plan)
+    from .functional_fsdp import install_functional_fsdp_calls
+
+    install_functional_fsdp_calls(model)
     names = {id(module): name for name, module in model.named_modules()}
     metadata.update(
         dense_ranks=context.device_mesh.mesh.tolist(),

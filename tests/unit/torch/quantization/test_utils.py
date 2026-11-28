@@ -38,6 +38,7 @@ from modelopt.torch.quantization.utils.core_utils import (
     _fsdp2_owned_params,
     _fsdp2_owns,
     _fsdp2_param_groups,
+    _fsdp2_persistent_parameters,
     enable_fake_quant,
     enable_weight_access_and_writeback,
     fsdp2_weight_access_and_writeback_context,
@@ -450,6 +451,7 @@ def _fsdp2_owns_its_params_in_every_state_job(rank, size, asymmetric, receipt_st
     assert not _fsdp2_owns({id(sharded): weakref.ref(model.dense.weight)}, sharded)
     shard_before = sharded.to_local().detach().clone()
     _fsdp2_owned_params(layer)
+    assert not _fsdp2_owns({id(sharded): owned[id(model.dense.weight)]}, sharded)
     layer.unshard()
     unsharded = layer.weight
     full_before = unsharded.detach().clone()
@@ -540,6 +542,11 @@ def _fsdp2_owns_its_params_in_every_state_job(rank, size, asymmetric, receipt_st
     torch.testing.assert_close(sharded.to_local(), shard_before + 1, rtol=0, atol=0)
     with fsdp2_weight_access_and_writeback_context(model.dense, model):
         assert not isinstance(model.dense.weight, DTensor)
+        assert _fsdp2_persistent_parameters(model)[model.dense, "weight"] is dense_weight
+    with fsdp2_weight_access_and_writeback_context(model, model, writeback=False):
+        for child in (model.dense, model.layer):
+            local = child.weight.to_local() if isinstance(child.weight, DTensor) else child.weight
+            assert local.shape == (8, 8)
     # The set is kept for the unit: opening the window again costs the module's parameters only.
     with mock.patch.object(core_utils, "_fsdp2_param_groups", wraps=_fsdp2_param_groups) as scans:
         for _ in range(3):

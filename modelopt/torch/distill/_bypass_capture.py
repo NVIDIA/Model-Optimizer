@@ -297,6 +297,7 @@ class ModuleBypassAdapter:
     """Resolve ordinary callable Torch boundaries without a Transformers dependency."""
 
     feedforward_names = ("mlp", "moe", "ffn", "block_sparse_moe")
+    context: Any = None
 
     def resolve_units(self, student, teacher, config):
         """Use explicit paths or disjoint named MLP/MoE owners containing IQ weights."""
@@ -372,7 +373,9 @@ class ModuleBypassAdapter:
 
     def validate_batch(self, batch, config):
         """Check declared context budgets for tokens or sequence-shaped hidden states."""
-        _valid_token_mask(batch)
+        mask = _valid_token_mask(batch)
+        if mask is not None and (not mask.ndim or mask.shape[0] != self.batch_size(batch)):
+            raise ValueError("Bypass loss mask must match the original batch's sample dimension")
         values = (
             batch.get("input_ids", batch.get("inputs_embeds", batch.get("hidden_states")))
             if isinstance(batch, dict)

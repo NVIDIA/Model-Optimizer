@@ -19,7 +19,7 @@ from itertools import pairwise
 
 import torch
 
-__all__ = ["batch_documents", "document_batches"]
+__all__ = ["batch_documents", "document_batches", "empty_document_batch"]
 
 
 def batch_documents(documents, token_budget, *, max_documents=8):
@@ -153,3 +153,14 @@ def document_batches(batch):
                 document["valid_mask"] = document["_packed_seq_ids"].bool()
             result.append(document)
     return result
+
+
+def empty_document_batch(batch):
+    """Reuse a forwardable document with no valid loss targets for a padding slot."""
+    # A vision placeholder, mRoPE position or recurrent context cannot be replaced
+    # by an arbitrary first token. Preserve the document's complete forward inputs.
+    document = dict(batch)
+    document["valid_mask"] = torch.zeros_like(batch["input_ids"], dtype=torch.bool)
+    if "loss_mask" in document:
+        document["loss_mask"] = torch.zeros_like(document["loss_mask"], dtype=torch.bool)
+    return document

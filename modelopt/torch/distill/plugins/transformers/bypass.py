@@ -18,6 +18,7 @@
 import importlib
 import inspect
 import weakref
+from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from importlib.metadata import PackageNotFoundError, version
 
@@ -36,7 +37,7 @@ from ..._bypass_capture import (
     validate_unit_ownership,
 )
 from .output_head import bypass_head_context
-from .packing import batch_documents, document_batches
+from .packing import batch_documents, document_batches, empty_document_batch
 
 
 def _require_transformers():
@@ -82,7 +83,8 @@ class TransformersBypassAdapter(ModuleBypassAdapter):
         self.device_mesh = device_mesh
         self.context = None
         if device_mesh is not None:
-            from .parallel import native_mesh_context, torch_mesh_context
+            from ..._bypass_parallel import torch_mesh_context
+            from .parallel import native_mesh_context
 
             self.context = (
                 native_mesh_context(device_mesh)
@@ -114,6 +116,36 @@ class TransformersBypassAdapter(ModuleBypassAdapter):
             self._model_facts[model] = facts
         return facts
 
+    def _remember_tp_outputs(self, model, plan=None):
+        if (
+            self.context is None
+            or self.context.tensor_mesh is None
+            or self.context.tensor_mesh.size() == 1
+        ):
+            return
+        from .parallel import _tp_output_layouts
+
+        metadata = self.context.parallel_metadata.get(id(model))
+        if metadata is None:
+            metadata = getattr(model, "_modelopt_bypass_placement", {})
+        if "tp_outputs" in metadata:
+            return
+        outputs = getattr(model, "_modelopt_bypass_tp_outputs", None)
+        if outputs is None:
+            if plan is None:
+                plan = metadata.get("plans", {}).get("tp")
+            if plan is None:
+                if hasattr(model, "_modelopt_bypass_torch_mesh"):
+                    raise ValueError(
+                        "Prepared native HF model lacks retained TP output declarations"
+                    )
+                return  # Unplaced teachers have no applied native output declaration.
+            outputs = _tp_output_layouts(model, plan)
+        # Runtime-only facts describe the applied plan, never subsequently edited rules.
+        self.context.parallel_metadata[id(model)] = {**metadata, "tp_outputs": outputs}
+        if self.context.mesh_manager is None:
+            model._modelopt_bypass_tp_outputs = outputs
+
     def parallelize(self, model, *, initialize=None):
         """Stage native fields before caller-owned HF TP/EP/FSDP, or validate adoption."""
         self._model_facts.pop(model, None)
@@ -123,6 +155,7 @@ class TransformersBypassAdapter(ModuleBypassAdapter):
             from .parallel import parallelize_native_transformers
 
             parallelize_native_transformers(model, self.context, initialize=initialize)
+            self._remember_tp_outputs(model)
             return model
         from ..._bypass_parallel import _size, prepare_quantizer_partitions
         from .parallel import (
@@ -134,7 +167,7 @@ class TransformersBypassAdapter(ModuleBypassAdapter):
 
         prepared = hasattr(model, "_modelopt_bypass_torch_mesh")
         _synchronize_placement_state(self.context, prepared)
-        error = None
+        error, tp_plan = None, None
         try:
             if initialize is not None:
                 raise ValueError("Native initialization callbacks require TransformersDeviceMesh")
@@ -142,8 +175,18 @@ class TransformersBypassAdapter(ModuleBypassAdapter):
                 raise ValueError("Prepared Torch models must use their exact caller-owned mesh")
             if _size(self.context.pipeline_mesh) > 1:
                 raise ValueError("Native PP requires a validated family transport")
-            if _size(self.context.tensor_mesh) > 1 and not prepared:
-                validate_hf_tensor_parallelism(model, self.context.tensor_mesh)
+            if _size(self.context.tensor_mesh) > 1:
+                if prepared:
+                    if not hasattr(model, "_modelopt_bypass_tp_outputs"):
+                        raise ValueError(
+                            "Prepared native HF model lacks retained TP output declarations"
+                        )
+                else:
+                    tp_rules = dict(model.tp_plan)
+                    tp_plan = model._expand_parallel_plan(tp_rules)
+                    validate_hf_tensor_parallelism(
+                        model, self.context.tensor_mesh, tp_plan, rules=tp_rules
+                    )
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
         _synchronize_validation(self.context, error)
@@ -151,9 +194,10 @@ class TransformersBypassAdapter(ModuleBypassAdapter):
             from modelopt.torch.quantization.repair_partition import prepare_packed_weights_for_tp
 
             prepare_packed_weights_for_tp(model)
-            apply_hf_tensor_parallelism(model, self.context.tensor_mesh)
+            apply_hf_tensor_parallelism(model, self.context.tensor_mesh, tp_plan)
             prepare_quantizer_partitions(model, self.context)
         model._modelopt_bypass_torch_mesh = self.device_mesh
+        self._remember_tp_outputs(model, tp_plan)
         return model
 
     def adopt(self, model):
@@ -337,6 +381,7 @@ class TransformersBypassAdapter(ModuleBypassAdapter):
         """Select dense/MoE owners and map their exact logical positions to the teacher."""
         for model in (student, teacher):
             self._model_facts.pop(model, None)
+            self._remember_tp_outputs(model)
         self.student = student
         layers, paths = self._selected_paths(student, config)
         targets = (
@@ -593,27 +638,72 @@ class TransformersBypassAdapter(ModuleBypassAdapter):
             else:
                 delattr(teacher, "forward")
 
+    def _synchronize_error(self, error):
+        from ..._bypass_parallel import _synchronize_error
+
+        _synchronize_error(self.context, error)
+
+    def _document_teacher(self, teacher, units, document, consume):
+        prepared, error = None, None
+        try:
+            prepared = {
+                **self.prepare_batch(teacher, document),
+                "valid_mask": _valid_token_mask(document),
+            }
+        except Exception as exc:
+            if self.context is None or self.context.device_mesh.size() == 1:
+                raise
+            error = f"{type(exc).__name__}: {exc}"
+        self._synchronize_error(error)
+        return super().teacher_microbatch(teacher, units, prepared, consume)
+
     def teacher_microbatch(self, teacher, units, batch, consume):
-        """Preserve independent document recurrence and stream each native boundary."""
-        batch = self._batch_with_validity(batch)
-        self._validate_text_batch(batch)
-        facts = self._facts(teacher)
-        spec = facts.spec
-        documents = document_batches(batch) if spec.isolated_documents else [batch]
-        if (
-            "input_ids" in batch
-            and spec.isolated_documents
-            and self._batch_documents(teacher, spec, facts.modules)
-        ):
-            student_facts = self._facts(self.student)
-            if self._batch_documents(self.student, student_facts.spec, student_facts.modules):
-                documents = batch_documents(documents, batch["input_ids"].numel())
-        with bypass_head_context(teacher, units, facts.head, head_paths=facts.head_paths):
-            for document in documents:
-                prepared = self.prepare_batch(teacher, document)
-                # Validity metadata belongs to the capture, not the model's forward kwargs.
-                raw = {
-                    **prepared,
-                    "valid_mask": _valid_token_mask(document),
-                }
-                super().teacher_microbatch(teacher, units, raw, consume)
+        """Keep document recurrence faithful and match every rank's forward schedule."""
+        from ..._bypass_parallel import _all_rank_max
+
+        documents, error = [], None
+        try:
+            batch = self._batch_with_validity(batch)
+            self._validate_text_batch(batch)
+            facts = self._facts(teacher)
+            spec = facts.spec
+            documents = document_batches(batch) if spec.isolated_documents else [batch]
+            if (
+                "input_ids" in batch
+                and spec.isolated_documents
+                and self._batch_documents(teacher, spec, facts.modules)
+            ):
+                student_facts = self._facts(self.student)
+                if self._batch_documents(self.student, student_facts.spec, student_facts.modules):
+                    documents = batch_documents(documents, batch["input_ids"].numel())
+        except Exception as exc:
+            if self.context is None or self.context.device_mesh.size() == 1:
+                raise
+            error = f"{type(exc).__name__}: {exc}"
+        self._synchronize_error(error)
+        slots = _all_rank_max(self.context, len(documents))
+        with ExitStack() as stack:
+            error = None
+            try:
+                stack.enter_context(
+                    bypass_head_context(teacher, units, facts.head, head_paths=facts.head_paths)
+                )
+            except Exception as exc:
+                if self.context is None or self.context.device_mesh.size() == 1:
+                    raise
+                error = f"{type(exc).__name__}: {exc}"
+            self._synchronize_error(error)
+            for index in range(slots):
+                document, error = None, None
+                try:
+                    document = (
+                        documents[index]
+                        if index < len(documents)
+                        else empty_document_batch(documents[0] if documents else batch)
+                    )
+                except Exception as exc:
+                    if self.context is None or self.context.device_mesh.size() == 1:
+                        raise
+                    error = f"{type(exc).__name__}: {exc}"
+                self._synchronize_error(error)
+                self._document_teacher(teacher, units, document, consume)

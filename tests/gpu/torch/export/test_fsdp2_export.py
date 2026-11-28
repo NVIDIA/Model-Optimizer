@@ -14,7 +14,10 @@
 # limitations under the License.
 import copy
 import json
+import time
+from contextlib import contextmanager, nullcontext
 from functools import partial
+from importlib.metadata import version
 from pathlib import Path
 from unittest.mock import patch
 
@@ -28,18 +31,21 @@ from _test_utils.torch.quantization.tied_modules import (
 )
 from _test_utils.torch.transformers_models import get_tiny_llama
 from safetensors.torch import load_file
-from torch.distributed.fsdp import fully_shard
+from torch.distributed.fsdp import FSDPModule, fully_shard
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
+from modelopt.torch.export.hf_export_handlers import _export_quant_linear
 from modelopt.torch.export.layer_utils import is_quantlinear
 from modelopt.torch.export.model_utils import TiedWeightMap
+from modelopt.torch.export.registry import ExportModuleRegistry
 from modelopt.torch.export.unified_export_hf import (
     _export_quantized_weight,
     _export_transformers_checkpoint,
     requantize_resmooth_fused_llm_layers,
 )
 from modelopt.torch.export.unified_export_hf_streaming import _export_fsdp2_checkpoint_streaming
+from modelopt.torch.quantization.nn import QuantLinearConvBase
 from modelopt.torch.quantization.utils import (
     core_utils,
     enable_weight_access_and_writeback,
@@ -449,7 +455,12 @@ def _streaming_export_matches_reference_test(rank, size, export_dir, quant_confi
 
         # Shard per layer as well as at the root: that is what makes the layer units and the
         # leftover root unit land in different FSDP param groups, as they do in a real run.
+        measure = quant_config == mtq.FP8_DEFAULT_CFG
         for layer in model.model.layers:
+            if measure:
+                # Actual Llama linears, not expert modules: nested native export control.
+                for name in ("gate_proj", "up_proj", "down_proj"):
+                    fully_shard(getattr(layer.mlp, name))
             fully_shard(layer)
         fully_shard(model)
         torch.distributed.barrier()
@@ -459,8 +470,86 @@ def _streaming_export_matches_reference_test(rank, size, export_dir, quant_confi
         mtq.quantize(model, quant_config, calib_fn)
         mtq.quantize(reference, quant_config, calib_fn)
         torch.distributed.barrier()
+        if measure:
+            for index, layer in enumerate(model.model.layers):
+                for name in ("gate_proj", "up_proj", "down_proj"):
+                    module = getattr(layer.mlp, name)
+                    detail = f"model.layers.{index}.mlp.{name}: {type(module).__name__}"
+                    assert isinstance(module, FSDPModule), detail
+                    assert fully_shard.state(module)._fsdp_param_group is not None, detail
+                    assert isinstance(module, torch.nn.Linear) and isinstance(
+                        module, QuantLinearConvBase
+                    ), detail
+                    for quantizer in (module.input_quantizer, module.weight_quantizer):
+                        assert quantizer.is_enabled and quantizer.is_fp8, detail
+                        assert quantizer.amax is not None, detail
+                        assert (
+                            torch.isfinite(quantizer.amax).all() and (quantizer.amax > 0).any()
+                        ), detail
+                    assert ExportModuleRegistry.match(module) is _export_quant_linear, detail
 
-        _export_fsdp2_checkpoint_streaming(model, torch.bfloat16, export_dir=export_dir)
+        from modelopt.torch.export import unified_export_hf_streaming as streaming
+
+        windows = []
+        access = streaming.enable_weight_access_and_writeback
+        layer_ids = {id(layer): index for index, layer in enumerate(model.model.layers)}
+
+        @contextmanager
+        def measured_access(module, *args, **kwargs):
+            assert kwargs.get("writeback", True) is True
+            torch.cuda.synchronize()
+            baseline = torch.cuda.memory_allocated()
+            torch.cuda.reset_peak_memory_stats()
+            started = time.perf_counter()
+            with access(module, *args, **kwargs):
+                yield
+            torch.cuda.synchronize()
+            if id(module) in layer_ids:
+                windows.append(
+                    {
+                        "layer": layer_ids[id(module)],
+                        "writeback": True,
+                        "baseline_bytes": baseline,
+                        "peak_bytes": torch.cuda.max_memory_allocated(),
+                        "incremental_peak_bytes": torch.cuda.max_memory_allocated() - baseline,
+                        "seconds": time.perf_counter() - started,
+                    }
+                )
+
+        with (
+            patch.object(streaming, "enable_weight_access_and_writeback", measured_access)
+            if measure
+            else nullcontext()
+        ):
+            _export_fsdp2_checkpoint_streaming(model, torch.bfloat16, export_dir=export_dir)
+        if measure:
+            assert len(windows) == len(model.model.layers)
+            for layer in model.model.layers:
+                for name in ("gate_proj", "up_proj", "down_proj"):
+                    module = getattr(layer.mlp, name)
+                    assert fully_shard.state(module)._fsdp_param_group.is_sharded
+                    assert isinstance(
+                        module._parameters["weight"], torch.distributed.tensor.DTensor
+                    )
+            Path(export_dir, f"cuda-fsdp-export-{rank}.json").write_text(
+                json.dumps(
+                    {
+                        "measurement": "native_fsdp_fp8_export",
+                        "torch": torch.__version__,
+                        "transformers": version("transformers"),
+                        "cuda": torch.version.cuda,
+                        "device": torch.cuda.get_device_name(rank),
+                        "rank": rank,
+                        "world": size,
+                        "nested_units": "Llama gate/up/down linears",
+                        "false_windows": 0,
+                        "windows": windows,
+                        "lifecycle": "resharded",
+                        "actual_writer": True,
+                    },
+                    sort_keys=True,
+                )
+            )
         # Rank 0 writes the index only after gathering the other ranks' manifests, so everyone
         # must arrive before the checks below read the directory.
         torch.distributed.barrier()
@@ -494,13 +583,24 @@ def _streaming_export_matches_reference_test(rank, size, export_dir, quant_confi
     [mtq.NVFP4_DEFAULT_CFG, mtq.FP8_DEFAULT_CFG],
     ids=["nvfp4", "fp8"],
 )
-def test_fsdp2_streaming_export_matches_reference(dist_workers, tmp_path, quant_config):
+@pytest.mark.timeout(240)
+def test_fsdp2_streaming_export_matches_reference(dist_workers, tmp_path, quant_config, capsys):
     if torch.cuda.device_count() < 2:
         pytest.skip("needs >=2 GPUs to actually split ownership across ranks")
-    dist_workers.run(
-        partial(
-            _streaming_export_matches_reference_test,
-            export_dir=str(tmp_path),
-            quant_config=quant_config,
+    timeout = dist_workers.job_timeout
+    try:
+        dist_workers.job_timeout = 180
+        dist_workers.run(
+            partial(
+                _streaming_export_matches_reference_test,
+                export_dir=str(tmp_path),
+                quant_config=quant_config,
+            )
         )
-    )
+    finally:
+        dist_workers.job_timeout = timeout
+    if quant_config == mtq.FP8_DEFAULT_CFG:
+        # Keep passing measurements visible in ordinary hosted pytest capture mode.
+        with capsys.disabled():
+            for rank in range(torch.cuda.device_count()):
+                print(Path(tmp_path, f"cuda-fsdp-export-{rank}.json").read_text(), flush=True)

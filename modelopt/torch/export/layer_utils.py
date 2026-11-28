@@ -32,6 +32,7 @@ from modelopt.torch.models import (
     match_moe_block,
     match_moe_model,
 )
+from modelopt.torch.quantization.nn import QuantLinearConvBase
 
 
 def get_experts_list(
@@ -88,9 +89,13 @@ def is_quantlinear(module: nn.Module) -> bool:
     """Returns whether the module is a quantized linear layer."""
     name = type(module).__name__
     return (
-        any(
-            keyword in name
-            for keyword in ["QuantLinear", "QuantCompressedLinear", "QuantFP8Linear"]
+        (
+            # Native/custom unchanged-forward wrappers need not retain the QuantLinear name.
+            (isinstance(module, nn.Linear) and isinstance(module, QuantLinearConvBase))
+            or any(
+                keyword in name
+                for keyword in ["QuantLinear", "QuantCompressedLinear", "QuantFP8Linear"]
+            )
         )
         and "lora" not in name.lower()
         and "ds_kernel" not in name.lower()

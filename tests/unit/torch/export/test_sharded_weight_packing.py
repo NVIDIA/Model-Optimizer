@@ -29,12 +29,17 @@ from torch.distributed.tensor import DTensor, Shard, distribute_tensor
 
 import modelopt.torch.export.hf_export_handlers as handlers
 import modelopt.torch.quantization as mtq
+from modelopt.torch.export.layer_utils import is_quantlinear
 from modelopt.torch.export.quant_utils import pack_int4_in_uint8
 from modelopt.torch.export.registry import ExportContext, ExportModuleRegistry
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
-from modelopt.torch.quantization.nn import NVFP4StaticQuantizer
+from modelopt.torch.quantization.nn import NVFP4StaticQuantizer, QuantLinearConvBase
 from modelopt.torch.quantization.qtensor import INT4QTensor, MXFP4QTensor, NF4QTensor, NVFP4QTensor
-from modelopt.torch.quantization.utils import fsdp2_aware_weight_update, module_name_maps
+from modelopt.torch.quantization.utils import (
+    enable_weight_access_and_writeback,
+    fsdp2_aware_weight_update,
+    module_name_maps,
+)
 from modelopt.torch.utils.distributed import DistributionPlan, set_distribution_plan
 
 
@@ -184,6 +189,80 @@ def test_quant_linear_handlers_pack_an_fsdp2_unit_in_one_weight_window(
         for name in ("weight_scale", "weight_scale_2", "input_scale"):
             want = _raw_bytes(getattr(ref, name))
             assert torch.equal(_raw_bytes(sd[f"0.{i}.{name}"]), want), name
+
+
+class _Projection(nn.Linear):
+    """An ordinary unchanged-forward Linear subclass with an unrelated name."""
+
+
+@pytest.mark.timeout(60)
+@pytest.mark.parametrize("linear_type", [nn.Linear, _Projection], ids=["linear", "subclass"])
+@pytest.mark.parametrize("wrapped", [False, True], ids=["plain", "native"])
+def test_fp8_handler_packs_linear_quantized_after_wrapping(gloo_world_of_one, linear_type, wrapped):
+    torch.manual_seed(709)
+    linear = linear_type(32, 16, bias=False)
+    model = nn.Sequential(linear)
+    reference = copy.deepcopy(model)
+    batches = [torch.randn(4, 32) for _ in range(4)]
+    if wrapped:
+        fully_shard(linear, mesh=gloo_world_of_one, reshard_after_forward=True)
+        fully_shard(model, mesh=gloo_world_of_one, reshard_after_forward=True)
+        assert isinstance(linear, FSDPModule)
+        assert (
+            ExportModuleRegistry.match(linear) is None
+        )  # Native wrapping alone is not quantization.
+
+    def calibrate(module):
+        for batch in batches:
+            module(batch)
+
+    with bounded_collectives(10):
+        mtq.quantize(model, mtq.FP8_DEFAULT_CFG, calibrate)
+        mtq.quantize(reference, mtq.FP8_DEFAULT_CFG, calibrate)
+        assert model[0] is linear
+        assert isinstance(linear, nn.Linear) and isinstance(linear, QuantLinearConvBase)
+        if wrapped:
+            assert isinstance(linear, FSDPModule)
+            assert fully_shard.state(linear)._fsdp_param_group.is_sharded
+            assert isinstance(linear._parameters["weight"], DTensor)
+            original = linear._parameters["weight"]
+            original_local = original.to_local().detach().clone()
+            original_dtype, original_placements = original.dtype, original.placements
+            original_group = fully_shard.state(linear)._fsdp_param_group
+        for quantizer in (linear.input_quantizer, linear.weight_quantizer):
+            assert quantizer.is_enabled and quantizer.is_fp8
+            assert quantizer.amax is not None
+            assert torch.isfinite(quantizer.amax).all() and (quantizer.amax > 0).any()
+        assert is_quantlinear(linear), type(linear).__name__
+        handler = ExportModuleRegistry.match(linear)
+        assert handler is handlers._export_quant_linear, type(linear).__name__
+        handlers._export_quant_linear(
+            "0", reference[0], ExportContext(model=reference, dtype=torch.bfloat16)
+        )
+        with enable_weight_access_and_writeback(linear, model):
+            handler("0", linear, ExportContext(model=model, dtype=torch.bfloat16))
+            leaves = {"weight", "input_scale", "weight_scale", "weight_scale_2"}
+            actual = {name: value for name, value in linear.state_dict().items() if name in leaves}
+            expected = {
+                name: value for name, value in reference[0].state_dict().items() if name in leaves
+            }
+            assert actual.keys() == expected.keys() == {"weight", "input_scale", "weight_scale"}
+            assert actual["weight"].dtype == torch.float8_e4m3fn
+            for name in expected:
+                assert actual[name].dtype == expected[name].dtype, name
+                assert torch.equal(_raw_bytes(actual[name]), _raw_bytes(expected[name])), name
+        assert model[0] is linear
+        if wrapped:
+            assert isinstance(linear, FSDPModule)
+            # Streaming copies packed bytes inside the window, then restores the live weight.
+            assert fully_shard.state(linear)._fsdp_param_group is original_group
+            assert original_group.is_sharded
+            assert linear._parameters["weight"] is original
+            assert isinstance(original, DTensor) and original.placements == original_placements == (
+                Shard(0),
+            )
+            assert original.dtype == original_dtype
+            assert torch.equal(_raw_bytes(original.to_local()), _raw_bytes(original_local))
 
 
 def test_a_module_joins_its_units_held_window_once(gloo_world_of_one):
