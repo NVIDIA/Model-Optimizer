@@ -673,6 +673,9 @@ def get_onnx_bytes_and_metadata(
             # Change FP32 cast nodes feeding into Concat/Add to FP16
             op_list = ["Concat", "Add", "Sqrt", "LayerNormalization", "Clip", "Mul", "Exp"]
             onnx_opt_graph = change_casts_to_fp16(onnx_opt_graph, op_list)
+            # Fold Cast(FP16->FP32) feeding Q data inputs first so paired Q/DQ scales can move
+            # to FP16 together while preserving ONNX QuantizeLinear T1 type matching.
+            onnx_opt_graph = fold_q_fp16_to_fp32_casts(onnx_opt_graph)
             # Remove Cast(FP32->FP16) nodes after DQ by setting DQ output to FP16 directly
             onnx_opt_graph = fold_dq_fp32_to_fp16_casts(onnx_opt_graph)
             # Remove Cast(FP16->FP32) feeding Q/DQ scales so DQ stays FP16 for downstream

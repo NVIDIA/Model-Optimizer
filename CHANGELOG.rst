@@ -60,6 +60,7 @@ Changelog
 - Fix ``--dq_only`` ONNX export producing a model that ONNX Runtime cannot load when the weights are quantized to an unsigned type. Such exports now load and match the source model.
 - Fix blocked INT4 ONNX exports using the wrong dequantization axis for transposed weights, which prevented TensorRT and ONNX Runtime from executing affected models. Re-export affected models.
 - Fix ONNX INT4 AWQ-Lite computing per-block weight scales from the wrong rows, which skewed the scale search. Re-run AWQ-Lite quantization on affected models.
+- Fix Torch-to-ONNX ``weights_dtype="fp16"`` export for INT8- and INT4-quantized models emitting mismatched ``QuantizeLinear`` input and scale types that fail ONNX shape inference and ONNX Runtime loading.
 
 *Speculative Decoding*
 

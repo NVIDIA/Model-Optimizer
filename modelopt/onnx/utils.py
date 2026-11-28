@@ -1600,11 +1600,13 @@ def fold_q_fp16_to_fp32_casts(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
         )
         return onnx_model
 
-    consumer_map: dict[str, list[onnx.NodeProto]] = {}
+    consumer_map: dict[str, list[tuple[onnx.NodeProto, int]]] = {}
     for node in onnx_model.graph.node:
-        for inp in node.input:
-            consumer_map.setdefault(inp, []).append(node)
+        for idx, inp in enumerate(node.input):
+            if inp:
+                consumer_map.setdefault(inp, []).append((node, idx))
     initializers = {init.name: init for init in onnx_model.graph.initializer}
+    type_map = _build_tensor_type_map(onnx_model)
 
     to_remove = []
     for node in onnx_model.graph.node:
@@ -1613,11 +1615,13 @@ def fold_q_fp16_to_fp32_casts(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
         cast_to = next((a.i for a in node.attribute if a.name == "to"), None)
         if cast_to != onnx.TensorProto.FLOAT:
             continue
+        if type_map.get(node.input[0]) != onnx.TensorProto.FLOAT16:
+            continue
         consumers = consumer_map.get(node.output[0], [])
-        if not consumers or not all(c.op_type in _Q_OPS for c in consumers):
+        if not consumers or not all(c.op_type in _Q_OPS and idx == 0 for c, idx in consumers):
             continue
 
-        for q_node in consumers:
+        for q_node, _ in consumers:
             if len(q_node.input) >= 2 and q_node.input[1] in initializers:
                 _scale_fp32_to_fp16(initializers[q_node.input[1]])
 
@@ -1777,11 +1781,15 @@ def fold_dq_fp32_to_fp16_casts(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
 
     dq_ops = {"DequantizeLinear", "TRT_FP8DequantizeLinear"}
 
-    # Build a map of tensor name -> producer node
+    # Build a map of tensor name -> producer node and consumer count
     producer_map: dict[str, onnx.NodeProto] = {}
+    input_consumer_count: dict[str, int] = {}
     for node in onnx_model.graph.node:
         for out in node.output:
             producer_map[out] = node
+        for inp in node.input:
+            if inp:
+                input_consumer_count[inp] = input_consumer_count.get(inp, 0) + 1
 
     # Build initializer lookup
     initializer_map: dict[str, onnx.TensorProto] = {
@@ -1810,7 +1818,18 @@ def fold_dq_fp32_to_fp16_casts(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
         scale_init = initializer_map.get(scale_name)
         if scale_init is not None:
             if scale_init.data_type == onnx.TensorProto.FLOAT:
-                _convert_fp32_init_to_fp16(scale_init)
+                if input_consumer_count.get(scale_name, 0) > 1:
+                    fp16_name = f"{scale_name}_fp16"
+                    if fp16_name not in initializer_map:
+                        cloned = onnx.TensorProto()
+                        cloned.CopyFrom(scale_init)
+                        cloned.name = fp16_name
+                        _convert_fp32_init_to_fp16(cloned)
+                        onnx_model.graph.initializer.append(cloned)
+                        initializer_map[fp16_name] = cloned
+                    dq_node.input[1] = fp16_name
+                else:
+                    _convert_fp32_init_to_fp16(scale_init)
             return
         scale_producer = producer_map.get(scale_name)
         if scale_producer is None or scale_producer.op_type not in dq_ops:
@@ -1919,11 +1938,16 @@ def fold_qdq_scale_fp16_to_fp32_casts(onnx_model: onnx.ModelProto) -> onnx.Model
         if type_map.get(cast_node.input[0]) != onnx.TensorProto.FLOAT16:
             continue
 
-        # Only bypass when every consumer of this Cast is a Q/DQ scale input; otherwise
-        # other ops would silently receive FP16 instead of the FP32 they requested.
+        # Only bypass when every consumer of this Cast is a Q/DQ scale input and every Q consumer
+        # also receives FP16 data (ONNX QuantizeLinear requires x and y_scale to share type T1).
         cast_output = cast_node.output[0]
         consumers = consumer_map.get(cast_output, [])
-        if not consumers or not all(c.op_type in qdq_ops and i == 1 for c, i in consumers):
+        if not consumers or not all(
+            c.op_type in qdq_ops
+            and i == 1
+            and (c.op_type not in _Q_OPS or type_map.get(c.input[0]) == onnx.TensorProto.FLOAT16)
+            for c, i in consumers
+        ):
             continue
 
         # Bypass the cast so the scale stays FP16
