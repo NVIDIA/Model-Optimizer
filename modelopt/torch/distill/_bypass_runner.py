@@ -15,12 +15,15 @@
 
 """Full-global-batch IQ Bypass updates over streamed independent boundaries."""
 
+import hashlib
 import logging
 import random
+from collections.abc import Sequence
 from functools import partial
 
 import numpy as np
 import torch
+from torch.utils._pytree import tree_map
 
 from modelopt.torch.quantization.repair import (
     IQRepairPolicy,
@@ -33,6 +36,7 @@ from modelopt.torch.quantization.utils.core_utils import (
 )
 
 from ._bypass_capture import mse_statistics
+from ._bypass_checkpoint import BypassCheckpoint, _batch_hash, _restore_rng_state, _rng_state
 from ._bypass_optimizer import Lion, learning_rate
 
 _LOG = logging.getLogger(__name__)
@@ -49,6 +53,10 @@ class _BypassRunner:
         self.fields = {}
         self.modules = {u.name: student.get_submodule(u.student_path) for u in units}
         self.names = module_name_maps(student)
+        self.consumed_batches = 0
+        self.consumed_digest = hashlib.sha256()
+        self.sequence_data = False
+        self.checkpoint = None
 
     def _weight_access(self, name, *, writeback=True, rollback=False):
         return enable_weight_access_and_writeback(
@@ -114,6 +122,9 @@ class _BypassRunner:
                     )
                 saved, _ = self.adapter.snapshot_inputs((batch,), {})
                 window.append(saved[0])
+                if self.checkpoint is not None and self.sequence_data:
+                    self.consumed_digest.update(_batch_hash(saved[0]).encode())
+                self.consumed_batches += 1
         except StopIteration:
             error = "Bypass data exhausted; provide unique samples for every update"
         except Exception as exc:
@@ -133,6 +144,90 @@ class _BypassRunner:
         elif error:
             raise ValueError(error)
         return window
+
+    def _checkpoint_fields(self):
+        fields = {}
+        for policy in self.policies.values():
+            for _, state, _, _ in policy.adapters:
+                for name, value in state.values().items():
+                    if name in fields:
+                        raise ValueError("Bypass checkpoint native field ownership overlaps")
+                    fields[name] = value
+        return fields
+
+    def _save_checkpoint(self, dataloader, step, priming_batch, devices):
+        assert self.checkpoint is not None
+        priming_devices = []
+
+        def pack(value):
+            if isinstance(value, torch.Tensor):
+                priming_devices.append(str(value.device))
+                return value.detach().cpu()
+            return value
+
+        error, snapshot = None, None
+        try:
+            position = {
+                "consumed_batches": self.consumed_batches,
+                "priming_batch": tree_map(pack, priming_batch),
+                "priming_devices": priming_devices,
+            }
+            if self.sequence_data:
+                position["prefix_sha256"] = self.consumed_digest.hexdigest()
+                position["next_batch_hash"] = (
+                    _batch_hash(dataloader[self.consumed_batches])
+                    if self.consumed_batches < len(dataloader)
+                    else None
+                )
+            else:
+                position["loader_state"] = dataloader.state_dict()
+            snapshot = {
+                "fields": self._checkpoint_fields(),
+                "optimizers": self.optimizers,
+                "data_position": position,
+                "rng_state": _rng_state(devices),
+            }
+        except Exception as exc:
+            if self.runtime is None:
+                raise
+            error = f"{type(exc).__name__}: {exc}"
+        if self.runtime is not None:
+            self.runtime.synchronize_error(error)
+        assert snapshot is not None
+        self.checkpoint.save(step, **snapshot)
+
+    def _restore_cursor(self, dataloader, state):
+        assert self.checkpoint is not None
+        position = state["data_position"]
+
+        def restore():
+            if "loader_state" in position:
+                dataloader.load_state_dict(position["loader_state"])
+                batches = iter(dataloader)
+            else:
+                count = position["consumed_batches"]
+                if not 0 <= count <= len(dataloader):
+                    raise ValueError("Bypass consumed-data cursor is outside the sequence")
+                digest = hashlib.sha256()
+                batches = iter(dataloader)
+                for _ in range(count):
+                    digest.update(_batch_hash(next(batches)).encode())
+                if digest.hexdigest() != position["prefix_sha256"]:
+                    raise ValueError("Bypass consumed sample order or content changed")
+                following = next(batches, None)
+                if (_batch_hash(following) if following is not None else None) != position[
+                    "next_batch_hash"
+                ]:
+                    raise ValueError("Bypass next sample order or content changed")
+                self.consumed_digest = digest
+                # Lookahead can consume RNG; rebuild the cursor before restoring saved RNG.
+                batches = iter(dataloader)
+                for _ in range(count):
+                    next(batches)
+            self.consumed_batches = position["consumed_batches"]
+            return batches
+
+        return self.checkpoint.restore_data_cursor(restore)
 
     def _measure(self, batches, training):
         statistics = {}
@@ -228,8 +323,43 @@ class _BypassRunner:
             np.random.set_state(numpy_state)
 
     def _run(self, train_dataloader, validation_dataloader, devices):
-        batches = self._iterator(train_dataloader)
-        first = self._window(batches)
+        saved, start = None, 0
+        if self.config.checkpoint_dir is not None or self.config.resume_from is not None:
+            self.sequence_data = isinstance(train_dataloader, Sequence)
+            self.checkpoint = BypassCheckpoint(
+                self.student,
+                self.teacher,
+                self.config,
+                self.runtime,
+                dataloader=train_dataloader,
+                devices=devices,
+            )
+            if self.config.resume_from is not None:
+                start, saved = self.checkpoint.load(self.config.resume_from)
+        if saved is None:
+            batches = self._iterator(train_dataloader)
+            first = self._window(batches)
+        else:
+            error = None
+            try:
+                priming_devices = iter(saved["data_position"]["priming_devices"])
+                first = [
+                    tree_map(
+                        lambda value: (
+                            value.to(next(priming_devices))
+                            if isinstance(value, torch.Tensor)
+                            else value
+                        ),
+                        saved["data_position"]["priming_batch"],
+                    )
+                ]
+                self.adapter.validate_batch(first[0], self.config)
+            except Exception as exc:
+                if self.runtime is None:
+                    raise
+                error = f"{type(exc).__name__}: {exc}"
+            if self.runtime is not None:
+                self.runtime.synchronize_error(error)
         modes = {
             module: module.training
             for root in (self.student, self.teacher)
@@ -240,7 +370,7 @@ class _BypassRunner:
             for module in self.teacher.modules()
             for name, parameter in module.named_parameters(recurse=False, remove_duplicate=False)
         ]
-        error = None
+        primary_error = None
         try:
             self.student.eval()
             self.teacher.eval().requires_grad_(False)
@@ -262,12 +392,32 @@ class _BypassRunner:
                 )
             if self.runtime is not None:
                 self.runtime.validate_gradient_schedules(self.fields)
-            for step in range(1, self.config.num_steps + 1):
+            if saved is not None:
+                assert self.checkpoint is not None
+                batches = self._restore_cursor(train_dataloader, saved)
+                error = None
+                try:
+                    self.checkpoint.restore_training_state(
+                        saved, self._checkpoint_fields(), self.optimizers
+                    )
+                    _restore_rng_state(saved["rng_state"])
+                except Exception as exc:
+                    if self.runtime is None:
+                        raise
+                    error = f"{type(exc).__name__}: {exc}"
+                if self.runtime is not None:
+                    self.runtime.synchronize_error(error)
+                first.clear()
+            for step in range(start + 1, self.config.num_steps + 1):
                 window = first if step == 1 else self._window(batches)
                 for optimizer in self.optimizers.values():
                     optimizer.zero_grad(set_to_none=True)
                 with torch.profiler.record_function("modelopt.bypass.update"):
                     self._update(self._measure(window, training=True), step)
+                if self.config.checkpoint_dir is not None and (
+                    step % self.config.checkpoint_interval == 0 or step == self.config.num_steps
+                ):
+                    self._save_checkpoint(train_dataloader, step, window[0], devices)
                 window.clear()
             states = {
                 binding: state
@@ -308,7 +458,7 @@ class _BypassRunner:
                 _LOG.info("Bypass execution: %s", self.student._modelopt_bypass_execution)
             return self.student
         except BaseException as exc:
-            error = exc
+            primary_error = exc
             raise
         finally:
             cleanup_error = None
@@ -338,7 +488,7 @@ class _BypassRunner:
             for module, mode in modes.items():
                 module.training = mode
             if cleanup_error is not None:
-                if error is not None:
-                    error.add_note(f"Bypass cleanup also failed: {cleanup_error!r}")
+                if primary_error is not None:
+                    primary_error.add_note(f"Bypass cleanup also failed: {cleanup_error!r}")
                 else:
                     raise cleanup_error

@@ -168,3 +168,12 @@ class BypassConfig(ModeloptBaseConfig):
     seed: int = ModeloptField(default=42, ge=0)
     modules: list[str] | None = ModeloptField(default=None)
     layer_indices: list[int] | None = ModeloptField(default=None)
+    checkpoint_dir: str | None = ModeloptField(
+        default=None,
+        description=(
+            "Opt-in checkpoint directory. Startup and resume read all student/teacher tensor "
+            "bytes (O(total physical model bytes)) and a conservative recipe-bounded data prefix."
+        ),
+    )
+    checkpoint_interval: int = ModeloptField(default=128, gt=0)
+    resume_from: str | None = ModeloptField(default=None)

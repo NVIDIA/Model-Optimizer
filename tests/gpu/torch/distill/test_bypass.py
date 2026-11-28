@@ -24,82 +24,24 @@ import sys
 import time
 from collections import OrderedDict
 from contextlib import ExitStack
+from unittest import mock
 
 import numpy as np
 import pytest
 import torch
+from _test_utils.bypass import BypassNetwork as _Network
+from _test_utils.bypass import assert_exact_state, committed_checkpoint
+from _test_utils.bypass import bypass_problem as _problem
 from torch import nn
 
 import modelopt.torch.distill as mtd
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
+from modelopt.torch.distill._bypass_checkpoint import _rng_state
 from modelopt.torch.quantization.ggml import IQ_FORMAT_REGISTRY
 from modelopt.torch.quantization.ggml.common import pinned_packed_weight
 from modelopt.torch.quantization.ggml.scale_fields import decode_scale_fields, replace_scale_fields
-
-
-class _Network(nn.Sequential):
-    def forward(
-        self,
-        hidden_states,
-        attention_mask=None,
-        _packed_seq_ids=None,
-        padding_mask=None,
-        position_ids=None,
-    ):
-        if position_ids is not None:
-            hidden_states = hidden_states + position_ids[..., None]
-        return super().forward(hidden_states)
-
-
-def _problem():
-    torch.manual_seed(37)
-    student = _Network(
-        OrderedDict(
-            [
-                ("mlp", nn.Linear(256, 256, bias=False)),
-                ("activation", nn.SiLU()),
-                ("moe", nn.Linear(256, 256, bias=False)),
-                ("head", nn.Linear(256, 4, bias=False)),
-            ]
-        )
-    )
-    batches = [torch.randn(2, 3, 256) for _ in range(8)]
-    mtq.quantize(
-        student,
-        {
-            "quant_cfg": [
-                {"quantizer_name": "*", "enable": False},
-                {
-                    "quantizer_name": "mlp.weight_quantizer",
-                    "cfg": {"num_bits": "iq1_m", "backend": "ggml"},
-                },
-                {
-                    "quantizer_name": "moe.weight_quantizer",
-                    "cfg": {"num_bits": "iq2_s", "backend": "ggml"},
-                },
-            ],
-            "algorithm": "max",
-        },
-        lambda m: m(batches[0]),
-    )
-    teacher = _Network(
-        OrderedDict(
-            [
-                ("mlp", nn.Linear(256, 256, bias=False)),
-                ("activation", nn.SiLU()),
-                ("moe", nn.Linear(256, 256, bias=False)),
-                ("head", nn.Linear(256, 4, bias=False)),
-            ]
-        )
-    )
-    with torch.no_grad():
-        for name in ("mlp", "moe"):
-            layer = student.get_submodule(name)
-            teacher.get_submodule(name).weight.copy_(layer.weight_quantizer(layer.weight) * 1.02)
-        teacher.head.weight.copy_(student.head.weight)
-    teacher.head.eval()
-    return student, teacher, batches
+from modelopt.torch.quantization.utils.core_utils import enable_weight_access_and_writeback
 
 
 @pytest.mark.parametrize("validation_failure", [False, True])
@@ -607,33 +549,198 @@ def test_public_bypass_preserves_caller_state_and_seeds_initial_reader(fail, tea
 @pytest.mark.parametrize("offload", ["cpu", "disk"])
 def test_public_bypass_offloaded_nested_boundary_matches_resident(offload, tmp_path):
     accelerate = pytest.importorskip("accelerate")
-    student, teacher, batches = _problem()
-    student.mlp, teacher.mlp = nn.Sequential(student.mlp), nn.Sequential(teacher.mlp)
-    reference = copy.deepcopy(student)
+    initial, target, batches = _problem()
+    initial.mlp, target.mlp = nn.Sequential(initial.mlp), nn.Sequential(target.mlp)
     config = {
         "num_steps": 2,
         "global_batch_size": 2,
         "micro_batch_size": 1,
         "sequence_length": 3,
         "modules": ["mlp"],
+        "checkpoint_interval": 1,
     }
-    mtd.bypass(reference, teacher, batches, config)
-    if offload == "cpu":
-        accelerate.cpu_offload(student, execution_device="cpu", offload_buffers=True)
-    else:
-        accelerate.disk_offload(
-            student, tmp_path / "offload", execution_device="cpu", offload_buffers=True
+    reference = copy.deepcopy(initial)
+    mtd.bypass(
+        reference,
+        copy.deepcopy(target),
+        batches,
+        {**config, "checkpoint_dir": str(tmp_path / "reference")},
+    )
+
+    class BufferOnlyComposite(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.register_buffer("scale", torch.tensor(1.25))
+            self.child = nn.Identity()
+            self.child.register_buffer("offset", torch.tensor(0.125))
+
+        def forward(self, hidden_states):
+            return hidden_states * self.scale + self.child.offset
+
+    def fresh_pair(label, changed=None, *, preload=False):
+        student, teacher = copy.deepcopy(initial), copy.deepcopy(target)
+        if changed is not None:
+            root = teacher if changed == "teacher" else student
+            with torch.no_grad():
+                root.head.weight.add_(0.001)  # Frozen and outside selected mlp.
+        for role, root in (("student", student), ("teacher", teacher)):
+            if preload == "buffers":
+                root.add_module("buffer_only", BufferOnlyComposite())
+            elif preload:
+                root.register_parameter("root_weight", nn.Parameter(torch.ones(())))
+            preload_class = BufferOnlyComposite if preload == "buffers" else type(root)
+            access = {
+                "execution_device": "cpu",
+                "offload_buffers": True,
+                "preload_module_classes": [preload_class.__name__] if preload else None,
+            }
+            if offload == "cpu":
+                accelerate.cpu_offload(root, **access)
+            else:
+                accelerate.disk_offload(root, tmp_path / f"{label}-{role}", **access)
+            assert not hasattr(root.mlp, "_hf_hook")
+        return student, teacher
+
+    def caller_state(*models):
+        return [
+            (
+                {name: (p.device, p.requires_grad) for name, p in model.named_parameters()},
+                {name: b.device for name, b in model.named_buffers()},
+                {name: m.training for name, m in model.named_modules()},
+            )
+            for model in models
+        ]
+
+    def assert_caller_state(models, expected):
+        for current, previous in zip(caller_state(*models), expected, strict=True):
+            assert current[0] == previous[0]  # Parameter devices and requires_grad.
+            assert current[2] == previous[2]  # Per-module caller modes.
+            assert all(current[1][name] == device for name, device in previous[1].items())
+            for name in current[1].keys() - previous[1].keys():
+                # Finalization adds real pinned IQ buffers to the managed layer.
+                assert "_ggml_pinned_" in name and current[1][name].type == "meta"
+
+    class Interrupted(list):
+        def __iter__(self):
+            for index, batch in enumerate(list.__iter__(self)):
+                if index == 1:
+                    raise OSError("Simulated offloaded data-reader interruption")
+                yield batch
+
+    student, teacher = fresh_pair("interrupted")
+    before = caller_state(student, teacher)
+    caller_rng = _rng_state([])
+    with pytest.raises(OSError, match="offloaded data-reader"):
+        mtd.bypass(
+            student,
+            teacher,
+            Interrupted(batches),
+            {**config, "checkpoint_dir": str(tmp_path / "resumed")},
         )
-    assert not hasattr(student.mlp, "_hf_hook")
-    devices = {name: parameter.device for name, parameter in student.named_parameters()}
-    flags = {name: parameter.requires_grad for name, parameter in student.named_parameters()}
-    assert mtd.bypass(student, teacher, batches, config) is student
-    assert {name: parameter.device for name, parameter in student.named_parameters()} == devices
-    assert {
-        name: parameter.requires_grad for name, parameter in student.named_parameters()
-    } == flags
-    assert not hasattr(student.mlp[0].weight_quantizer, "_local_repair_state")
-    torch.testing.assert_close(student(batches[0]), reference(batches[0]), rtol=0, atol=0)
+    assert_caller_state((student, teacher), before)
+    assert_exact_state(_rng_state([]), caller_rng)
+    generation, saved = committed_checkpoint(tmp_path / "resumed")
+    assert saved["step"] == 1
+    for role in ("student", "teacher"):
+        refused, changed_target = fresh_pair(f"refused-{role}", changed=role)
+        before = caller_state(refused, changed_target)
+        # Forward reads real backing state while returning all owners to meta.
+        outputs = [root(batches[0]).detach().clone() for root in (refused, changed_target)]
+        with pytest.raises(ValueError):
+            mtd.bypass(
+                refused,
+                changed_target,
+                batches,
+                {**config, "resume_from": str(generation)},
+            )
+        assert_caller_state((refused, changed_target), before)
+        assert_exact_state(_rng_state([]), caller_rng)
+        for root, output in zip((refused, changed_target), outputs, strict=True):
+            assert_exact_state(root(batches[0]), output)
+
+    resumed, teacher = fresh_pair("resumed")
+    before = caller_state(resumed, teacher)
+    assert (
+        mtd.bypass(
+            resumed,
+            teacher,
+            batches,
+            {
+                **config,
+                "resume_from": str(tmp_path / "resumed"),
+                "checkpoint_dir": str(tmp_path / "resumed"),
+            },
+        )
+        is resumed
+    )
+    assert_caller_state((resumed, teacher), before)
+    assert_exact_state(_rng_state([]), caller_rng)
+    _, actual = committed_checkpoint(tmp_path / "resumed")
+    _, expected = committed_checkpoint(tmp_path / "reference")
+    assert actual["step"] == expected["step"] == 2
+    for key in ("fields", "optimizers", "rng_state", "data_position"):
+        assert_exact_state(actual[key], expected[key])
+    assert not hasattr(resumed.mlp[0].weight_quantizer, "_local_repair_state")
+    # Read one real owner at a time, including the final pinned codes and frozen
+    # moe/head outside the selected boundary; never onload either whole model.
+    for actual_root, expected_root in ((resumed, reference), (teacher, target)):
+        for path in ("mlp.0", "moe", "head"):
+            owner = actual_root.get_submodule(path)
+            with enable_weight_access_and_writeback(owner, actual_root, writeback=False):
+                assert_exact_state(
+                    owner.state_dict(), expected_root.get_submodule(path).state_dict()
+                )
+    assert_exact_state(resumed(batches[0]), reference(batches[0]))
+    assert_exact_state(teacher(batches[0]), target(batches[0]))
+
+    # Composite preload hooks must refuse before onloading descendants, whether
+    # their independent state consists of parameters or only persistent buffers.
+    class PreflightCursor(list):
+        started = False
+
+        def __iter__(self):
+            self.started = True
+            return super().__iter__()
+
+        def __getitem__(self, index):
+            self.started = True
+            return super().__getitem__(index)
+
+    for preload in (True, "buffers"):
+        composite, composite_teacher = fresh_pair(f"preload-{preload}", preload=preload)
+        if preload == "buffers":
+            for root in (composite, composite_teacher):
+                owner = root.buffer_only
+                assert not list(owner.parameters())
+                assert owner.scale.is_meta and owner.child.offset.is_meta
+        before = caller_state(composite, composite_teacher)
+        outputs = [root(batches[0]).detach().clone() for root in (composite, composite_teacher)]
+        data = PreflightCursor(batches)
+        # Watch real Accelerate materialization hooks on each composite owner
+        # and descendant. Final meta placement alone cannot prove no onload ran.
+        with ExitStack() as stack:
+            accesses = [
+                stack.enter_context(mock.patch.object(hook, "pre_forward", wraps=hook.pre_forward))
+                for root in (composite, composite_teacher)
+                for owner in [root.buffer_only if preload == "buffers" else root]
+                for module in owner.modules()
+                if hasattr(module, "_hf_hook")
+                for hook in getattr(module._hf_hook, "hooks", [module._hf_hook])
+            ]
+            with pytest.raises(ValueError, match="individually accessible offload weight owners"):
+                mtd.bypass(
+                    composite,
+                    composite_teacher,
+                    data,
+                    {**config, "checkpoint_dir": str(tmp_path / f"preload-{preload}-checkpoint")},
+                )
+            for access in accesses:
+                access.assert_not_called()
+        assert not data.started  # Refuse during identity, before priming/training.
+        assert_caller_state((composite, composite_teacher), before)
+        assert_exact_state(_rng_state([]), caller_rng)
+        for root, output in zip((composite, composite_teacher), outputs, strict=True):
+            assert_exact_state(root(batches[0]), output)
 
 
 @pytest.mark.timeout(240)
