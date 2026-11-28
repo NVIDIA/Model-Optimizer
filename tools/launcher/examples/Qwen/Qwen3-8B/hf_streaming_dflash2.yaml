@@ -15,13 +15,25 @@
 #   task_1: Streaming train — 1 serve node (TP=4) + 1 trainer node (4-rank DDP)
 #   task_2: vLLM smoke test with the exported drafter
 #
-# Site-specific settings left unset on purpose: an aarch64 cluster needs its own image
-# (the default is x86), slurm_config.time where the queue's default is short, the NIXL and
-# NCCL HCA pinning an InfiniBand fabric needs, and container-visible cache paths (srun
-# runs with --no-container-mount-home, and TRITON_CACHE_DIR must be node-local).
+# Site-specific settings left unset on purpose: slurm_config.time where the queue's default
+# is short, the NIXL and NCCL HCA pinning an InfiniBand fabric needs, and container-visible
+# cache paths such as HF_HOME (srun runs with --no-container-mount-home). The same goes for
+# TRITON_CACHE_DIR: the launcher defaults it to /cicd/triton-cache, which every node shares,
+# so for a node-local cache launch with TRITON_CACHE_DIR=/tmp/triton-cache, as in the third
+# Usage line. The pinned images are multi-arch (x86_64 and aarch64).
+#
+# The vLLM image is pinned by digest, which Slurm (pyxis) can pull only with enroot >= 4.0.
+# On older enroot, or where Docker Hub pulls fail, build a .sqsh from the same digest for the
+# cluster's architecture (enroot import on a host with enroot >= 4.0) and point both vLLM
+# tasks at it, as in the second Usage line.
 #
 # Usage:
 #   uv run launch.py --yaml examples/Qwen/Qwen3-8B/hf_streaming_dflash2.yaml --yes
+#   uv run launch.py --yaml examples/Qwen/Qwen3-8B/hf_streaming_dflash2.yaml \
+#       pipeline.task_1.slurm_config.container=/path/to/vllm.sqsh \
+#       pipeline.task_2.slurm_config.container=/path/to/vllm.sqsh --yes
+#   TRITON_CACHE_DIR=/tmp/triton-cache uv run launch.py \
+#       --yaml examples/Qwen/Qwen3-8B/hf_streaming_dflash2.yaml --yes
 
 job_name: Qwen3-8B_DFlash2_streaming
 pipeline:
@@ -31,6 +43,11 @@ pipeline:
 
   global_vars:
     hf_model: /hf-local/Qwen/Qwen3-8B
+    # Training output: checkpoints and the exported drafter (export/).
+    # task_1 writes it and task_2 reads it, so overriding this one key moves both. A later
+    # experiment sees this one's /scratchspace as /cicd/<experiment_id>/, so pass
+    # /cicd/<experiment_id>/dflash2 to rerun task_2 against that experiment's export.
+    output_dir: /scratchspace/dflash2
 
   # Step 1: Build input conversations
   task_0:
@@ -65,8 +82,12 @@ pipeline:
       # peels the last one off as the (unused) KD target and the draft's fc gets
       # 4x4096 where it wants 5x4096.
       - data.final_aux_is_base_hidden=true
-      - training.output_dir=/scratchspace/dflash2
+      - training.output_dir=<<global_vars.output_dir>>
       - training.training_seq_len=4096
+      # The recipe trains 16-token blocks, but vLLM serves DFlash2 with a block of
+      # 1 + NUM_SPEC_TOKENS (7 in task_2) and ignores the checkpoint's block_size.
+      # Train on that block, and change both together.
+      - dflash.dflash_block_size=8
       - training.disable_tqdm=true
       # The serve prefills the corpus conversation rather than generating, so the
       # assistant turn is present; Qwen3-8B's stock template just has no
@@ -98,12 +119,16 @@ pipeline:
       - STREAMING_NUM_WORKERS: "4"
       # DFlash2 uses a custom modeling file; export must trust remote code.
       - EXPORT_EXTRA_ARGS: "--trust_remote_code"
+      # Where the drafter is exported (train_eagle_streaming.sh defaults to /scratchspace/export).
+      - EXPORT_PATH: <<global_vars.output_dir>>/export
     slurm_config:
       _factory_: "slurm_factory"
       nodes: 2
       ntasks_per_node: 1
       gpus_per_node: 4
-      container: vllm/vllm-openai:latest
+      # v0.31.0 has DFlash2 serving (vllm#52816). The digest is its multi-arch index
+      # (linux/amd64 and linux/arm64); task_2 uses the same image.
+      container: vllm/vllm-openai:v0.31.0@sha256:c1c9f6fd5c109ba7f0546a59f5b2f15fb87f64c77782e90a27b648b42a8e67c3
 
   # Step 3: vLLM smoke test (uses the exported checkpoint from training).
   # The method stays "dflash": vLLM has no separate dflash2 method and selects the
@@ -112,13 +137,16 @@ pipeline:
     script: common/specdec/vllm_smoke_test.sh
     environment:
       - HF_MODEL_CKPT: <<global_vars.hf_model>>
-      - DRAFT_MODEL: /scratchspace/export
+      - DRAFT_MODEL: <<global_vars.output_dir>>/export
       - SPEC_METHOD: "dflash"
       - NUM_SPEC_TOKENS: "7"
       - MIN_ACCEPTANCE_LENGTH: "1.2"
+      # This run's own /scratchspace, not output_dir: a rerun reading another experiment's
+      # export must not replace that experiment's verdict.
+      - SMOKE_JSON: /scratchspace/smoke_check.json
     slurm_config:
       _factory_: "slurm_factory"
-      container: vllm/vllm-openai:nightly
+      container: vllm/vllm-openai:v0.31.0@sha256:c1c9f6fd5c109ba7f0546a59f5b2f15fb87f64c77782e90a27b648b42a8e67c3
       nodes: 1
       ntasks_per_node: 1
       gpus_per_node: 1

@@ -37,7 +37,7 @@ read the one you are running.
 | task_1 | `common/specdec/dflash_online_training.sh` | Online train against a live base model, then export | `<training.output_dir>/exported-checkpoint-<step>` and `-final` |
 
 The export goes under `training.output_dir` (`/scratchspace/dflash2_bs16` in the
-example), **not** `/scratchspace/export` — that path belongs to the streaming flow.
+example), **not** in an `export/` subfolder — that is the streaming example's layout.
 Checking the wrong one reports a successful run as missing its export.
 
 `data.mode=online` is the recipe default. As committed the example is a short
@@ -50,7 +50,7 @@ published A/B run: 3 epochs over the 1.96M-conversation Spec-Decoding-Dataset-v1
 | Task | Script | Purpose | Output |
 | --- | --- | --- | --- |
 | task_0 | `common/eagle3/make_dataset.sh` | Build training conversations | `/scratchspace/data/train.jsonl` |
-| task_1 | `common/eagle3/train_eagle_streaming.sh` | Streaming train (serve replicas + DDP trainers), then export | `/scratchspace/export` |
+| task_1 | `common/eagle3/train_eagle_streaming.sh` | Streaming train (serve replicas + DDP trainers), then export | `<global_vars.output_dir>/export` (`/scratchspace/dflash2/export`) |
 | task_2 | `common/specdec/vllm_smoke_test.sh` | Serve the exported drafter and measure acceptance length | gate: `MIN_ACCEPTANCE_LENGTH=1.2` |
 
 See `dspark.md` for the streaming environment variables, which are shared across the
@@ -98,7 +98,7 @@ Everything in `dflash.md`'s table applies, plus the DFlash-family items:
 | --- | --- |
 | Any model | **The draft does not inherit the base model's GQA/FFN dims.** Set `num_attention_heads`, `num_key_value_heads`, `head_dim` and `intermediate_size` in `dflash_architecture_config` explicitly, or you get a silently wrong-shaped draft |
 | Any non-Qwen3 base | `dflash2.yaml` hardcodes `dflash_mask_token_id: 151669`, a Qwen3-specific unused id. The pin is inherited, so a different base silently trains against a token that means something else. Override it |
-| Changing `dflash_block_size` | `conv_kernel_size` must not exceed it, and the convolution needs a sequence length divisible by it |
+| Changing `dflash_block_size` | `conv_kernel_size` must not exceed it, and the convolution needs a sequence length divisible by it. vLLM serves a block of 1 + `NUM_SPEC_TOKENS` whatever the checkpoint says, so change the two together |
 | Changing the draft's `hidden_size` | `conv_group_size` must still divide it |
 
 ## Success markers
@@ -109,7 +109,7 @@ actually uses:
 | Mode | Export lands in | Further evidence |
 | --- | --- | --- |
 | Online | `<training.output_dir>/exported-checkpoint-{<step>,final}` | training progress only |
-| Streaming | `/scratchspace/export` | task_2's acceptance length against `MIN_ACCEPTANCE_LENGTH` |
+| Streaming | task_1's export (task table above) | task_2's verdict, `/scratchspace/smoke_check.json`: `pass`, and `mean_acceptance_length` against `MIN_ACCEPTANCE_LENGTH` |
 
 ## Quality gate
 
