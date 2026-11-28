@@ -426,7 +426,7 @@ def native_tp_weight_view(name, shape, placement, mesh, *, allow_expert_axis=Fal
     )
 
 
-def validate_native_weight_partition(quantizer, view):
+def validate_native_weight_partition(quantizer, view, *, packed=False):
     """Validate physical field geometry using metadata only, before changing a model."""
     probe = copy.copy(quantizer)
     probe._buffers = {
@@ -445,9 +445,9 @@ def validate_native_weight_partition(quantizer, view):
     probe._fake_quant = True
     # Source proof belongs to actual planning; this probe checks pin geometry below.
     meta = probe.__dict__.pop("_native_weight_meta", None)
-    if meta is not None:
+    if (meta is not None or packed) and not probe._dynamic:
         # This disposable metadata probe never runs a forward. Skip the threshold
-        # requirement only for a pin whose format/code geometry is validated below;
+        # requirement only for a validated packed weight or pin geometry;
         # actual planning must still validate its source before accepting native scales.
         probe._use_constant_amax = True
     native_weight_partition(probe, view)
@@ -472,7 +472,7 @@ def validate_native_weight_partition(quantizer, view):
         view.intervals(2 if packed else 1)
 
 
-def validate_tp_output_quantizer(quantizer, view):
+def validate_tp_output_quantizer(quantizer, view, *, has_bias=False):
     """Accept only output quantizers that need no reduction or field transport."""
     if quantizer is None or view.size == 1:
         return
@@ -481,6 +481,8 @@ def validate_tp_output_quantizer(quantizer, view):
             continue
         enabled = member.is_enabled and (member._if_quant or member._if_calib)
         if view.dim == 1:
+            if has_bias and member.rotate_is_enabled and not member.rotate_back_is_enabled:
+                raise ValueError("Rowwise TP output rotation must run after bias addition.")
             if enabled:
                 raise ValueError(
                     "Rowwise TP output quantization must run after the native reduction."

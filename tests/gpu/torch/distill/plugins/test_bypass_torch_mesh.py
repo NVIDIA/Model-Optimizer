@@ -421,7 +421,11 @@ def _torch_mesh_validation_worker(rank, size, failure):
         _tiny_model(),
         {"quant_cfg": [{"quantizer_name": "*", "enable": False}], "algorithm": None},
     )
-    layer = model.model.layers[0].self_attn.q_proj
+    layer = (
+        model.model.layers[0].self_attn.o_proj
+        if failure == "biased_rotation"
+        else model.model.layers[0].self_attn.q_proj
+    )
     quantizer = layer.weight_quantizer
     quantizer.set_from_attribute_config(
         QuantizerAttributeConfig(num_bits=(4, 3), axis=0, enable=True)
@@ -431,7 +435,16 @@ def _torch_mesh_validation_worker(rank, size, failure):
     with torch.no_grad():
         layer.weight.copy_(native.dequantize(scale=scale))
     pin_native_weight(quantizer, native, layer.weight)
-    if rank == 0:
+    if failure == "biased_rotation":
+        layer.bias = torch.nn.Parameter(torch.arange(32.0))
+        if rank == 0:
+            layer.output_quantizer.set_from_attribute_config(
+                QuantizerAttributeConfig(
+                    enable=False,
+                    rotate={"enable": True, "block_size": 32},
+                )
+            )
+    if rank == 0 and failure != "biased_rotation":
         if failure == "wrong_shape":
             quantizer._native_weight_meta["source_shape"] = (30, 32)
         else:
@@ -449,12 +462,14 @@ def _torch_mesh_validation_worker(rank, size, failure):
     dist.all_gather_object(errors, error)
     assert all(item is not None and item[0] == "ValueError" for item in errors), errors
     assert errors[0] == errors[1], errors
+    if failure == "biased_rotation":
+        assert "after bias addition" in errors[0][1]
     assert not hasattr(model, "_modelopt_bypass_torch_mesh")
     assert quantizer._native_weight_meta == metadata
     _assert_unchanged(model, snapshot)
 
 
-@pytest.mark.parametrize("failure", ["wrong_shape", "missing_codes"])
+@pytest.mark.parametrize("failure", ["wrong_shape", "missing_codes", "biased_rotation"])
 @pytest.mark.timeout(180)
 def test_raw_torch_mesh_validation_is_collective(bypass_cpu_workers, failure):
     pytest.importorskip("transformers", minversion="5.23")

@@ -295,7 +295,11 @@ def _validate_parameter_geometry(
     )
     if view is None:
         return
-    validate_tp_output_quantizer(getattr(module, "output_quantizer", None), view)
+    validate_tp_output_quantizer(
+        getattr(module, "output_quantizer", None),
+        view,
+        has_bias=getattr(module, "bias", None) is not None,
+    )
     quantizers_name, input_name = bindings[name]
     container = getattr(module, quantizers_name)
     members = (
@@ -309,9 +313,9 @@ def _validate_parameter_geometry(
         if quantizer.is_enabled:
             if quantizer.backend not in (None, "ggml"):
                 raise ValueError(f"Backend {quantizer.backend!r} requires a native TP partitioner.")
-            validate_native_weight_partition(quantizer, view)
+            validate_native_weight_partition(quantizer, view, packed=native is not None)
             if aliases is not None:
-                validate_tp_quantizer_aliases(quantizer, view, aliases)
+                validate_tp_quantizer_aliases(quantizer, view, aliases, packed=native is not None)
     activation = getattr(module, input_name, None)
     plan_tp_input_quantizer_fields(
         activation, view, {} if aliases is None else aliases, metadata_only=True

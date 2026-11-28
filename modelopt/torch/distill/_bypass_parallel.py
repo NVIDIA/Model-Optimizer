@@ -126,7 +126,7 @@ def _share_tp_quantizer_fields(quantizer, view, fields, aliases, *, partitioned_
 
 
 @torch.inference_mode(False)
-def validate_tp_quantizer_aliases(quantizer, view, aliases):
+def validate_tp_quantizer_aliases(quantizer, view, aliases, *, packed=False):
     """Check original field aliases against storage-free native ownership plans."""
     probe = copy.copy(quantizer)
     for attribute in ("_buffers", "_parameters"):
@@ -142,9 +142,11 @@ def validate_tp_quantizer_aliases(quantizer, view, aliases):
         )
     probe._fake_quant = True
     # Alias geometry is data-free; actual field planning validates source provenance.
-    probe.__dict__.pop("_native_weight_meta", None)
+    meta = probe.__dict__.pop("_native_weight_meta", None)
+    if (meta is not None or packed) and not probe._dynamic:
+        # Match the physical-geometry probe: actual planning still checks sources.
+        probe._use_constant_amax = True
     fields, _, _ = native_weight_partition(probe, view)
-    meta = getattr(quantizer, "_native_weight_meta", None)
     if meta is not None and tuple(meta["source_shape"]) != view.local_shape:
         # Pinned fields always carry the full ownership view in their alias signature.
         # Comparing their aliases needs no code decoding or source fingerprint reads.
@@ -261,7 +263,11 @@ def _tp_quantizer_layouts(model):
             if view is None:
                 continue
             fused = weight.ndim == 3 and weight_name != "weight"
-            validate_tp_output_quantizer(getattr(module, "output_quantizer", None), view)
+            validate_tp_output_quantizer(
+                getattr(module, "output_quantizer", None),
+                view,
+                has_bias=getattr(module, "bias", None) is not None,
+            )
             local = None
             members = (
                 list(container)

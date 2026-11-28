@@ -26,6 +26,7 @@ from torch.nn import functional as F
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
+from modelopt.torch.distill._bypass_parallel import validate_tp_quantizer_aliases
 from modelopt.torch.quantization import repair_partition
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.ggml import GGML_FORMAT_REGISTRY, IQ_FORMAT_REGISTRY
@@ -461,7 +462,8 @@ def test_dynamic_partition_derives_unconsumed_block_axes(reduced, dim):
 @pytest.mark.parametrize("format_name", ["fp8", "nvfp4"])
 @pytest.mark.parametrize("dim", [0, 1])
 @pytest.mark.parametrize("failure", [None, "missing_codes", "incomplete_row", "wrong_shape"])
-def test_native_partition_preflight_uses_only_metadata(format_name, dim, failure):
+@pytest.mark.parametrize("dynamic", [False, True])
+def test_native_partition_preflight_uses_only_metadata(format_name, dim, failure, dynamic):
     weight = torch.randn(8, 32)
     if format_name == "fp8":
         native, scale = FP8QTensor.quantize(weight, axis=0)
@@ -473,7 +475,11 @@ def test_native_partition_preflight_uses_only_metadata(format_name, dim, failure
             "num_bits": (2, 1),
             "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
         }
-    quantizer = TensorQuantizer(QuantizerAttributeConfig(**attributes, fake_quant=False))
+    quantizer = TensorQuantizer(
+        QuantizerAttributeConfig(
+            **attributes, fake_quant=False, type="dynamic" if dynamic else "static"
+        )
+    )
     quantizer._set_buffer("_scale", scale)
     if double_scale is not None:
         quantizer._set_buffer("_double_scale", double_scale)
@@ -492,11 +498,16 @@ def test_native_partition_preflight_uses_only_metadata(format_name, dim, failure
     parameters = dict(quantizer.named_parameters())
     metadata = copy.deepcopy(quantizer._native_weight_meta)
     view = NativeWeightPartition((8, 32), dim, 1, 2)
-    if failure is None:
+    accepted = failure is None and (not dynamic or (format_name == "fp8" and dim == 0))
+    if accepted:
         validate_native_weight_partition(quantizer, view)
+        validate_tp_quantizer_aliases(quantizer, view, {})
     else:
         with pytest.raises(ValueError):
             validate_native_weight_partition(quantizer, view)
+    if failure is None and not accepted:
+        with pytest.raises(ValueError):
+            validate_tp_quantizer_aliases(quantizer, view, {})
     assert quantizer._native_weight_meta == metadata
     assert not quantizer.fake_quant
     assert quantizer._buffers.keys() == buffers.keys()
@@ -582,3 +593,24 @@ def test_rowwise_activation_partition_refuses_tied_fields(field):
     assert quantizer._buffers.keys() == before.keys()
     assert all(quantizer._buffers[name] is value for name, value in before.items())
     assert not hasattr(quantizer, "_native_tp_activation_layout")
+
+
+@pytest.mark.parametrize("biased", [False, True])
+@pytest.mark.parametrize("rotate_back", [False, True])
+def test_rowwise_output_rotation_preserves_bias_contract(biased, rotate_back):
+    quantizer = TensorQuantizer(
+        QuantizerAttributeConfig(
+            enable=False,
+            rotate={
+                "enable": True,
+                "mode": "rotate_back" if rotate_back else "rotate",
+                "block_size": 8,
+            },
+        )
+    )
+    view = NativeWeightPartition((8, 16), 1, 0, 2)
+    if biased and not rotate_back:
+        with pytest.raises(ValueError, match="after bias addition"):
+            validate_tp_output_quantizer(quantizer, view, has_bias=biased)
+    else:
+        validate_tp_output_quantizer(quantizer, view, has_bias=biased)
