@@ -16,10 +16,20 @@
 """Tests for the FP16 Q/DQ scale cast-folding helpers in ``modelopt.onnx.utils``."""
 
 import numpy as np
+import onnx
 import pytest
+import torch
+import torch.nn as nn
 from onnx import TensorProto, helper, numpy_helper
+from onnxconverter_common import convert_float_to_float16
 
-from modelopt.onnx.utils import fold_dq_fp32_to_fp16_casts, fold_q_fp16_to_fp32_casts
+import modelopt.torch.quantization as mtq
+from modelopt.onnx.utils import (
+    fold_dq_fp32_to_fp16_casts,
+    fold_q_fp16_to_fp32_casts,
+    fold_qdq_scale_fp16_to_fp32_casts,
+)
+from modelopt.torch._deploy.utils import OnnxBytes, get_onnx_bytes_and_metadata
 
 
 def _dq_cast_model(opset):
@@ -97,3 +107,81 @@ def test_fold_is_noop_below_min_opset(fold_fn, build_model, scale_name):
     assert "Cast" in {n.op_type for n in folded.graph.node}
     scale = next(i for i in folded.graph.initializer if i.name == scale_name)
     assert scale.data_type == TensorProto.FLOAT
+
+
+def test_fold_q_ignores_non_fp16_source_cast():
+    """``Cast(INT64→FP32) → Q`` must not be bypassed by ``fold_q_fp16_to_fp32_casts``."""
+    nodes = [
+        helper.make_node("Cast", ["idx"], ["c_out"], "cast_i64", to=TensorProto.FLOAT),
+        helper.make_node("QuantizeLinear", ["c_out", "scale", "zp"], ["q_out"], "q"),
+    ]
+    inits = [
+        numpy_helper.from_array(np.array(0.1, dtype=np.float32), "scale"),
+        numpy_helper.from_array(np.array(0, dtype=np.int8), "zp"),
+    ]
+    model = helper.make_model(
+        helper.make_graph(
+            nodes,
+            "g_i64",
+            [helper.make_tensor_value_info("idx", TensorProto.INT64, [4])],
+            [helper.make_tensor_value_info("q_out", TensorProto.INT8, [4])],
+            initializer=inits,
+        ),
+        opset_imports=[helper.make_opsetid("", 21)],
+        ir_version=10,
+    )
+    folded = fold_q_fp16_to_fp32_casts(model)
+    onnx.checker.check_model(folded, full_check=True)
+    assert "Cast" in {n.op_type for n in folded.graph.node}
+
+
+def test_fold_qdq_scale_preserves_fp32_scale_when_q_input_remains_fp32():
+    """When ``Div(FP32) → Q`` stays FP32, ``fold_qdq_scale_fp16_to_fp32_casts`` must keep Q's scale FP32."""
+    nodes = [
+        helper.make_node("Div", ["x", "denom"], ["div_out"], "div0"),
+        helper.make_node("QuantizeLinear", ["div_out", "scale", "zp"], ["q_out"], "q"),
+        helper.make_node("DequantizeLinear", ["q_out", "scale", "zp"], ["y"], "dq"),
+    ]
+    inits = [
+        numpy_helper.from_array(np.array(2.0, dtype=np.float32), "denom"),
+        numpy_helper.from_array(np.array(0.1, dtype=np.float32), "scale"),
+        numpy_helper.from_array(np.array(0, dtype=np.int8), "zp"),
+    ]
+    fp32_model = helper.make_model(
+        helper.make_graph(
+            nodes,
+            "g_div_q",
+            [helper.make_tensor_value_info("x", TensorProto.FLOAT, [2, 4])],
+            [helper.make_tensor_value_info("y", TensorProto.FLOAT, [2, 4])],
+            initializer=inits,
+        ),
+        opset_imports=[helper.make_opsetid("", 21)],
+        ir_version=10,
+    )
+    fp16_model = convert_float_to_float16(
+        fp32_model,
+        keep_io_types=False,
+        disable_shape_infer=True,
+        check_fp16_ready=False,
+        op_block_list=["QuantizeLinear", "DequantizeLinear", "Div"],
+    )
+    fp16_model = fold_dq_fp32_to_fp16_casts(fp16_model)
+    fp16_model = fold_q_fp16_to_fp32_casts(fp16_model)
+    fp16_model = fold_qdq_scale_fp16_to_fp32_casts(fp16_model)
+    fp16_model.ir_version = 10
+    onnx.checker.check_model(fp16_model, full_check=True)
+
+
+def test_int8_torch_onnx_fp16_export_passes_full_check(tmp_path):
+    """Regression test: INT8 PyTorch model exported with weights_dtype='fp16' must pass ONNX full_check."""
+    torch.manual_seed(0)
+    model = nn.Sequential(nn.Linear(16, 8, bias=False)).eval()
+    x = torch.randn(2, 16, dtype=torch.float32)
+    mtq.quantize(model, mtq.INT8_DEFAULT_CFG, forward_loop=lambda m: m(x))
+
+    onnx_bytes, _ = get_onnx_bytes_and_metadata(
+        model, (x,), weights_dtype="fp16", model_name="int8_fp16"
+    )
+    OnnxBytes.from_bytes(onnx_bytes).write_to_disk(str(tmp_path), clean_dir=True)
+    exported = onnx.load(str(tmp_path / "int8_fp16.onnx"))
+    onnx.checker.check_model(exported, full_check=True)
