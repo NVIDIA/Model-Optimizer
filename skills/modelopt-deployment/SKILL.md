@@ -1,6 +1,6 @@
 ---
 name: modelopt-deployment
-description: Serve a quantized or unquantized LLM checkpoint as an OpenAI-compatible API endpoint using vLLM, SGLang, or TRT-LLM. Use when user says "deploy model", "serve model", "start vLLM server", "launch SGLang", "TRT-LLM deploy", "AutoDeploy", "benchmark throughput", "serve checkpoint", or needs an inference endpoint from a HuggingFace or ModelOpt-quantized checkpoint. Do NOT use for quantizing models (use modelopt-ptq) or evaluating accuracy (use modelopt-evaluation).
+description: Serve a quantized or unquantized LLM checkpoint as an OpenAI-compatible API endpoint using vLLM, SGLang, or TRT-LLM. Use when user says "deploy model", "serve model", "start vLLM server", "launch SGLang", "TRT-LLM deploy", "AutoDeploy", "benchmark throughput", "serve checkpoint", or needs an inference endpoint from a HuggingFace or ModelOpt-quantized checkpoint. Also use to derive and record the serving deployment (image, parallelism, serve flags, parser, chat template) that an evaluation tool needs from its caller. Do NOT use for quantizing models (use modelopt-ptq) or evaluating accuracy (use modelopt-evaluation).
 license: Apache-2.0
 ---
 
@@ -206,6 +206,17 @@ use **AIPerf** (Apache-2.0, OpenAI-compatible client benchmark). See
 `references/benchmarking.md` for install, the pre-benchmark coherence gate, the
 `aiperf profile` flags (notably `--extra-inputs ignore_eos:true`), suggested
 token shapes, and how to read `profile_export_aiperf.json`.
+
+### 5c. Serving record for an evaluation tool
+
+Before an accuracy evaluation of a checkpoint, derive the serving deployment explicitly and write it down. An evaluation tool that takes a deployment from its caller needs this record and will not guess serving flags.
+
+1. Read the model's vendor serving recipe (the recipe page for the model on recipes.vllm.ai, or the model card) and the reference for the framework that serves the checkpoint (`references/vllm.md`, `references/sglang.md` or `references/trtllm.md`). Use that framework's recipe or cookbook where the vendor publishes one. Take parallelism, serving image or version, reasoning and tool parsers, chat template and family-specific flags from them. Say which source each value came from.
+2. Serve the checkpoint once with those values (step 4) and pass step 5, unless the evaluation tool's own canary serves it with the same values before any scored run. Do not start a scored evaluation on an unverified deployment. Check that the checkpoint's chat template parses under the serving frontend and that every flag is accepted by it; if the vendor recipe lists a frontend option, use it, and when the template or a flag is rejected, take the alternative frontend from the recipe and update the record.
+3. Write the record: checkpoint path and revision, serving image, framework version, tensor/data parallel sizes, the full serve flags, parser and chat template, and the source of each value. When a quantizer's checkpoint validation (step 5) already served the checkpoint, write the deployment it used in this format and give it to the evaluation of that checkpoint; otherwise write the record next to the evaluation artifacts.
+4. Give the record to the evaluation tool. For a baseline and its quantized candidate, change only what the quantization requires and list each difference.
+
+A tool that composes its own deployment (as NEL does) keeps doing so. The record is then the cross-check of its resolved settings, not a second deployment.
 
 ### 6. Remote deployment (SSH/SLURM)
 
