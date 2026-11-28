@@ -32,6 +32,7 @@ from modelopt.torch.utils import get_unwrapped_name
 from .config import (
     QuantizeConfig,
     QuantizerAttributeConfig,
+    QuantizerCfgEntry,
     RawQuantizeQuantCfgType,
     _QuantizeExportConfig,
     normalize_quant_cfg_list,
@@ -309,6 +310,16 @@ def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: RawQuantizeQuantCfgT
 
     See :ref:`quant-cfg` for the full format reference and common patterns.
     """
+    _apply_quantizer_by_cfg(quant_model, quant_cfg)
+
+
+def _apply_quantizer_by_cfg(
+    quant_model: nn.Module,
+    quant_cfg: RawQuantizeQuantCfgType,
+    *,
+    resolved_entries: list[tuple[str, QuantizerCfgEntry]] | None = None,
+):
+    """Apply config, optionally recording concrete quantizer names matched by each rule."""
     quant_cfg = normalize_quant_cfg_list(quant_cfg)
 
     for entry in quant_cfg:
@@ -327,10 +338,16 @@ def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: RawQuantizeQuantCfgT
         else:
             parent_class = None
 
+        matched_names = [] if resolved_entries is not None else None
+
         if cfg is None:
             # No cfg: only toggle the enable state, leave all other attributes unchanged.
             set_quantizer_attributes_partial(
-                quant_model, quantizer_name, {"enable": enable}, parent_class
+                quant_model,
+                quantizer_name,
+                {"enable": enable},
+                parent_class,
+                _matched_names=matched_names,
             )
         else:
             # Has cfg: apply full replacement with the explicit enable value.
@@ -345,7 +362,15 @@ def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: RawQuantizeQuantCfgT
                     else QuantizerAttributeConfig(**c, enable=enable)
                     for c in cfg
                 ]
-            set_quantizer_attributes_full(quant_model, quantizer_name, attributes, parent_class)
+            set_quantizer_attributes_full(
+                quant_model,
+                quantizer_name,
+                attributes,
+                parent_class,
+                _matched_names=matched_names,
+            )
+        if resolved_entries is not None and matched_names is not None:
+            resolved_entries.extend((name, entry) for name in matched_names)
 
 
 _FUSED_EXPERTS_QUANTIZER_LIST_RE = re.compile(
@@ -409,6 +434,8 @@ def set_quantizer_attributes_full(
     wildcard_or_filter_func: str | Callable,
     attributes: QuantizerAttributeConfig | list[QuantizerAttributeConfig],
     parent_class: type[nn.Module] | None = None,
+    *,
+    _matched_names: list[str] | None = None,
 ):
     """Set quantizer attributes by wildcard or filter function, fully overwriting existing attributes.
 
@@ -451,6 +478,8 @@ def set_quantizer_attributes_full(
         )
     for name, module in quant_model.named_modules():
         if _match_quantizer(wildcard_or_filter_func, name, module, parent_class, quant_model):
+            if _matched_names is not None:
+                _matched_names.append(name)
             if isinstance(attributes, list):
                 if not isinstance(module, SequentialQuantizer):
                     parent_module = quant_model.get_submodule(name.rpartition(".")[0])
@@ -479,6 +508,8 @@ def set_quantizer_attributes_partial(
     wildcard_or_filter_func: str | Callable,
     partial_attributes: dict[str, Any] | list[dict[str, Any]],
     parent_class: type[nn.Module] | None = None,
+    *,
+    _matched_names: list[str] | None = None,
 ):
     """Update a subset of quantizer attributes by wildcard or filter function, merging with existing attributes.
 
@@ -523,6 +554,8 @@ def set_quantizer_attributes_partial(
 
     for name, module in quant_model.named_modules():
         if _match_quantizer(wildcard_or_filter_func, name, module, parent_class, quant_model):
+            if _matched_names is not None:
+                _matched_names.append(name)
             module = cast("TensorQuantizer | SequentialQuantizer", module)  # for type checker
             if isinstance(partial_attributes, list):
                 if not isinstance(module, SequentialQuantizer):

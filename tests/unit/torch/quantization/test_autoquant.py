@@ -2085,6 +2085,109 @@ def test_get_auto_quantize_config(method):
     assert output is not None
 
 
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        [{"quantizer_name": "*w[12]*weight_quantizer", "cfg": {"num_bits": 8, "axis": None}}],
+        [{"quantizer_name": "*mlp*weight_quantizer", "cfg": {"num_bits": 8, "axis": None}}],
+        [
+            {"quantizer_name": "*weight_quantizer", "enable": False},
+            {"quantizer_name": "*weight_quantizer", "enable": True},
+        ],
+        [
+            {
+                "quantizer_name": "*weight_quantizer",
+                "parent_class": "nn.Linear",
+                "cfg": {"num_bits": 8, "axis": None},
+            },
+        ],
+        [
+            {
+                "quantizer_name": "weight_quantizer",
+                "cfg": [{"num_bits": 4, "axis": 0}, {"num_bits": 8}],
+            },
+            {"quantizer_name": "weight_quantizer.1", "enable": False},
+        ],
+    ],
+)
+def test_get_auto_quantize_config_replays_resolved_quantizer_rules(overrides):
+    recipe = QuantRecipe(
+        {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+                *overrides,
+            ],
+        },
+        name="replay",
+    )
+    model = mtq.quantize(TransformerBlock(), mtq.INT8_DEFAULT_CFG)
+    module = model.mlp
+    hparam = QuantRecipeHparam([recipe], quant_modules=[module], quant_module_names=["mlp"])
+    module._register_hparam("quant_recipe", hparam)
+    hparam.active = recipe
+
+    searcher = AutoQuantizeGradientSearcher()
+    searcher.reset_search()
+    searcher.model = model
+    searcher.initialize_candidate_stats()
+    state = {
+        "candidate_stats": searcher.candidate_stats,
+        "best": {"recipe": {"mlp.quant_recipe": recipe}},
+    }
+    # Verify the recorded instructions survive a safe checkpoint round trip.
+    buffer = io.BytesIO()
+    safe_save(state, buffer)
+    buffer.seek(0)
+    config = mtq.get_auto_quantize_config(safe_load(buffer), algorithm="max")
+    replayed = mtq.quantize(TransformerBlock(), config).mlp.weight_quantizer
+
+    expected = module.weight_quantizer
+    assert type(replayed) is type(expected)
+    if isinstance(expected, mtq.nn.SequentialQuantizer):
+        pairs = zip(replayed, expected, strict=True)
+    else:
+        pairs = [(replayed, expected)]
+    for actual, searched in pairs:
+        assert actual.is_enabled == searched.is_enabled
+        assert actual.num_bits == searched.num_bits
+        assert actual.axis == searched.axis
+
+
+def test_get_auto_quantize_config_replays_no_quant_over_global_rules():
+    recipe = QuantRecipe(
+        {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8}},
+                {"quantizer_name": "*mlp*", "cfg": {"num_bits": 4}},
+            ],
+        },
+        name="global",
+    )
+    no_quant = QuantRecipe(None)
+    model = mtq.quantize(TransformerBlock(), mtq.INT8_DEFAULT_CFG)
+    for name, module, active in [
+        ("attn.q_proj", model.attn.q_proj, recipe),
+        ("mlp", model.mlp, no_quant),
+    ]:
+        hparam = QuantRecipeHparam([recipe], quant_modules=[module], quant_module_names=[name])
+        module._register_hparam("quant_recipe", hparam)
+        hparam.active = active
+    searcher = AutoQuantizeGradientSearcher()
+    searcher.reset_search()
+    searcher.model = model
+    searcher.initialize_candidate_stats()
+    state = {
+        "candidate_stats": searcher.candidate_stats,
+        "best": {"recipe": {"attn.q_proj.quant_recipe": recipe, "mlp.quant_recipe": no_quant}},
+    }
+    config = mtq.get_auto_quantize_config(state, algorithm="max")
+    replayed = mtq.quantize(TransformerBlock(), config)
+    assert replayed.attn.q_proj.weight_quantizer.is_enabled
+    assert not replayed.mlp.weight_quantizer.is_enabled
+
+
 def test_get_auto_quantize_config_keeps_selected_lm_head_enabled():
     recipe_config = copy.deepcopy(mtq.FP8_DEFAULT_CFG)
     recipe_config["quant_cfg"].append({"quantizer_name": "*lm_head*", "enable": False})
